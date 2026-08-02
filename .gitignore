@@ -1,0 +1,24 @@
+# Compiled binaries
+/wintermute
+/wintermuted
+*.exe
+*.exe~
+
+# Local state: SQLite database and its write-ahead log
+*.db
+*.db-shm
+*.db-wal
+
+# Secrets: API keys and client tokens
+.env
+.env.*
+config.json
+
+# Editors / tooling
+.idea/
+.vscode/
+.claude/settings.local.json
+
+# Go
+*.test
+*.out

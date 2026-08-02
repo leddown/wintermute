@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Wintermute</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="gate" class="gate">
+    <form id="gate-form" class="gate-card">
+      <h1>Wintermute</h1>
+      <p class="muted">Paste a client token to connect. Create one on the server with
+        <code>wintermuted -add-client name -kind browser</code>.</p>
+      <input id="token" type="password" placeholder="wm_…" autocomplete="off" spellcheck="false" required>
+      <button type="submit">Connect</button>
+      <p id="gate-error" class="error" hidden></p>
+    </form>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <button id="menu" class="icon-btn" aria-label="Sessions">☰</button>
+      <div class="title">
+        <strong>Wintermute</strong>
+        <span id="model" class="muted"></span>
+      </div>
+      <button id="new-session" class="ghost-btn">New</button>
+    </header>
+
+    <div class="body">
+      <aside id="sidebar" class="sidebar">
+        <div class="sidebar-head">
+          <span class="muted">Sessions</span>
+          <button id="logout" class="link-btn">Sign out</button>
+        </div>
+        <ul id="sessions"></ul>
+      </aside>
+
+      <main class="chat">
+        <div id="messages" class="messages">
+          <div class="empty muted">Ask about your media library, or anything else.</div>
+        </div>
+        <form id="composer" class="composer">
+          <textarea id="input" rows="1" placeholder="Message Wintermute…" autocomplete="off"></textarea>
+          <button id="send" type="submit" aria-label="Send">↑</button>
+        </form>
+        <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
+      </main>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
