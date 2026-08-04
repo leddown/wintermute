@@ -9,10 +9,9 @@ import (
 	"wintermute/internal/tool"
 )
 
-// lookupSchema is the JSON Schema shown to the model. It is written to steer a
-// small model towards the right shape: kind is enumerated, and the season and
-// episode conditions are stated in the descriptions because most local models
-// ignore JSON Schema conditionals.
+// lookupSchema is the JSON Schema shown to the model. kind is enumerated, and
+// the season and episode conditions are restated in the descriptions because
+// JSON Schema conditionals are not reliably honoured.
 const lookupSchema = `{
   "type": "object",
   "properties": {

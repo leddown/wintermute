@@ -1,9 +1,9 @@
 // Package llm abstracts the language model backing the assistant.
 //
-// The only implementation today speaks the OpenAI-compatible chat completions
-// API, which is what llama.cpp's server, Ollama, vLLM, LM Studio and LocalAI
-// all expose — so a single provider covers whichever runtime is installed on
-// the host. Nothing outside this package should depend on that wire format.
+// The only implementation today speaks Anthropic's Messages API through the
+// official Go SDK. The message shape here is deliberately flat — a role, some
+// text, and tool calls — rather than Anthropic's content blocks, so nothing
+// outside this package depends on that wire format.
 package llm
 
 import (
@@ -35,6 +35,13 @@ type Message struct {
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// IsError marks a tool result the tool itself reported as a failure.
 	IsError bool `json:"is_error,omitempty"`
+
+	// Thinking holds the model's reasoning blocks exactly as the provider
+	// returned them, opaque to everything outside this package. Claude thinks
+	// by default, and the API rejects a tool-use turn whose assistant message
+	// dropped the thinking that produced the call — so these have to survive
+	// the round trip through the transcript, unedited.
+	Thinking []json.RawMessage `json:"thinking,omitempty"`
 }
 
 // UserMessage builds a user-authored message.

@@ -35,7 +35,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, err
 	}
 
-	provider := llm.NewOpenAICompatible(cfg.LLMBaseURL, cfg.LLMModel, cfg.LLMAPIKey, cfg.LLMTimeout)
+	provider := llm.NewAnthropic(cfg.LLMAPIKey, cfg.LLMModel, cfg.LLMBaseURL, cfg.LLMMaxTokens, cfg.LLMTimeout)
 
 	tools := tool.NewRegistry()
 	providers := metadataProviders(cfg, log)
@@ -54,9 +54,10 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		http: &http.Server{
 			Addr:    cfg.Addr,
 			Handler: srv.Handler(),
-			// A turn can block on local inference for a long time, so no
-			// write timeout is set; read and idle timeouts still bound the
-			// cost of a stalled or abandoned connection.
+			// A turn can block for a long time while the model thinks and
+			// works through tool calls, so no write timeout is set; read and
+			// idle timeouts still bound the cost of a stalled or abandoned
+			// connection.
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		},
@@ -93,7 +94,7 @@ func (a *App) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
 		a.log.Info("wintermute listening",
-			"addr", a.cfg.Addr, "llm", a.cfg.LLMBaseURL, "model", a.cfg.LLMModel)
+			"addr", a.cfg.Addr, "model", a.cfg.LLMModel)
 		err := a.http.ListenAndServe()
 		if errors.Is(err, http.ErrServerClosed) {
 			err = nil

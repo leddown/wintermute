@@ -120,10 +120,18 @@ func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...ll
 			}
 			calls = string(buf)
 		}
+		var thinking string
+		if len(m.Thinking) > 0 {
+			buf, err := json.Marshal(m.Thinking)
+			if err != nil {
+				return fmt.Errorf("encode thinking: %w", err)
+			}
+			thinking = string(buf)
+		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, is_error, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-			sessionID, seq, string(m.Role), m.Content, calls, m.ToolCallID, m.IsError, now)
+			`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, is_error, thinking, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sessionID, seq, string(m.Role), m.Content, calls, m.ToolCallID, m.IsError, thinking, now)
 		if err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -138,7 +146,7 @@ func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...ll
 // Messages returns a session's full transcript in order.
 func (s *Store) Messages(ctx context.Context, sessionID string) ([]llm.Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT role, content, tool_calls, tool_call_id, is_error FROM messages
+		`SELECT role, content, tool_calls, tool_call_id, is_error, thinking FROM messages
 		 WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
@@ -148,8 +156,8 @@ func (s *Store) Messages(ctx context.Context, sessionID string) ([]llm.Message, 
 	var out []llm.Message
 	for rows.Next() {
 		var m llm.Message
-		var role, calls string
-		if err := rows.Scan(&role, &m.Content, &calls, &m.ToolCallID, &m.IsError); err != nil {
+		var role, calls, thinking string
+		if err := rows.Scan(&role, &m.Content, &calls, &m.ToolCallID, &m.IsError, &thinking); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		m.Role = llm.Role(role)
@@ -159,6 +167,13 @@ func (s *Store) Messages(ctx context.Context, sessionID string) ([]llm.Message, 
 				return nil, fmt.Errorf("decode tool calls: %w", err)
 			}
 			m.ToolCalls = parsed
+		}
+		if thinking != "" {
+			var parsed []json.RawMessage
+			if err := json.Unmarshal([]byte(thinking), &parsed); err != nil {
+				return nil, fmt.Errorf("decode thinking: %w", err)
+			}
+			m.Thinking = parsed
 		}
 		out = append(out, m)
 	}

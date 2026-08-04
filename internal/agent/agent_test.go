@@ -197,7 +197,7 @@ func TestClientToolsAreScopedToTheCaller(t *testing.T) {
 	}
 }
 
-// Small local models sometimes invent tool names. The turn must recover rather
+// A model can invent a tool name. The turn must recover rather
 // than fail, so the model gets a chance to correct itself.
 func TestUnknownToolIsFedBackToTheModel(t *testing.T) {
 	p := &scriptedProvider{responses: []llm.Response{

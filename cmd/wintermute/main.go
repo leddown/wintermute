@@ -1,7 +1,8 @@
 // Command wintermute is the desktop harness. It connects to a Wintermute
 // server, tells it which actions this machine can perform, and executes the
 // ones the user approves — reading network shares and renaming files locally,
-// so nothing but filenames and metadata ever leaves the machine.
+// so nothing but filenames and metadata ever leaves the machine. Those do
+// leave: the server sends them on to Claude.
 package main
 
 import (

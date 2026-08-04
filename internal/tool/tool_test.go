@@ -88,7 +88,7 @@ func TestDefinitionsAreSortedAndDefaulted(t *testing.T) {
 		}
 	}
 	// An omitted schema becomes a valid empty object rather than null, which
-	// some OpenAI-compatible servers reject.
+	// the Messages API rejects.
 	if !json.Valid(defs[0].Parameters) {
 		t.Errorf("default parameters not valid JSON: %q", defs[0].Parameters)
 	}

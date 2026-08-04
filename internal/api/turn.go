@@ -14,7 +14,7 @@ import (
 	"wintermute/internal/tool"
 )
 
-// toolNamePattern matches what the OpenAI-compatible tool schema accepts. It
+// toolNamePattern matches what the Messages API accepts for a tool name. It
 // also keeps a client from declaring a name that would collide confusingly
 // with a server tool.
 var toolNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)

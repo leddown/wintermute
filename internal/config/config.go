@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"wintermute/internal/llm"
 )
 
 // Config is the server's runtime configuration.
@@ -18,12 +20,18 @@ type Config struct {
 	// DatabasePath is the SQLite file backing sessions and the audit log.
 	DatabasePath string
 
-	// LLMBaseURL points at an OpenAI-compatible API root.
+	// LLMModel is the Claude model to use.
+	LLMModel string
+	// LLMAPIKey is the Anthropic API key.
+	LLMAPIKey string
+	// LLMBaseURL overrides the Anthropic API root. Empty means the default;
+	// it exists for proxies and for pointing tests at a stub.
 	LLMBaseURL string
-	LLMModel   string
-	LLMAPIKey  string
-	// LLMTimeout bounds a single completion. Local inference is slow; this is
-	// deliberately generous.
+	// LLMMaxTokens bounds a single response. It covers the model's thinking as
+	// well as its reply, so it is set well above the length of an answer.
+	LLMMaxTokens int
+	// LLMTimeout bounds a single completion. A turn that thinks and calls
+	// several tools can run for a while; this is deliberately generous.
 	LLMTimeout time.Duration
 
 	// MaxToolIterations caps how many tool round-trips one turn may take
@@ -54,13 +62,18 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	maxTokens, err := envInt("WINTERMUTE_LLM_MAX_TOKENS", 16000)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
 		Addr:              envString("WINTERMUTE_ADDR", ":8080"),
 		DatabasePath:      envString("WINTERMUTE_DB", "wintermute.db"),
-		LLMBaseURL:        envString("WINTERMUTE_LLM_BASE_URL", "http://localhost:11434/v1"),
-		LLMModel:          envString("WINTERMUTE_LLM_MODEL", ""),
-		LLMAPIKey:         os.Getenv("WINTERMUTE_LLM_API_KEY"),
+		LLMModel:          envString("WINTERMUTE_LLM_MODEL", llm.DefaultModel),
+		LLMAPIKey:         os.Getenv("ANTHROPIC_API_KEY"),
+		LLMBaseURL:        os.Getenv("ANTHROPIC_BASE_URL"),
+		LLMMaxTokens:      maxTokens,
 		LLMTimeout:        timeout,
 		MaxToolIterations: iterations,
 		TMDBAPIKey:        os.Getenv("TMDB_API_KEY"),
@@ -69,11 +82,14 @@ func Load() (*Config, error) {
 		OMDBAPIKey:        os.Getenv("OMDB_API_KEY"),
 	}
 
-	if cfg.LLMModel == "" {
-		return nil, errors.New("WINTERMUTE_LLM_MODEL is required (the model name your local runtime serves)")
+	if cfg.LLMAPIKey == "" {
+		return nil, errors.New("ANTHROPIC_API_KEY is required")
 	}
 	if cfg.MaxToolIterations < 1 {
 		return nil, errors.New("WINTERMUTE_MAX_TOOL_ITERATIONS must be at least 1")
+	}
+	if cfg.LLMMaxTokens < 1 {
+		return nil, errors.New("WINTERMUTE_LLM_MAX_TOKENS must be at least 1")
 	}
 	return cfg, nil
 }

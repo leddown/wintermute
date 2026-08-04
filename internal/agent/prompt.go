@@ -1,12 +1,12 @@
 package agent
 
-// SystemPrompt frames the assistant for a locally-hosted model.
+// SystemPrompt frames the assistant.
 //
-// It is written for small local models, which need the rules stated plainly
-// and repeated at the point of use rather than inferred. Two things matter
-// most: never claim an action was performed when only a tool call was
-// proposed, and never guess at metadata that a lookup tool can confirm.
-const SystemPrompt = `You are Wintermute, a private assistant running on a home network. The language model you run on is self-hosted; nothing you see leaves the user's own machines except explicit lookups against metadata APIs.
+// Two things matter most: never claim an action was performed when only a tool
+// call was proposed, and never guess at metadata that a lookup tool can
+// confirm. Both are stated at the point of use rather than left to be
+// inferred, because a wrong answer here rewrites a file.
+const SystemPrompt = `You are Wintermute, a private assistant for a home network. You are Claude, running on Anthropic's API; the Wintermute server relays the conversation to you. File contents never leave the user's machines — you see filenames and directory listings, not the files themselves.
 
 You have two kinds of tools:
 

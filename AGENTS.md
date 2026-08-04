@@ -102,14 +102,16 @@ When you touch those structs:
 
 ## Dependencies
 
-- Prefer the standard library. There is exactly one direct third-party
-  dependency: `modernc.org/sqlite` (pure-Go SQLite, so the binaries stay
-  cgo-free and cross-compile). Everything else in `go.mod` is transitive.
+- Prefer the standard library. There are exactly two direct third-party
+  dependencies: `modernc.org/sqlite` (pure-Go SQLite, so the binaries stay
+  cgo-free and cross-compile) and `github.com/anthropics/anthropic-sdk-go`.
+  Everything else in `go.mod` is transitive.
 - **Don't introduce a dependency that requires cgo.** It would break Windows
   cross-compilation of the client.
-- The LLM is reached over a plain OpenAI-compatible HTTP API written against
-  `net/http` — no vendor SDK. Keep it that way; the point is to run whatever
-  model the user hosts.
+- The model is reached through the official Anthropic Go SDK, and only from
+  `internal/llm`. Don't hand-roll the Messages API wire format, and don't let
+  the SDK's types leak past the `llm.Provider` interface — the client binary
+  must not end up linking it.
 - When adding a dependency, run `go mod tidy` and commit the resulting
   `go.mod`/`go.sum` changes together with the code that needs them.
 - Don't vendor dependencies.

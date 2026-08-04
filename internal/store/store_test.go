@@ -152,6 +152,9 @@ func TestTranscriptRoundTrip(t *testing.T) {
 		{
 			Role:    llm.RoleAssistant,
 			Content: "Looking it up.",
+			Thinking: []json.RawMessage{
+				json.RawMessage(`{"type":"thinking","thinking":"check the title","signature":"sig"}`),
+			},
 			ToolCalls: []tool.Call{
 				{ID: "call_1", Name: "lookup_metadata", Input: json.RawMessage(`{"kind":"movie"}`)},
 			},
@@ -180,6 +183,14 @@ func TestTranscriptRoundTrip(t *testing.T) {
 	}
 	if !got[2].IsError || got[2].ToolCallID != "call_1" {
 		t.Errorf("tool result metadata lost: %+v", got[2])
+	}
+	// Thinking must come back byte-identical: the Messages API validates the
+	// block on the next turn, so a re-encoded one is not good enough.
+	if len(got[1].Thinking) != 1 {
+		t.Fatalf("thinking did not survive the round trip: %+v", got[1].Thinking)
+	}
+	if string(got[1].Thinking[0]) != string(want[1].Thinking[0]) {
+		t.Errorf("thinking = %s, want %s", got[1].Thinking[0], want[1].Thinking[0])
 	}
 }
 

@@ -1,5 +1,5 @@
-// Command wintermuted is the Wintermute server: it fronts a locally-hosted
-// language model, runs the assistant's turn loop, and serves both the JSON API
+// Command wintermuted is the Wintermute server: it fronts Claude via the
+// Anthropic API, runs the assistant's turn loop, and serves both the JSON API
 // used by the desktop client and the embedded browser UI.
 package main
 

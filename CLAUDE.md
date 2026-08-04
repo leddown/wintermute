@@ -4,13 +4,13 @@ Guidance for Claude Code (and other agents) working in this repository.
 
 ## Project Overview
 
-`wintermute` is a Go module (`go 1.25.12`) that wraps a **self-hosted LLM**
-so it can act on a home network. It is two binaries plus a browser UI:
+`wintermute` is a Go module (`go 1.25.12`) that wraps **Claude** so it can act
+on a home network. It is two binaries plus a browser UI:
 
-- **`cmd/wintermuted`** — the server. Runs on the Linux host that also runs
-  the model, talks to it over an OpenAI-compatible HTTP API, owns the
-  conversation transcript, and executes server-side tools (metadata
-  lookups). It also serves the embedded browser UI.
+- **`cmd/wintermuted`** — the server. Runs on a Linux host on the network,
+  calls Claude through the Anthropic Messages API, owns the conversation
+  transcript, and executes server-side tools (metadata lookups). It also
+  serves the embedded browser UI.
 - **`cmd/wintermute`** — the desktop harness, built for Windows/macOS/Linux
   clients. It declares which actions the local machine can perform, and
   when the model asks for one it applies an approval policy, runs it
@@ -38,7 +38,7 @@ cmd/wintermute/     client harness entrypoint (flags, REPL)
 internal/app/       composition root — the only package importing all others
 internal/agent/     the turn loop; partitions calls into server/client work
 internal/api/       JSON HTTP handlers + auth middleware
-internal/llm/       Provider interface + OpenAI-compatible implementation
+internal/llm/       Provider interface + Anthropic Messages API implementation
 internal/tool/      shared vocabulary: Definition, Call, Result, Registry
 internal/lookup/    server-side tools: TMDB/TVDB/OMDb metadata lookup
 internal/store/     SQLite: clients, sessions, messages, tool_audit
@@ -72,9 +72,10 @@ GOOS=windows GOARCH=amd64 go build -o wintermute.exe ./cmd/wintermute
 Run `gofmt -l .` and `go vet ./...` before considering any change complete.
 Never leave the tree in a state that fails `go build ./...`.
 
-Server configuration is environment-based (`WINTERMUTE_*`, plus
-`TMDB_API_KEY` / `TVDB_API_KEY` / `TVDB_PIN` / `OMDB_API_KEY`), loaded from
-`.env` if present. `WINTERMUTE_LLM_MODEL` is required. Client configuration
+Server configuration is environment-based (`ANTHROPIC_API_KEY`, `WINTERMUTE_*`,
+plus `TMDB_API_KEY` / `TVDB_API_KEY` / `TVDB_PIN` / `OMDB_API_KEY`), loaded
+from `.env` if present. `ANTHROPIC_API_KEY` is required;
+`WINTERMUTE_LLM_MODEL` defaults to `claude-opus-5`. Client configuration
 is a JSON file (`~/.config/wintermute/config.json`, `%AppData%` on Windows);
 `wintermute -init` writes a starter.
 
@@ -82,6 +83,15 @@ Clients authenticate with a bearer token issued by
 `wintermuted -add-client <name>`. Tokens are stored only as hashes and shown
 once. There is no self-registration endpoint by design — don't add one
 without explicit instruction.
+
+Claude thinks by default, and the Messages API rejects a tool-use turn whose
+assistant message dropped the thinking blocks that produced the call. The
+transcript is replayed from SQLite on every iteration of the turn loop, so
+`llm.Message.Thinking` is persisted verbatim and replayed unedited — don't
+strip it, and don't disable thinking to avoid the problem (with thinking off,
+the model sometimes writes a tool call into its visible text instead of
+emitting a tool_use block, which looks like a turn that succeeded while the
+rename silently never ran).
 
 Migrations live in `internal/store/migrations/*.sql`, are embedded into the
 binary, and are applied on every `store.Open` (so both the server and
