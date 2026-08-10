@@ -45,11 +45,22 @@ type Turn struct {
 	Reply     string        `json:"reply,omitempty"`
 	Pending   []PendingCall `json:"pending_calls,omitempty"`
 	Usage     llm.Usage     `json:"usage"`
+
+	// Backend and Model record what actually served the turn. They are worth
+	// reporting because they are not always what the session asked for: a
+	// local backend that fails is retried against the configured fallback.
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	// FellBackFrom is set when the turn left the intended backend, so the UI
+	// can say so rather than quietly answering from somewhere else.
+	FellBackFrom   string `json:"fell_back_from,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
 }
 
 // Agent wires the model, the transcript store and the server-side tools.
 type Agent struct {
-	provider      llm.Provider
+	router        *llm.Router
+	pool          *llm.Pool
 	store         *store.Store
 	serverTools   *tool.Registry
 	log           *slog.Logger
@@ -59,9 +70,13 @@ type Agent struct {
 
 // New builds an Agent. serverTools holds only tools the server executes;
 // client-declared tools are layered on per session.
-func New(p llm.Provider, s *store.Store, serverTools *tool.Registry, log *slog.Logger, maxIterations int) *Agent {
+//
+// pool may be nil, in which case no batch tool is offered — the model is never
+// shown a way to fan work out that the deployment has not configured.
+func New(router *llm.Router, pool *llm.Pool, s *store.Store, serverTools *tool.Registry, log *slog.Logger, maxIterations int) *Agent {
 	return &Agent{
-		provider:      p,
+		router:        router,
+		pool:          pool,
 		store:         s,
 		serverTools:   serverTools,
 		log:           log,
@@ -69,6 +84,9 @@ func New(p llm.Provider, s *store.Store, serverTools *tool.Registry, log *slog.L
 		system:        SystemPrompt,
 	}
 }
+
+// Router exposes the router so the API can report available backends.
+func (a *Agent) Router() *llm.Router { return a.router }
 
 // ErrTooManyIterations is returned when a turn exceeds the tool-call budget.
 var ErrTooManyIterations = errors.New("tool iteration budget exhausted")
@@ -83,7 +101,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		return nil, err
 	}
 
-	registry, err := a.registryFor(clientTools)
+	registry, err := a.registryFor(sess, clientTools)
 	if err != nil {
 		return nil, err
 	}
@@ -96,13 +114,22 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 			return nil, err
 		}
 
-		resp, err := a.provider.Complete(ctx, llm.Request{
+		res, err := a.router.Complete(ctx, sess.Backend, llm.Request{
 			System:   a.system,
 			Messages: history,
 			Tools:    defs,
+			Model:    sess.Model,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("completion: %w", err)
+		}
+		resp := res.Response
+
+		turn.Backend = res.Backend
+		turn.Model = res.Model
+		if res.FellBackFrom != "" {
+			turn.FellBackFrom = res.FellBackFrom
+			turn.FallbackReason = res.FallbackReason
 		}
 		turn.Usage.PromptTokens += resp.Usage.PromptTokens
 		turn.Usage.CompletionTokens += resp.Usage.CompletionTokens
@@ -130,7 +157,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		}
 
 		for _, call := range serverCalls {
-			res := a.runServerTool(ctx, registry, sess, call)
+			res := a.runServerTool(ctx, registry, sess, call, call.ID)
 			if err := a.store.AppendMessages(ctx, sess.ID, llm.ToolMessage(res)); err != nil {
 				return nil, err
 			}
@@ -148,8 +175,17 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 }
 
 // registryFor layers a client's declared tools over the server's own.
-func (a *Agent) registryFor(clientTools []tool.Definition) (*tool.Registry, error) {
+//
+// The batch tool is added here rather than at startup because it has to be
+// bound to a session: that is what puts each worker's tool calls in the right
+// audit trail.
+func (a *Agent) registryFor(sess *store.Session, clientTools []tool.Definition) (*tool.Registry, error) {
 	registry := a.serverTools.Clone()
+	if a.pool != nil {
+		if err := registry.Register(batchDefinition(a.pool), a.batchHandler(sess)); err != nil {
+			return nil, fmt.Errorf("batch tool: %w", err)
+		}
+	}
 	for _, def := range clientTools {
 		if err := registry.RegisterClient(def); err != nil {
 			return nil, fmt.Errorf("client tool %q: %w", def.Name, err)
@@ -160,7 +196,11 @@ func (a *Agent) registryFor(clientTools []tool.Definition) (*tool.Registry, erro
 
 // runServerTool executes one server-side tool and records it in the audit
 // trail. Server tools are read-only by construction, so they are auto-approved.
-func (a *Agent) runServerTool(ctx context.Context, registry *tool.Registry, sess *store.Session, call tool.Call) tool.Result {
+//
+// auditID is the identifier written to the audit trail, which is the call's own
+// id in the main loop but is namespaced per item inside a batch, where many
+// concurrent workers hand back the same stock id.
+func (a *Agent) runServerTool(ctx context.Context, registry *tool.Registry, sess *store.Session, call tool.Call, auditID string) tool.Result {
 	def, _ := registry.Definition(call.Name)
 	handler, ok := registry.Handler(call.Name)
 	if !ok {
@@ -176,7 +216,7 @@ func (a *Agent) runServerTool(ctx context.Context, registry *tool.Registry, sess
 
 	entry := store.AuditEntry{
 		SessionID: sess.ID,
-		CallID:    call.ID,
+		CallID:    auditID,
 		ToolName:  call.Name,
 		Side:      tool.SideServer,
 		Risk:      def.Risk,

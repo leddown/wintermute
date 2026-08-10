@@ -6,11 +6,13 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"wintermute/internal/agent"
+	"wintermute/internal/models"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
 	"wintermute/internal/web"
@@ -25,13 +27,13 @@ type Server struct {
 	agent       *agent.Agent
 	store       *store.Store
 	serverTools *tool.Registry
+	catalog     *models.Catalog
 	log         *slog.Logger
-	llmName     string
 }
 
 // New builds a Server.
-func New(a *agent.Agent, s *store.Store, serverTools *tool.Registry, log *slog.Logger, llmName string) *Server {
-	return &Server{agent: a, store: s, serverTools: serverTools, log: log, llmName: llmName}
+func New(a *agent.Agent, s *store.Store, serverTools *tool.Registry, cat *models.Catalog, log *slog.Logger) *Server {
+	return &Server{agent: a, store: s, serverTools: serverTools, catalog: cat, log: log}
 }
 
 // Handler returns the fully wired HTTP handler.
@@ -52,6 +54,20 @@ func (s *Server) Handler() http.Handler {
 	authed("POST /api/v1/sessions/{id}/messages", s.handlePostMessage)
 	authed("POST /api/v1/sessions/{id}/tool_results", s.handleToolResults)
 	authed("GET /api/v1/sessions/{id}/audit", s.handleAudit)
+	authed("PATCH /api/v1/sessions/{id}/model", s.handleSetSessionModel)
+
+	// Model awareness: hardware, backends, catalog, discovery and planning.
+	authed("GET /api/v1/system", s.handleSystem)
+	authed("GET /api/v1/backends", s.handleBackends)
+	authed("POST /api/v1/backends/refresh", s.handleRefreshBackends)
+	authed("GET /api/v1/models", s.handleModels)
+	authed("GET /api/v1/models/search", s.handleModelSearch)
+	// The Hub id contains a slash ("author/name"), so it needs a trailing
+	// wildcard rather than a single path segment.
+	authed("GET /api/v1/models/detail/{id...}", s.handleModelDetail)
+	authed("POST /api/v1/models/plan", s.handlePlan)
+	authed("POST /api/v1/models/fit", s.handleFit)
+	authed("GET /api/v1/tasks", s.handleTasks)
 
 	mux.Handle("/", web.Handler())
 
@@ -68,10 +84,13 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	c := clientFrom(r.Context())
+	router := s.agent.Router()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name":  c.Name,
-		"kind":  c.Kind,
-		"model": s.llmName,
+		"name":            c.Name,
+		"kind":            c.Kind,
+		"backends":        router.Names(),
+		"default_backend": router.Default(),
+		"fallback":        router.Fallback(),
 	})
 }
 
@@ -81,6 +100,10 @@ func (s *Server) handleTools(w http.ResponseWriter, r *http.Request) {
 
 type createSessionRequest struct {
 	Title string `json:"title"`
+	// Backend and Model pin this conversation to a model. Empty means the
+	// server default.
+	Backend string `json:"backend"`
+	Model   string `json:"model"`
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -88,13 +111,58 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &req) {
 		return
 	}
+	if err := s.checkBackend(req.Backend); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	c := clientFrom(r.Context())
-	sess, err := s.store.CreateSession(r.Context(), c.ID, req.Title)
+	sess, err := s.store.CreateSession(r.Context(), c.ID, req.Title, req.Backend, req.Model)
 	if err != nil {
 		s.fail(w, "create session", err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, sess)
+}
+
+type setSessionModelRequest struct {
+	Backend string `json:"backend"`
+	Model   string `json:"model"`
+}
+
+// handleSetSessionModel repoints an existing conversation at another model.
+// The transcript is kept — switching mid-conversation is deliberate, and is
+// how a stuck local turn gets escalated to a stronger model.
+func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var req setSessionModelRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if err := s.checkBackend(req.Backend); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := s.store.SetSessionModel(r.Context(), sess.ID, req.Backend, req.Model); err != nil {
+		s.fail(w, "set session model", err)
+		return
+	}
+	sess.Backend, sess.Model = req.Backend, req.Model
+	writeJSON(w, http.StatusOK, sess)
+}
+
+// checkBackend rejects an unknown backend name up front, so the failure lands
+// on the request that chose it rather than on the next turn.
+func (s *Server) checkBackend(name string) error {
+	if name == "" {
+		return nil
+	}
+	if _, ok := s.agent.Router().Backend(name); !ok {
+		return fmt.Errorf("unknown backend %q", name)
+	}
+	return nil
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"wintermute/internal/llm"
+	"wintermute/internal/models"
 )
 
 // Config is the server's runtime configuration.
@@ -20,13 +20,23 @@ type Config struct {
 	// DatabasePath is the SQLite file backing sessions and the audit log.
 	DatabasePath string
 
-	// LLMModel is the Claude model to use.
-	LLMModel string
-	// LLMAPIKey is the Anthropic API key.
-	LLMAPIKey string
-	// LLMBaseURL overrides the Anthropic API root. Empty means the default;
-	// it exists for proxies and for pointing tests at a stub.
-	LLMBaseURL string
+	// Backends are the model sources the router can dispatch to, resolved from
+	// backends.json or, for a single-backend setup, from the environment.
+	Backends []models.Backend
+	// DefaultBackend is used by sessions that name none.
+	DefaultBackend string
+	// FallbackBackend is retried when the selected backend fails. Empty means
+	// no fallback: a local backend that is down simply reports the failure
+	// rather than quietly sending the transcript somewhere else.
+	FallbackBackend string
+	// Pool is the set of backends a batch may be fanned out across. Nil means
+	// none was declared, and the batch tool is not offered at all.
+	Pool *Pool
+
+	// HuggingFaceToken is optional and only needed for gated repositories;
+	// searching public models works without one.
+	HuggingFaceToken string
+
 	// LLMMaxTokens bounds a single response. It covers the model's thinking as
 	// well as its reply, so it is set well above the length of an answer.
 	LLMMaxTokens int
@@ -67,12 +77,28 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	backendsPath := envString("WINTERMUTE_BACKENDS", "backends.json")
+	file, err := loadBackends(backendsPath)
+	if err != nil {
+		return nil, err
+	}
+	backends, err := file.resolve()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", backendsPath, err)
+	}
+	pool, err := file.resolvePool()
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", backendsPath, err)
+	}
+
 	cfg := &Config{
 		Addr:              envString("WINTERMUTE_ADDR", ":8080"),
 		DatabasePath:      envString("WINTERMUTE_DB", "wintermute.db"),
-		LLMModel:          envString("WINTERMUTE_LLM_MODEL", llm.DefaultModel),
-		LLMAPIKey:         os.Getenv("ANTHROPIC_API_KEY"),
-		LLMBaseURL:        os.Getenv("ANTHROPIC_BASE_URL"),
+		Backends:          backends,
+		DefaultBackend:    file.Default,
+		FallbackBackend:   file.Fallback,
+		Pool:              pool,
+		HuggingFaceToken:  os.Getenv("HUGGINGFACE_TOKEN"),
 		LLMMaxTokens:      maxTokens,
 		LLMTimeout:        timeout,
 		MaxToolIterations: iterations,
@@ -82,8 +108,8 @@ func Load() (*Config, error) {
 		OMDBAPIKey:        os.Getenv("OMDB_API_KEY"),
 	}
 
-	if cfg.LLMAPIKey == "" {
-		return nil, errors.New("ANTHROPIC_API_KEY is required")
+	if cfg.DefaultBackend == "" {
+		cfg.DefaultBackend = backends[0].Name
 	}
 	if cfg.MaxToolIterations < 1 {
 		return nil, errors.New("WINTERMUTE_MAX_TOOL_ITERATIONS must be at least 1")

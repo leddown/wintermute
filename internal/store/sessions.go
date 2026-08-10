@@ -16,27 +16,65 @@ import (
 
 // Session is one conversation, owned by exactly one client.
 type Session struct {
-	ID        string    `json:"id"`
-	ClientID  int64     `json:"-"`
-	Title     string    `json:"title"`
+	ID       string `json:"id"`
+	ClientID int64  `json:"-"`
+	Title    string `json:"title"`
+	// Backend and Model pin which model serves this conversation. Empty means
+	// the server's configured default. They are per session rather than global
+	// so a user can keep a local model for routine work and open a separate
+	// conversation against a cloud model when they want one.
+	Backend   string    `json:"backend,omitempty"`
+	Model     string    `json:"model,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// CreateSession starts a new conversation for a client.
-func (s *Store) CreateSession(ctx context.Context, clientID int64, title string) (*Session, error) {
+// sessionColumns is the shared SELECT list, so the scan order below cannot
+// drift from the query.
+const sessionColumns = `id, client_id, title, backend, model, created_at, updated_at`
+
+func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
+	var sess Session
+	err := row.Scan(&sess.ID, &sess.ClientID, &sess.Title, &sess.Backend, &sess.Model,
+		&sess.CreatedAt, &sess.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &sess, nil
+}
+
+// CreateSession starts a new conversation for a client. backend and model may
+// be empty, meaning the server default.
+func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backend, model string) (*Session, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, client_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)`,
-		id, clientID, title, now, now)
+		`INSERT INTO sessions (id, client_id, title, backend, model, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		id, clientID, title, backend, model, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
-	return &Session{ID: id, ClientID: clientID, Title: title, CreatedAt: now, UpdatedAt: now}, nil
+	return &Session{
+		ID: id, ClientID: clientID, Title: title,
+		Backend: backend, Model: model, CreatedAt: now, UpdatedAt: now,
+	}, nil
+}
+
+// SetSessionModel repoints an existing conversation at another backend/model.
+// The transcript is kept: switching models mid-conversation is a supported and
+// occasionally very useful thing to do, e.g. escalating a stuck local turn.
+func (s *Store) SetSessionModel(ctx context.Context, id, backend, model string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET backend = ?, model = ?, updated_at = ? WHERE id = ?`,
+		backend, model, time.Now().UTC(), id)
+	if err != nil {
+		return fmt.Errorf("set session model: %w", err)
+	}
+	return nil
 }
 
 // Session fetches a session scoped to its owning client. Callers pass the
@@ -44,17 +82,17 @@ func (s *Store) CreateSession(ctx context.Context, clientID int64, title string)
 // ErrNotFound rather than a permission error, so the API leaks nothing about
 // sessions the caller cannot see.
 func (s *Store) Session(ctx context.Context, id string, clientID int64) (*Session, error) {
-	var sess Session
-	err := s.db.QueryRowContext(ctx,
-		`SELECT id, client_id, title, created_at, updated_at FROM sessions WHERE id = ? AND client_id = ?`,
-		id, clientID).Scan(&sess.ID, &sess.ClientID, &sess.Title, &sess.CreatedAt, &sess.UpdatedAt)
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+sessionColumns+` FROM sessions WHERE id = ? AND client_id = ?`,
+		id, clientID)
+	sess, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("lookup session: %w", err)
 	}
-	return &sess, nil
+	return sess, nil
 }
 
 // ListSessions returns a client's sessions, most recently updated first.
@@ -63,7 +101,7 @@ func (s *Store) ListSessions(ctx context.Context, clientID int64, limit int) ([]
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, client_id, title, created_at, updated_at FROM sessions
+		`SELECT `+sessionColumns+` FROM sessions
 		 WHERE client_id = ? ORDER BY updated_at DESC LIMIT ?`, clientID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
@@ -72,11 +110,11 @@ func (s *Store) ListSessions(ctx context.Context, clientID int64, limit int) ([]
 
 	var out []Session
 	for rows.Next() {
-		var sess Session
-		if err := rows.Scan(&sess.ID, &sess.ClientID, &sess.Title, &sess.CreatedAt, &sess.UpdatedAt); err != nil {
+		sess, err := scanSession(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan session: %w", err)
 		}
-		out = append(out, sess)
+		out = append(out, *sess)
 	}
 	return out, rows.Err()
 }

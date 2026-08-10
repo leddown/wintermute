@@ -61,9 +61,13 @@ func ToolMessage(res tool.Result) Message {
 
 // Request is a single completion request.
 type Request struct {
-	System      string
-	Messages    []Message
-	Tools       []tool.Definition
+	System   string
+	Messages []Message
+	Tools    []tool.Definition
+	// Model overrides the provider's configured default for this request.
+	// A backend serving several models — llama-swap, Ollama, vLLM — uses it to
+	// pick one; an empty string means "whatever the provider is set to".
+	Model       string
 	Temperature float64
 	MaxTokens   int
 }

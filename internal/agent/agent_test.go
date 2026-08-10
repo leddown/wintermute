@@ -61,13 +61,17 @@ func newTestAgent(t *testing.T, p llm.Provider, reg *tool.Registry) (*Agent, *st
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(context.Background(), client.ID, "test")
+	sess, err := st.CreateSession(context.Background(), client.ID, "test", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(p, st, reg, log, 8), st, sess
+	router, err := llm.NewRouter([]*llm.Backend{{Name: "test", Provider: p}}, "test", "", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return New(router, nil, st, reg, log, 8), st, sess
 }
 
 func clientTool(name string, risk tool.Risk) tool.Definition {

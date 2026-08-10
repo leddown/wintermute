@@ -1,45 +1,108 @@
 # wintermute
 
-Wintermute wraps **Claude** so it can act on your home network — without ever
-handing your filesystem to the server that talks to the model.
+Wintermute is an AI assistant that can act on your home network — without ever
+handing your filesystem to the machine that talks to the model, and without
+requiring that the model be somebody else's.
+
+It runs models you host yourself (llama.cpp, Ollama, vLLM) and can keep Claude
+available alongside them as a deliberate, per-conversation choice.
 
 The first thing it's built to do is rename media files: your desktop lists a
 NAS share, the server looks the titles up against TMDB/TVDB/OMDb, and the model
 proposes renames that you approve one at a time.
 
+- [Set up a local model server](docs/local-models.md) — GPU, drivers, llama.cpp
+- [Running several backends](docs/backends.md) — multiple models at once, and
+  when that actually makes anything faster
+
 ## How it works
 
-The agent loop is **split across two processes**, and that split is the whole
-security model:
+Two splits define this program. Neither is an implementation detail — the first
+is the security model, the second is the privacy model.
+
+### 1. The agent loop is split across two processes
 
 ```
-  your desktop                     your server                  Anthropic
+  your desktop                     your server                model backends
  ┌──────────────────────┐        ┌───────────────────────┐    ┌──────────────┐
- │ wintermute (harness) │───────▶│ wintermuted           │───▶│    Claude    │
- │                      │ msg +  │                       │    │   Messages   │
- │ • declares what this │ tools  │ • owns the transcript │◀───│      API     │
- │   machine can do     │        │   (SQLite)            │    └──────────────┘
- │ • applies the        │◀───────│ • runs server-side    │
- │   approval policy    │ reply +│   tools (lookups)     │
- │ • runs local actions │ pending│ • serves the browser  │
- │   inside your roots  │  calls │   UI                  │
- └──────────────────────┘        └───────────────────────┘
+ │ wintermute (harness) │───────▶│ wintermuted           │───▶│ local models │
+ │                      │ msg +  │                       │◀───│  (your LAN)  │
+ │ • declares what this │ tools  │ • owns the transcript │    └──────────────┘
+ │   machine can do     │        │   (SQLite)            │    ┌──────────────┐
+ │ • applies the        │◀───────│ • routes turns to a   │───▶│    Claude    │
+ │   approval policy    │ reply +│   backend             │◀───│  (optional)  │
+ │ • runs local actions │ pending│ • runs server-side    │    └──────────────┘
+ │   inside your roots  │  calls │   tools (lookups)     │
+ └──────────────────────┘        │ • serves the browser  │
+                                 │   UI                  │
+                                 └───────────────────────┘
 ```
 
-- Tools the **server** owns (metadata lookup) run on the server.
+- Tools the **server** owns (metadata lookup, hardware and model questions) run
+  on the server.
 - Tools the **client** owns (list a directory, stat a path, rename a file) are
-  handed back as *pending calls*. The client decides whether to run them.
+  handed back as *pending calls*. The client decides whether to run them, and
+  the server is told the outcome.
 - The server never touches your filesystem and never decides that an action was
   approved. Only filenames and metadata leave your machine — file *contents*
-  never do. Those filenames and directory listings do go on to Anthropic as
-  part of the conversation, which is what lets Claude reason about them.
+  never do.
+
+A turn therefore looks like this: you send a message, the server asks the model,
+the model asks for a tool, and either the server runs it and loops again, or the
+turn stops and returns pending calls to whoever asked. The client runs them,
+posts the results back, and the loop resumes from the stored transcript. That is
+why the transcript lives in SQLite and is replayed on every iteration — the loop
+genuinely pauses across a network boundary, sometimes for as long as it takes a
+person to answer a prompt.
 
 Every proposed call is written to an audit table with its decision and outcome,
-whether or not it ran.
+whether or not it ran. The transcript is not the audit trail; it can be edited
+or discarded, and the audit table is append-only.
+
+### 2. Turns are routed to a backend, and local is the normal path
+
+`wintermuted` does not have "the model". It has a set of named **backends**, and
+a router that decides which one serves a turn:
+
+| | |
+|---|---|
+| **Backend** | A named model source: a URL, an API kind, a default model |
+| **Default** | The backend used by a conversation that names none |
+| **Per session** | A conversation may pin its own backend and model |
+| **Fallback** | An optional backend retried when the selected one fails |
+
+The design goal is that open-weight models on your LAN are the ordinary path and
+a cloud model is reached *deliberately*. So:
+
+- There is no implicit cloud. If you configure only local backends, a local
+  backend that is down produces an error — it does not quietly send your
+  transcript to a third party instead.
+- A fallback fires only after the selected backend actually failed, never
+  because it was slow, and never when *you* cancelled the turn.
+- A fallback is never silent. Every turn reports which backend and model
+  answered it, and if that isn't what was asked for, the reply carries
+  `fell_back_from` and the reason.
+
+One conversation is pinned to one backend, because moving it between machines
+would throw away the served prompt cache and reprocess the whole transcript.
+Work that *is* separable — proposing names for 300 files, where each file is its
+own short prompt — goes to a **pool** instead, and runs across every configured
+backend at once. See [docs/backends.md](docs/backends.md).
+
+The server also knows what it is running on. It probes each backend for the
+models it serves, reads the host's GPU, VRAM, CPU and RAM, and can estimate
+whether a given model and context length will fit. That is exposed both as HTTP
+endpoints and as tools the model itself can call, so "will Gemma 3 12B fit on
+this card?" is answered from measurements rather than from training data.
+
+**What this does not do:** it does not manage inference. It never spawns
+`llama-server`, downloads weights, or loads and unloads models. Those are
+privileged local operations, and llama-swap or Ollama own them. Wintermute
+observes, estimates, recommends and routes.
 
 ### Approval
 
-Each tool declares a risk level, and that drives what happens:
+Each tool declares a risk level, and that drives what happens on the client:
 
 | Risk | Behaviour |
 | --- | --- |
@@ -50,13 +113,27 @@ Each tool declares a risk level, and that drives what happens:
 At a prompt you can answer `y` (yes), `n` (no), `a` (always allow this tool for
 the rest of the run), or `q` (decline this and everything else in the turn).
 A refusal still produces a tool result, so the model is told it was declined
-rather than assuming success.
+rather than assuming success. This matters more with small local models than
+with large ones: a model that is never told "no" will cheerfully report a rename
+it never performed.
 
 ### Tools
 
-**Server-side** — `lookup_metadata`: resolve a movie, series or episode against
-whichever of TMDB / TVDB / OMDb you configured, to confirm the canonical title,
-year and episode name.
+**Server-side, metadata** — `lookup_metadata`: resolve a movie, series or
+episode against whichever of TMDB / TVDB / OMDb you configured, to confirm the
+canonical title, year and episode name.
+
+**Server-side, model awareness** — `system_capabilities` (what hardware this
+host has), `list_models` (what each backend is serving, with a fit verdict),
+`estimate_model_fit` (will this model at this quant and context fit in VRAM),
+`recommend_model` (rank what's available for a task), `search_models` (search
+the Hugging Face Hub, results annotated with whether they'd run here).
+
+**Server-side, batch** — `batch_propose_names`: propose names for many files at
+once, fanned out across the configured pool. Registered only when a pool is
+declared. Each item is handled by a worker that can see server-side read-only
+tools and nothing else — it proposes, and every resulting rename still goes to
+the client for approval one at a time.
 
 **Client-side** — `list_directory` (read), `stat_path` (read),
 `rename_file` (write; renames in place, never moves between directories). All
@@ -66,11 +143,16 @@ three are confined to your configured roots, checked *after* symlink resolution.
 
 - Go 1.25.12+ to build. There are no cgo dependencies, so the client
   cross-compiles cleanly to a standalone Windows binary.
-- An **Anthropic API key** ([console.anthropic.com](https://console.anthropic.com)).
-  The server calls the Messages API; the model runs on Anthropic's
-  infrastructure, not yours.
+- **At least one model backend**, which is either:
+  - a local OpenAI-compatible server — llama.cpp's `llama-server`, llama-swap,
+    Ollama, vLLM or LM Studio. See [docs/local-models.md](docs/local-models.md)
+    for a full build-and-tune guide, or
+  - an **Anthropic API key** from
+    [console.anthropic.com](https://console.anthropic.com), or both.
 - Optionally, API keys for TMDB, TVDB and/or OMDb. Without at least one, the
   lookup tool isn't registered at all and the assistant can't verify titles.
+- Optionally, `nvidia-smi` on the server host, for GPU and VRAM reporting.
+  Without it the hardware report simply omits the GPU.
 
 ## Build
 
@@ -84,18 +166,124 @@ GOOS=windows GOARCH=amd64 go build -o wintermute.exe ./cmd/wintermute
 
 ## Set up the server
 
-### 1. Configure
+### 1. Declare your backends
 
-Configuration comes from the environment, loaded from a `.env` file in the
-working directory if one is present (real environment variables win). Only
-`ANTHROPIC_API_KEY` is required.
+Backends are declared in `backends.json` in the working directory (override the
+path with `WINTERMUTE_BACKENDS`). They live in a file rather than the
+environment because there are several of them with several fields each, and
+encoding that into environment variables produces something nobody can read.
+
+```json
+{
+  "default": "local",
+  "backends": [
+    {
+      "name": "local",
+      "kind": "llamacpp",
+      "base_url": "http://127.0.0.1:8080/v1",
+      "api_key_env": "LLAMA_API_KEY",
+      "model": "qwen3-8b"
+    }
+  ]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `name` | How sessions and the UI refer to this backend. Must be unique |
+| `kind` | `llamacpp`, `ollama`, `vllm`, `openai`, `hailo` or `anthropic` |
+| `base_url` | API root. Required for everything except `anthropic` |
+| `model` | Default model. May be empty if the backend serves exactly one |
+| `api_key_env` | **Name of** the environment variable holding the key |
+
+`api_key_env` names a variable rather than carrying the key itself, so this file
+can be committed or shared without leaking a credential.
+
+`kind` mostly selects how the backend is *probed*, not how it is called —
+llama.cpp, Ollama, vLLM, LM Studio and hailo-ollama all speak the OpenAI API and
+share one provider. `anthropic` is the exception and speaks the Messages API.
+
+The top level takes three more keys:
+
+- `"default"` — the backend used by conversations that name none. Defaults to
+  the first declared backend.
+- `"fallback"` — a backend retried when the selected one fails. **Leave it
+  unset** unless you want failures to reach the cloud; unset means a failed
+  local backend reports the failure and stops.
+- `"pool"` — the backends a batch may be fanned out across, e.g.
+  `{"backends": ["gpu", "nas"], "max_inflight": 1}`. Every member must also be
+  declared. With no pool, the batch tool is not offered at all.
+
+```json
+{
+  "default": "gpu",
+  "pool": { "backends": ["gpu", "nas"], "max_inflight": 1 },
+  "backends": [
+    { "name": "gpu", "kind": "llamacpp", "base_url": "http://192.168.1.10:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
+    { "name": "nas", "kind": "ollama", "base_url": "http://192.168.1.11:11434/v1",
+      "model": "gemma3:4b" }
+  ]
+}
+```
+
+A pool is what makes "300 files" finish in parallel rather than one at a time.
+It only helps when its members are on *different hardware* — two members on one
+GPU are two queues into one worker. `max_inflight` is per member and defaults to
+1, which is the honest number for a single-GPU llama-server.
+[docs/backends.md](docs/backends.md#the-batch-pool) has the full picture.
+
+To keep Claude available as a per-conversation alternative, add it as a second
+backend:
+
+```json
+{
+  "default": "local",
+  "backends": [
+    { "name": "local",  "kind": "llamacpp",  "base_url": "http://127.0.0.1:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
+    { "name": "claude", "kind": "anthropic", "api_key_env": "ANTHROPIC_API_KEY",
+      "model": "claude-opus-5" }
+  ]
+}
+```
+
+For **several backends at once** — a second GPU box, a CPU-only machine, a small
+fast model beside a large slow one — see
+[docs/backends.md](docs/backends.md), which also covers when that makes anything
+faster and when it doesn't.
+
+#### Or skip the file entirely
+
+A single-backend setup needs no file. If `backends.json` is absent, one backend
+is built from the environment:
+
+```bash
+# A local OpenAI-compatible server:
+export WINTERMUTE_LLM_PROVIDER=openai        # or llamacpp / ollama / vllm
+export WINTERMUTE_LLM_BASE_URL=http://127.0.0.1:8080/v1
+export WINTERMUTE_LLM_MODEL=qwen3-8b
+export WINTERMUTE_LLM_API_KEY=$(cat ~/.llama-api-key)
+
+# Or Claude:
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+With no `WINTERMUTE_LLM_PROVIDER` set, the kind is inferred: a base URL means a
+local OpenAI-compatible server, an Anthropic key alone means Claude. If neither
+is present, the server refuses to start and tells you what to set.
+
+### 2. Configure the rest
+
+Everything else comes from the environment, loaded from a `.env` file in the
+working directory if one is present (real environment variables win).
 
 ```bash
 # .env
-ANTHROPIC_API_KEY=sk-ant-...              # required
-WINTERMUTE_LLM_MODEL=claude-opus-5        # optional — this is the default
 WINTERMUTE_ADDR=:8080
 WINTERMUTE_DB=wintermute.db
+LLAMA_API_KEY=...                         # referenced by api_key_env above
+ANTHROPIC_API_KEY=sk-ant-...              # only if you declare an anthropic backend
 
 # At least one of these, or the assistant can't verify titles:
 TMDB_API_KEY=...
@@ -106,19 +294,27 @@ OMDB_API_KEY=...
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | *(required)* | Your Anthropic API key |
-| `ANTHROPIC_BASE_URL` | *(SDK default)* | Override the API root, for a proxy |
-| `WINTERMUTE_LLM_MODEL` | `claude-opus-5` | Claude model to use |
-| `WINTERMUTE_LLM_MAX_TOKENS` | `16000` | Cap on one response, thinking included |
-| `WINTERMUTE_LLM_TIMEOUT` | `10m` | Bound on a single completion |
+| `WINTERMUTE_BACKENDS` | `backends.json` | Path to the backend declaration |
 | `WINTERMUTE_ADDR` | `:8080` | Listen address for the API and UI |
 | `WINTERMUTE_DB` | `wintermute.db` | SQLite file |
+| `WINTERMUTE_LLM_MAX_TOKENS` | `16000` | Cap on one response, thinking included |
+| `WINTERMUTE_LLM_TIMEOUT` | `10m` | Bound on a single completion |
 | `WINTERMUTE_MAX_TOOL_ITERATIONS` | `12` | Tool round-trips allowed per turn |
+| `HUGGINGFACE_TOKEN` | *(none)* | Only needed to search gated Hub repositories |
+| `ANTHROPIC_API_KEY` | *(none)* | Required only by an `anthropic` backend |
+
+The no-file fallback additionally reads `WINTERMUTE_LLM_PROVIDER`,
+`WINTERMUTE_LLM_BASE_URL`, `WINTERMUTE_LLM_MODEL` and `WINTERMUTE_LLM_API_KEY`.
+
+`WINTERMUTE_LLM_TIMEOUT` deserves a thought if you are running locally. Ten
+minutes is generous for a cloud API and *not* generous for a 12B model doing a
+long tool-using turn on a partially-offloaded card. Raise it before you conclude
+a local backend is broken.
 
 Migrations are embedded and applied on every start. `wintermuted -migrate-only`
 applies them and exits.
 
-### 2. Issue a client token
+### 3. Issue a client token
 
 There is no self-registration endpoint, by design. Every client is created on
 the server:
@@ -132,14 +328,100 @@ the server:
 
 The token is printed **once** and stored only as a hash. Copy it now.
 
-### 3. Run
+### 4. Run
 
 ```bash
 ./wintermuted            # add -debug for per-request logging
 ```
 
+At startup every backend is probed once, with a 30-second budget, so the UI has
+a catalog immediately. A backend that is down is recorded as unreachable and
+retried on refresh — it never stops the server from starting, because the usual
+reason a local inference server is unreachable is that nobody has started it
+yet.
+
 `GET /api/v1/health` is unauthenticated and reports liveness only. Everything
 else needs `Authorization: Bearer <token>`.
+
+### Or run it as a systemd service
+
+`scripts/setup.sh` does steps 1–4 as a Linux service instead: it creates a
+`wintermute` system user, writes `/etc/wintermute/wintermute.env` and
+`backends.json` (detecting a local Ollama or llama.cpp server if one is already
+running), installs both binaries, applies migrations, registers the first client
+tokens, and installs `deploy/wintermuted.service`. It is safe to re-run —
+anything that already exists is left alone.
+
+```bash
+./scripts/setup.sh          # first time
+sudo systemctl start wintermuted
+
+./update.sh                 # after a code change: rebuild, migrate, restart
+```
+
+Two things differ from the manual instructions above. The service listens on
+**`:8088`**, not `:8080`, because `:8080` is llama-server's port and on a host
+that serves its own models the two collide. And the database lives at
+`/var/lib/wintermute/wintermute.db`, which is the only writable path the unit has
+under `ProtectSystem=strict`.
+
+`update.sh` finishes with a report on what the running service can actually
+reach: whether it answers, whether `WINTERMUTE_BACKENDS` is set (unset, a
+carefully written `backends.json` is silently ignored), which backends are
+reachable, and whether a declared pool has two members sharing one host — which
+adds queueing rather than throughput.
+
+## Choosing a model per conversation
+
+A session pins its own backend and model; empty means the server default. Create
+one that way:
+
+```bash
+curl -X PATCH http://localhost:8080/api/v1/sessions/$ID/model \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"backend": "claude", "model": ""}'
+```
+
+Repointing an existing conversation keeps the transcript. That is deliberate —
+escalating a stuck local turn to a stronger model, with everything that happened
+so far intact, is one of the more useful things this setup can do.
+
+Each turn's response reports what actually served it:
+
+```json
+{
+  "reply": "...",
+  "backend": "local",
+  "model": "qwen3-8b",
+  "fell_back_from": "",
+  "fallback_reason": ""
+}
+```
+
+## Server API
+
+Beyond the conversation endpoints (`/api/v1/sessions`, `.../messages`,
+`.../tool_results`, `.../audit`), the server exposes what it knows about the
+models it can reach:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/me` | Who you are, plus the backend list, default and fallback |
+| `GET /api/v1/system` | Host hardware: GPU, VRAM, NPUs, CPU, RAM |
+| `GET /api/v1/backends` | Each backend with its last probe result |
+| `POST /api/v1/backends/refresh` | Re-probe now |
+| `GET /api/v1/models?context=8192` | Every model every backend serves, with a fit verdict |
+| `GET /api/v1/models/search?q=qwen3` | Search the Hugging Face Hub |
+| `GET /api/v1/models/detail/{author}/{name}` | One Hub model, sized against this host |
+| `POST /api/v1/models/plan` | Recommend a model for a task |
+| `POST /api/v1/models/fit` | Estimate VRAM for a hypothetical model |
+| `GET /api/v1/tasks` | The planner's task classes |
+| `PATCH /api/v1/sessions/{id}/model` | Repoint a conversation at another model |
+
+The Hub search is proxied through the server rather than called from the browser
+because the Hub token, if you configured one, must not reach the client — and
+because the results are enriched with a fit verdict only the server can compute.
 
 ## Set up the desktop client
 
@@ -200,10 +482,53 @@ harness.
 
 ## A note on thinking
 
-Claude thinks before it answers, and the Messages API rejects a tool-use turn
-whose reasoning was dropped in between. Wintermute therefore stores each
-turn's thinking blocks verbatim in the transcript and replays them unedited.
-That is why `messages` has a `thinking` column — don't strip it.
+Reasoning models think before they answer, and the Anthropic Messages API
+rejects a tool-use turn whose reasoning was dropped in between. Wintermute
+therefore stores each turn's thinking blocks verbatim in the transcript and
+replays them unedited. That is why `messages` has a `thinking` column — don't
+strip it.
+
+Don't disable thinking to avoid the problem either. With thinking off, models
+sometimes write a tool call into their visible text instead of emitting a real
+tool-use block, which looks like a turn that succeeded while the rename silently
+never ran. The same failure has a second cause on local backends: `llama-server`
+without `--jinja` doesn't use the model's own chat template, so the model never
+sees the tool-call format it was trained on. If tool calls mysteriously stop
+firing, check that flag first.
+
+## Troubleshooting
+
+**The server won't start: "no backends configured".** There is no
+`backends.json` and no environment fallback. Set `WINTERMUTE_LLM_BASE_URL` for a
+local server or `ANTHROPIC_API_KEY` for Claude, or write the file.
+
+**A backend shows as unreachable.** The URL or key is wrong, or the inference
+server isn't running. `POST /api/v1/backends/refresh` re-probes. Note that
+base URLs for OpenAI-compatible servers include the `/v1` suffix.
+
+**Turns fail with `backend not configured`.** A session is pinned to a backend
+name that `backends.json` no longer declares. Repoint it with
+`PATCH /api/v1/sessions/{id}/model`, or restore the name.
+
+**The model describes calling a tool instead of calling it.** Local backend
+missing `--jinja`, or a model that isn't reliably tool-capable. `list_models`
+reports which models advertise the `tools` capability.
+
+**Long local turns time out.** Raise `WINTERMUTE_LLM_TIMEOUT`.
+
+**Everything is slow and adding a second backend didn't help.** Expected — see
+[docs/backends.md](docs/backends.md). One conversation is a sequential loop, and
+a second backend does not make a single turn faster. What a second backend
+speeds up is a *batch*, and only if you declared a `pool`.
+
+**The assistant won't batch anything.** `batch_propose_names` is registered only
+when `backends.json` declares a `pool`. Check the startup log for
+`batch pool configured`.
+
+**A batch reports items failed on one backend.** That member was retired for the
+rest of that batch after three consecutive failures; its items were retried
+elsewhere. The server log names it, and `GET /api/v1/backends` will usually
+confirm it is unreachable.
 
 ## Development
 

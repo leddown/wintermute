@@ -1,0 +1,377 @@
+# Running several model backends
+
+`wintermuted` doesn't have "the model". It has a set of named **backends** and a
+router that picks one per turn. This document covers what that gets you today,
+how to configure more than one, and — the question that usually prompts this —
+whether adding backends makes anything faster.
+
+The short answer to that last one is: **sometimes, but not in the way people
+expect, and never for a single conversation.** The rest of this explains why,
+because the failure mode of guessing here is spending a weekend wiring up a
+second GPU box and measuring no improvement at all.
+
+- [What exists today](#what-exists-today)
+- [Why a second backend doesn't speed up one conversation](#why-a-second-backend-doesnt-speed-up-one-conversation)
+- [What actually gets faster](#what-actually-gets-faster)
+- [Configuration recipes](#configuration-recipes)
+- [Gotchas that will cost you performance](#gotchas-that-will-cost-you-performance)
+- [Measure before you build](#measure-before-you-build)
+- [The batch pool](#the-batch-pool)
+- [Still to build](#still-to-build)
+
+---
+
+## What exists today
+
+| Feature | Status |
+|---|---|
+| Several backends declared at once | **Works** |
+| A conversation pinned to a chosen backend and model | **Works** |
+| Switching a conversation's model mid-transcript | **Works** |
+| Automatic retry against a fallback when a backend fails | **Works** |
+| Concurrent turns in different conversations | **Works** (see caveats below) |
+| Probing each backend for what it serves, and whether it fits | **Works** |
+| Fanning a batch job out across backends | **Works** — [the pool](#the-batch-pool) |
+| Splitting one turn across backends | Not built — and see below, it wouldn't help |
+| Routing steps within a turn to different models by role | **Not built** — [sketched below](#role-based-routing-within-a-turn) |
+
+So "wintermuted can handle multiple AI model backends at the same time" is true
+in both senses: different conversations are served from different backends
+concurrently, and a batch of independent items is deliberately split across them
+to finish sooner.
+
+## Why a second backend doesn't speed up one conversation
+
+Three independent reasons, each sufficient on its own.
+
+**A turn is a sequential loop.** The agent asks the model, gets a tool call,
+runs the tool, and asks again *with the result appended*. Step N+1's input
+contains step N's output. There is nothing to overlap. Two backends working on
+one turn would mean one of them waiting.
+
+**One GPU runs one model at a time.** On the 8 GB card in
+[docs/local-models.md](local-models.md) an 8B model at Q4_K_M plus its KV cache
+is most of the VRAM. Two backends pointed at the same machine aren't two workers
+— they're two queues into one worker, and generation on a Pascal card is
+memory-bandwidth-bound, so a second concurrent request mostly divides the
+existing tokens/sec rather than adding to it. Batching does help throughput
+somewhat (that's what `--parallel` is for), but it is a throughput win, not a
+latency win: each individual request gets slower.
+
+**Alternating backends destroys the prompt cache.** This one surprises people.
+Inference servers cache the KV state of the prompt prefix, so turn 5 of a
+conversation only has to process the tokens added since turn 4. Send turn 5
+somewhere else and that server has to process the *entire* transcript from
+scratch — which, in an agent loop that replays a growing transcript every
+iteration, is the dominant cost. Round-robining a conversation across two
+backends can comfortably be **slower** than pinning it to one. This is why a
+session pins a backend rather than picking one per turn, and it is the single
+most important thing to understand before designing any distribution scheme.
+
+## What actually gets faster
+
+### 1. Different conversations, different hardware
+
+This works now. Two people (or a desktop harness and a browser tab) hold
+separate conversations pinned to separate backends, and they don't queue behind
+each other.
+
+The gain is entirely in *separate hardware*. Two backends on one GPU share one
+GPU. Worth doing when you have:
+
+- a second machine with a GPU,
+- a CPU-only box that can slowly run something small,
+- a Hailo or other NPU,
+- Claude, for the conversation where you want the ceiling raised.
+
+```json
+{
+  "default": "gpu",
+  "backends": [
+    { "name": "gpu",  "kind": "llamacpp", "base_url": "http://192.168.1.10:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
+    { "name": "cpu",  "kind": "ollama",   "base_url": "http://192.168.1.11:11434/v1",
+      "model": "gemma3:4b" }
+  ]
+}
+```
+
+### 2. Right-sizing the model to the job
+
+Also works now, per conversation. Most of what wintermute does is not hard:
+listing a directory, reading back a metadata result, formatting a filename. A 4B
+model does that at two to three times the tokens/sec of an 8B one on the same
+card. Keep a `fast` backend (or the same backend with a smaller `model`) for
+bulk work and a `smart` one for the conversation where the reasoning matters.
+
+`POST /api/v1/models/plan` will rank what you have against a task class, and
+`recommend_model` exposes the same thing to the assistant.
+
+### 3. Fanning a batch out over independent items
+
+**This is where the real speedup lives.** Renaming a directory of 300 files is
+not one sequential problem — it's 300 nearly independent ones. Each needs a
+lookup and a proposed name; only the final approval pass is inherently serial.
+
+That shape parallelises properly across backends, because each item is a *fresh
+short prompt* rather than a continuation of a growing transcript — so the prompt
+cache objection above doesn't apply. Two machines genuinely halve it. This is
+built: see [the batch pool](#the-batch-pool).
+
+### 4. What doesn't earn its keep
+
+**Racing the same request against two backends and taking the first reply.** It
+cuts the tail of the latency distribution and burns double the compute to do it.
+On shared home hardware the wasted work slows down everything else you're
+running. Not worth it here.
+
+**Sharding a single model across machines** (`--rpc` in llama.cpp, tensor
+parallelism in vLLM). This makes a model *fit* that otherwise wouldn't. Over
+gigabit Ethernet it is usually slower than running a smaller model that fits on
+one card. Consider it only when you truly need a model that doesn't fit
+anywhere, and expect single-digit tokens/sec.
+
+## Configuration recipes
+
+### Local default, Claude available on request
+
+The common setup. Local is default; nothing reaches the cloud unless a
+conversation explicitly asks.
+
+```json
+{
+  "default": "local",
+  "backends": [
+    { "name": "local",  "kind": "llamacpp",  "base_url": "http://127.0.0.1:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
+    { "name": "claude", "kind": "anthropic", "api_key_env": "ANTHROPIC_API_KEY",
+      "model": "claude-opus-5" }
+  ]
+}
+```
+
+Note there is no `"fallback"`. Add `"fallback": "claude"` only if you accept
+that a local outage sends transcripts off your network. The turn will tell you
+it happened (`fell_back_from`), but it will have happened.
+
+### Fast and smart on one host, via llama-swap
+
+llama-swap serves several models behind one address, loading them on demand.
+
+```json
+{
+  "default": "fast",
+  "backends": [
+    { "name": "fast",  "kind": "llamacpp", "base_url": "http://127.0.0.1:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "gemma3-4b" },
+    { "name": "smart", "kind": "llamacpp", "base_url": "http://127.0.0.1:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "gemma3-12b" }
+  ]
+}
+```
+
+Read [the swap-thrash gotcha](#gotchas-that-will-cost-you-performance) before
+using this one — it has a sharp edge.
+
+### Several machines
+
+```json
+{
+  "default": "workstation",
+  "backends": [
+    { "name": "workstation", "kind": "llamacpp", "base_url": "http://192.168.1.10:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
+    { "name": "nas",         "kind": "ollama",   "base_url": "http://192.168.1.11:11434/v1",
+      "model": "gemma3:4b" },
+    { "name": "npu",         "kind": "hailo",    "base_url": "http://192.168.1.12:11434/v1",
+      "model": "qwen2.5-1.5b" },
+    { "name": "claude",      "kind": "anthropic", "api_key_env": "ANTHROPIC_API_KEY" }
+  ]
+}
+```
+
+Every backend is probed at startup and recorded with its health. One being down
+is normal and never blocks the server; `GET /api/v1/backends` shows the state
+and `POST /api/v1/backends/refresh` re-checks.
+
+## Gotchas that will cost you performance
+
+**llama-swap thrashing.** Two backends pointing at one llama-swap instance with
+*different* models will swap the GPU back and forth on every alternating
+request — unloading and reloading multi-gigabyte weights each time. Two
+conversations, one on `fast` and one on `smart`, can spend more wall-clock time
+loading models than generating. Either keep concurrent conversations on the same
+model, give each model its own `llama-server` process on its own port (if VRAM
+allows — on 8 GB it usually doesn't), or accept that switching is a
+between-jobs operation rather than a concurrent one.
+
+**Context is divided among slots.** `llama-server --parallel 4 --ctx-size 16384`
+gives each slot 4096 tokens, not 16384. An agent transcript grows fast; a turn
+that silently truncates its history behaves bizarrely. Size context per slot,
+then multiply.
+
+**Ollama serialises per model by default** and unloads after five minutes idle.
+Set `OLLAMA_KEEP_ALIVE=30m`, or pay a multi-second reload on the first turn
+after a coffee break. `OLLAMA_NUM_PARALLEL` controls concurrency.
+
+**A cloud fallback fires on a *timeout*, which a slow local model can trigger.**
+`WINTERMUTE_LLM_TIMEOUT` defaults to 10 minutes — generous for an API, not
+necessarily generous for a 12B model doing a long tool-using turn on a
+partly-offloaded card. If you configure a cloud fallback, set the timeout high
+enough that "slow" is never mistaken for "broken".
+
+**Small models fail differently, not just worse.** They lose track of tool
+schemas in long transcripts and start describing tool calls in prose. Two of
+them don't fix that; one better model does. Check `--jinja` first, then check
+whether the model advertises the `tools` capability at all
+(`GET /api/v1/models`).
+
+## Measure before you build
+
+Before adding hardware, find out where the time is going. A turn's response
+reports the backend, the model and token counts:
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/sessions/$ID/messages \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"list /mnt/media/tv and propose renames"}' | jq '{backend, model, usage}'
+```
+
+Then work out which of these you have:
+
+| Symptom | Cause | What helps |
+|---|---|---|
+| High `prompt_tokens`, slow first token | Prompt reprocessing | Pin the session; raise context; don't alternate backends |
+| Slow steady output, low GPU utilisation | Layers on CPU | Smaller model or tighter quant — not more backends |
+| Fine alone, bad with two users | One GPU, two queues | A second *machine* |
+| Many tool round-trips per turn | Task shape | Batch fan-out (below), or a stronger model |
+| First turn slow, rest fine | Model load / swap | `OLLAMA_KEEP_ALIVE`, llama-swap `ttl` |
+
+`nvidia-smi dmon` on the model host while a turn runs answers most of this in
+about thirty seconds.
+
+## The batch pool
+
+A **pool** is the set of backends a batch may be fanned out across. Declare one
+and the assistant gains a `batch_propose_names` tool; declare none and that tool
+does not exist, so the model is never shown a way to fan out that you haven't
+configured.
+
+```json
+{
+  "default": "gpu",
+  "pool": { "backends": ["gpu", "nas", "npu"], "max_inflight": 1 },
+  "backends": [
+    { "name": "gpu", "kind": "llamacpp", "base_url": "http://192.168.1.10:8080/v1",
+      "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
+    { "name": "nas", "kind": "ollama",   "base_url": "http://192.168.1.11:11434/v1",
+      "model": "gemma3:4b" },
+    { "name": "npu", "kind": "hailo",    "base_url": "http://192.168.1.12:11434/v1",
+      "model": "qwen2.5-1.5b" }
+  ]
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `backends` | Pool members. Each must also be declared in `backends`. Order is irrelevant — work goes wherever is free |
+| `max_inflight` | Items **each member** serves at once. Total concurrency is this times the member count. Defaults to 1 |
+
+`max_inflight: 1` is the right default and you should think before raising it.
+On a single-GPU llama-server a second concurrent request divides the throughput
+the card already had instead of adding to it; raise it only for a backend that
+genuinely batches (vLLM, or llama.cpp with enough `--parallel` slots *and* the
+context to divide among them).
+
+There is one pool, not a set of named pools. A second pool would only mean
+something if something chose between them, and nothing does.
+
+### What it does
+
+Given N files, the server builds N independent prompts and runs them across the
+pool. Each item is its own miniature agent loop: it can call the metadata lookup
+tools, and it answers with a proposed name or a decision to skip. The collected
+proposals come back into the conversation as one tool result.
+
+Because each item is a fresh short prompt sharing no prefix with any other,
+there is no served prompt cache to lose by sending it to a different machine —
+which is exactly why this shape parallelises and a conversation doesn't.
+
+### What it guarantees
+
+Fanning out is a throughput trick, not a change to who may do what. Three
+properties are enforced in code rather than asked for in the prompt:
+
+- **A batch worker only ever sees server-side, read-only tools.** It cannot be
+  handed a filesystem tool, so no amount of prompt injection in a filename turns
+  a worker into something that renames a file. It cannot start a batch of its
+  own either.
+- **Workers produce proposals.** Every rename still goes back through the main
+  transcript, out to the client as a pending call, and past your approval policy
+  one file at a time. A 300-file batch does not become 300 unapproved renames.
+- **Every worker's tool call is audited** against the same session, with the
+  call id namespaced per item so concurrent workers stay distinguishable. A
+  fanned-out batch is exactly as traceable as a serial one.
+
+### How it handles failure
+
+- An item that fails is retried on a **different** member (two attempts by
+  default).
+- A member that fails three times in a row is **retired for the rest of that
+  batch**, so a machine that has gone down stops taking work instead of making
+  every remaining item pay a retry.
+- If every member retires, the remaining items come back reported as failed —
+  the batch returns rather than hanging the turn.
+- A failed item is reported as failed, with its error, alongside the ones that
+  worked. One bad filename does not cost you the run.
+- Cancelling the turn cancels the batch, and cancelled work is never retried.
+
+The result carries a summary: how many were proposed, skipped and failed, which
+backend served how many, and — if a cloud backend is in the pool — how many
+items left the network. That last count exists because a batch is the one place
+where a lot of filenames can go off-network at once without anyone approving
+each one.
+
+### Limits and tuning
+
+| | |
+|---|---|
+| Items per call | 200. Beyond that the tool refuses and asks the model to split the work |
+| Iterations per item | 4 tool round-trips, then the item is reported as failed |
+| Progress | Server logs (`batch progress`, every 10%), not the client — a turn is one request/response, so there is nowhere to stream to until the tool result comes back |
+
+Watch `journalctl`/stderr during a long batch. If you see items failing on one
+member and succeeding on another, that member is the problem, and
+`GET /api/v1/backends` will usually agree.
+
+---
+
+## Still to build
+
+### Role-based routing within a turn
+
+Give a backend one or more declared roles, and let the agent pick by role rather
+than by name — a small fast model for mechanical steps inside a turn, the
+conversation's own model for the reasoning.
+
+```json
+{ "name": "fast", "roles": ["summarise", "extract"], ... }
+```
+
+Cheap to implement: the router already dispatches by name, so this adds a
+role→backend lookup. The payoff is modest, though, because the main loop still
+has to run on the model that owns the conversation — the batch pool already
+captures the case where the work is genuinely separable.
+
+### Deliberately not planned
+
+**Splitting a conversation across backends** and **racing duplicate requests**.
+Both are covered above; neither pays. If a turn is slow, the answer is a better
+model or a faster card, not more machines.
+
+## See also
+
+- [docs/local-models.md](local-models.md) — building and tuning a local model
+  server, including what fits in 8 GB
+- [README](../README.md) — backend configuration reference and the API

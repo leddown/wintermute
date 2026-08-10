@@ -2,7 +2,9 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,13 +12,24 @@ import (
 	"path/filepath"
 	"testing"
 
+	"wintermute/internal/agent"
+	"wintermute/internal/llm"
+	"wintermute/internal/models"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
 )
 
-// newTestServer builds a server with no agent. Every endpoint exercised here
-// is rejected by the auth middleware or served without the agent, so a nil
-// agent is safe and keeps the test free of a fake model.
+// stubProvider stands in for a model. No test here advances a turn, but the
+// agent is wired for real so that endpoints reporting configuration — /me
+// listing the available backends — exercise the same code path as production.
+type stubProvider struct{}
+
+func (stubProvider) Name() string { return "stub" }
+
+func (stubProvider) Complete(context.Context, llm.Request) (*llm.Response, error) {
+	return nil, errors.New("stub provider does not complete")
+}
+
 func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 
@@ -27,7 +40,14 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Cleanup(func() { st.Close() })
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return New(nil, st, tool.NewRegistry(), log, "test-model"), st
+	router, err := llm.NewRouter([]*llm.Backend{{Name: "local", Provider: stubProvider{}}}, "local", "", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := tool.NewRegistry()
+	ag := agent.New(router, nil, st, tools, log, 4)
+	cat := models.NewCatalog(nil, st, models.NewHub("", ""), log)
+	return New(ag, st, tools, cat, log), st
 }
 
 func TestAuthentication(t *testing.T) {
@@ -107,7 +127,7 @@ func TestSessionsAreNotVisibleAcrossClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, owner.ID, "private")
+	sess, err := st.CreateSession(ctx, owner.ID, "private", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
