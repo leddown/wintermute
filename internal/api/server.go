@@ -69,6 +69,10 @@ func (s *Server) Handler() http.Handler {
 	authed("POST /api/v1/models/fit", s.handleFit)
 	authed("GET /api/v1/tasks", s.handleTasks)
 
+	// Model Context Protocol. Same bearer token as everything else, so an MCP
+	// client is registered with `wintermuted -add-client` like any other.
+	authed("POST /mcp", s.handleMCP)
+
 	mux.Handle("/", web.Handler())
 
 	return s.recoverPanic(s.logRequests(mux))

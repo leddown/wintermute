@@ -423,6 +423,51 @@ The Hub search is proxied through the server rather than called from the browser
 because the Hub token, if you configured one, must not reach the client — and
 because the results are enriched with a fit verdict only the server can compute.
 
+## MCP server
+
+`POST /mcp` speaks the [Model Context Protocol](https://modelcontextprotocol.io),
+so something that is not the wintermute harness — Claude Code, Claude Desktop,
+another agent — can call this server's tools directly. It implements
+`initialize`, `ping`, `tools/list` and `tools/call` over JSON-RPC 2.0, one
+message per POST, answered with one JSON body.
+
+Authentication is the same bearer token as everything else, so an MCP client is
+registered like any other:
+
+```bash
+./wintermuted -add-client claude-code -kind harness
+```
+
+```json
+{
+  "mcpServers": {
+    "wintermute": {
+      "type": "http",
+      "url": "http://your-server:8080/mcp",
+      "headers": { "Authorization": "Bearer wm_..." }
+    }
+  }
+}
+```
+
+**Only server-side tools are offered** — the metadata lookup and the model
+awareness tools. Client-side tools are absent by design, and this is the same
+boundary the agent loop draws: a client-side tool is *defined* by the fact that
+this server does not run it, and there is nowhere in MCP to hand a call back to
+a third party whose approval policy decides. Advertising `rename_file` here
+would promise an execution the server must never perform. An MCP client that
+wants filesystem actions runs the wintermute harness instead, which owns its
+own roots and its own approval prompts.
+
+Risk levels come through as the annotations an MCP host expects: a read-only
+tool carries `readOnlyHint`, a destructive one `destructiveHint`, so a host that
+gates writes behind approval can do so without knowing anything about
+wintermute's own vocabulary.
+
+A tool that *fails* comes back as a successful call whose result has
+`isError: true` — the caller is meant to read the failure and adapt. Only a
+malformed or unroutable request is a JSON-RPC error.
+
 ## Set up the desktop client
 
 ```bash
