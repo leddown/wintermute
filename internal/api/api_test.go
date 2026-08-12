@@ -47,7 +47,7 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 	tools := tool.NewRegistry()
 	ag := agent.New(router, nil, st, tools, log, 4)
 	cat := models.NewCatalog(nil, st, models.NewHub("", ""), log)
-	return New(ag, st, tools, cat, log), st
+	return New(ag, st, tools, cat, Workspace{}, log), st
 }
 
 func TestAuthentication(t *testing.T) {

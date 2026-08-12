@@ -13,11 +13,14 @@ import (
 
 	"wintermute/internal/agent"
 	"wintermute/internal/api"
+	"wintermute/internal/company"
 	"wintermute/internal/config"
+	"wintermute/internal/crm"
 	"wintermute/internal/llm"
 	"wintermute/internal/lookup"
 	"wintermute/internal/models"
 	"wintermute/internal/store"
+	"wintermute/internal/todo"
 	"wintermute/internal/tool"
 )
 
@@ -114,8 +117,26 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("register model tools: %w", err)
 	}
 
+	// Workspace modules: company profile, CRM and tasks. They share the store's
+	// database handle rather than opening their own — one file, one WAL, one
+	// busy_timeout, all set in store.Open.
+	todoService := todo.NewService(todo.NewSQLiteRepository(st.DB()))
+	workspace := api.Workspace{
+		Company: company.NewService(company.NewStore(st.DB())),
+		CRM:     crm.NewService(crm.NewSQLiteRepository(st.DB())),
+		Todo:    todoService,
+	}
+
+	// The task tools go on the same registry the media and model tools use, so
+	// the assistant that already exists gains them. This is what the RCSA app's
+	// separate Assistant page did; it does not need a second agent here.
+	if err := todo.Register(tools, todoService); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("register task tools: %w", err)
+	}
+
 	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations)
-	srv := api.New(ag, st, tools, catalog, log)
+	srv := api.New(ag, st, tools, catalog, workspace, log)
 
 	return &App{
 		cfg:     cfg,

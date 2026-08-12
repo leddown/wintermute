@@ -11,6 +11,10 @@ The first thing it's built to do is rename media files: your desktop lists a
 NAS share, the server looks the titles up against TMDB/TVDB/OMDb, and the model
 proposes renames that you approve one at a time.
 
+It also carries a small practice-management workspace — tasks, a CRM and your
+company profile — reachable from the same browser UI and the same token. See
+[Workspace](#workspace-tasks-crm-and-company).
+
 - [Set up a local model server](docs/local-models.md) — GPU, drivers, llama.cpp
 - [Running several backends](docs/backends.md) — multiple models at once, and
   when that actually makes anything faster
@@ -134,6 +138,10 @@ once, fanned out across the configured pool. Registered only when a pool is
 declared. Each item is handled by a worker that can see server-side read-only
 tools and nothing else — it proposes, and every resulting rename still goes to
 the client for approval one at a time.
+
+**Server-side, tasks** — `list_todo_lists`, `create_todo_list`, `add_todo_task`:
+read and build the task lists the Tasks view shows. Short on purpose — creating
+a list is reversible and touches nothing anyone audits.
 
 **Client-side** — `list_directory` (read), `stat_path` (read),
 `rename_file` (write; renames in place, never moves between directories). All
@@ -422,6 +430,35 @@ models it can reach:
 The Hub search is proxied through the server rather than called from the browser
 because the Hub token, if you configured one, must not reach the client — and
 because the results are enriched with a fit verdict only the server can compute.
+
+## Workspace: tasks, CRM and company
+
+Beyond the media assistant, the server carries the practice-management modules
+that moved here from an RCSA application: a task list, a CRM (clients,
+engagements, billable time, a billing rollup) and the company profile. They are
+views in the browser UI and endpoints under `/api/v1/todo`, `/api/v1/crm` and
+`/api/v1/company`, behind the same bearer token as everything else.
+
+| View | What it holds |
+| --- | --- |
+| **Tasks** | Lists, tasks, an agenda bucketed into overdue / today / next 14 days |
+| **CRM** | Clients -> engagements -> billable time -> billing, with rates snapshotted at log time so a rate change never reprices invoiced work |
+| **Company** | Your own legal name, address, registration numbers and contact details |
+
+**These are single-user.** The application they came from scoped every row to a
+signed-in user; wintermute has no user accounts, and the boundary is the client
+token. The scoping columns are gone rather than stubbed — see
+`internal/store/migrations/0004_workspace.sql`.
+
+The task module also registers three tools on the agent — `list_todo_lists`,
+`create_todo_list` and `add_todo_task` — so the chat can read and build lists.
+That is what the old application's separate "Assistant" page did; it needed its
+own model client, conversation store and tool registry to do it, and this
+server already had all three.
+
+Google Calendar sync did **not** come across with the tasks: it was an OAuth
+integration with its own encrypted token store, and porting it is a separate
+piece of work.
 
 ## MCP server
 

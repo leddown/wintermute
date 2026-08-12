@@ -21,35 +21,139 @@
 
   <div id="app" class="app" hidden>
     <header class="topbar">
-      <button id="menu" class="icon-btn" aria-label="Sessions">☰</button>
+      <button id="menu" class="icon-btn" aria-label="Menu">☰</button>
       <div class="title">
         <strong>Wintermute</strong>
         <span id="model" class="muted"></span>
       </div>
-      <button id="new-session" class="ghost-btn">New</button>
+      <nav id="views" class="views">
+        <button class="view-btn active" data-view="chat">Chat</button>
+        <button class="view-btn" data-view="tasks">Tasks</button>
+        <button class="view-btn" data-view="crm">CRM</button>
+        <button class="view-btn" data-view="company">Company</button>
+      </nav>
+      <button id="logout" class="link-btn">Sign out</button>
     </header>
 
     <div class="body">
-      <aside id="sidebar" class="sidebar">
-        <div class="sidebar-head">
-          <span class="muted">Sessions</span>
-          <button id="logout" class="link-btn">Sign out</button>
-        </div>
-        <ul id="sessions"></ul>
-      </aside>
+      <!-- Chat -->
+      <section class="view active" data-view="chat">
+        <aside id="sidebar" class="sidebar">
+          <div class="sidebar-head">
+            <span class="muted">Sessions</span>
+            <button id="new-session" class="link-btn">New</button>
+          </div>
+          <ul id="sessions"></ul>
+        </aside>
 
-      <main class="chat">
-        <div id="messages" class="messages">
-          <div class="empty muted">Ask about your media library, or anything else.</div>
-        </div>
-        <form id="composer" class="composer">
-          <textarea id="input" rows="1" placeholder="Message Wintermute…" autocomplete="off"></textarea>
-          <button id="send" type="submit" aria-label="Send">↑</button>
-        </form>
-        <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
-      </main>
+        <main class="chat">
+          <div id="messages" class="messages">
+            <div class="empty muted">Ask about your media library, your tasks, or anything else.</div>
+          </div>
+          <form id="composer" class="composer">
+            <textarea id="input" rows="1" placeholder="Message Wintermute…" autocomplete="off"></textarea>
+            <button id="send" type="submit" aria-label="Send">↑</button>
+          </form>
+          <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
+        </main>
+      </section>
+
+      <!-- Tasks -->
+      <section class="view" data-view="tasks">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <span class="muted">Lists</span>
+            <button id="new-list" class="link-btn">New</button>
+          </div>
+          <ul id="lists"></ul>
+          <div class="sidebar-head" style="margin-top:16px;">
+            <span class="muted">Views</span>
+          </div>
+          <ul id="task-views">
+            <li data-scope="agenda">Agenda</li>
+            <li data-scope="all">All open tasks</li>
+          </ul>
+          <label class="check muted">
+            <input id="show-archived" type="checkbox"> Show archived lists
+          </label>
+        </aside>
+
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="tasks-title">Agenda</h2>
+            <div class="pane-actions">
+              <label class="check muted"><input id="show-done" type="checkbox"> Show done</label>
+              <button id="edit-list" class="ghost-btn" hidden>Edit list</button>
+              <button id="delete-list" class="ghost-btn danger" hidden>Delete list</button>
+            </div>
+          </div>
+          <form id="quick-add" class="row-form" hidden>
+            <input id="quick-title" placeholder="Add a task…" autocomplete="off">
+            <input id="quick-due" type="date" title="Due date">
+            <select id="quick-priority" title="Priority">
+              <option value="normal">Normal</option>
+              <option value="low">Low</option>
+              <option value="high">High</option>
+            </select>
+            <button type="submit">Add</button>
+          </form>
+          <div id="tasks-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- CRM -->
+      <section class="view" data-view="crm">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">CRM</span></div>
+          <ul id="crm-nav">
+            <li data-tab="dashboard" class="active">Dashboard</li>
+            <li data-tab="clients">Clients</li>
+            <li data-tab="engagements">Engagements</li>
+            <li data-tab="time">Time</li>
+            <li data-tab="billing">Billing</li>
+          </ul>
+        </aside>
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="crm-title">Dashboard</h2>
+            <div class="pane-actions">
+              <button id="crm-new" class="ghost-btn" hidden>New</button>
+            </div>
+          </div>
+          <div id="crm-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- Company -->
+      <section class="view" data-view="company">
+        <main class="pane wide">
+          <div class="pane-head">
+            <h2>Company profile</h2>
+            <div class="pane-actions">
+              <span id="company-state" class="muted"></span>
+              <button id="company-clear" class="ghost-btn danger">Clear</button>
+            </div>
+          </div>
+          <div id="company-body" class="pane-body"></div>
+        </main>
+      </section>
     </div>
   </div>
+
+  <!-- One dialog serves every editor; the fields are built per record type. -->
+  <dialog id="editor">
+    <form id="editor-form" method="dialog">
+      <h3 id="editor-title">Edit</h3>
+      <div id="editor-fields" class="fields"></div>
+      <p id="editor-error" class="error" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="editor-cancel" class="ghost-btn">Cancel</button>
+        <button type="submit" id="editor-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden></div>
 
   <script src="/app.js"></script>
 </body>
