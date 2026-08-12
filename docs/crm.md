@@ -91,22 +91,37 @@ Mutations (admin-guarded, like the rest of the app — open in `LOCAL_MODE`):
 
 ## Architecture
 
-Standard repository → service → handler layering on SQLite, matching the risk
-register module:
+Standard repository → service layering on SQLite:
 
 - `model.go` — entity and rollup structs.
 - `repository.go` — SQL with joined display fields and aggregations.
 - `service.go` — validation, status normalization, and rate snapshotting.
-- `grid.go` — a reusable, config-driven JS data grid (clients, engagements,
-  time) with relation dropdowns; one grid keeps the three CRUD screens
-  consistent.
-- `pages.go` — the bespoke dashboard and billing pages.
-- `handler.go` — Gin handlers, grid configs, and route registration.
+
+The HTTP surface lives in `internal/api/workspace.go` (net/http, behind the
+shared bearer token), and the browser view in `internal/web/static/app.js`.
+Earlier versions of this document described `grid.go`, `pages.go` and a
+`handler.go` of Gin handlers; those belonged to the application this module was
+ported from and have never existed here.
+
+## Accounting
+
+Invoices as first-class documents were the obvious next step and are now built
+separately, in [`internal/accounting`](accounting.md): a double-entry ledger
+with gap-free numbering, EU VAT, payments and expenses.
+
+The seam is `crm_bridge.go` in that package. It reads unbilled billable time
+straight from these tables and turns it into a draft invoice, one line per time
+entry, carrying `time_entry_id` so issuing the invoice flags exactly the right
+entries. `crm_time_entries.invoiced` remains the CRM's own flag and is set by
+that step.
+
+One consequence to know about: `acct_invoices.client_id` is
+`ON DELETE RESTRICT`, so **a client with invoices against them can no longer be
+deleted**. Losing an issued invoice to a tidy-up would break a number sequence
+that is required to have no gaps.
 
 ## Extension points (not built yet)
 
-- Invoices as first-class documents (numbering, PDF via `internal/reporting`,
-  payment status) — the data already distinguishes billable/unbilled/invoiced.
-- Expenses and fixed-fee/milestone billing alongside hourly time.
+- Fixed-fee and milestone billing alongside hourly time.
 - Pipeline/opportunity tracking for `Prospect` clients.
 - A client-facing portal and per-user time ownership.

@@ -331,10 +331,34 @@ the server:
 ./wintermuted -add-client desktop              # a harness client (default)
 ./wintermuted -add-client browser -kind browser
 ./wintermuted -list-clients
-./wintermuted -revoke-client desktop
+./wintermuted -revoke-client desktop           # removes the client outright
 ```
 
 The token is printed **once** and stored only as a hash. Copy it now.
+
+`-revoke-client` deletes the client row rather than marking it dead, so the
+token stops working immediately and the name is free to reuse. There is no undo
+and no way to recover the old token.
+
+> **If the server runs as a systemd service, use `scripts/clients.sh` instead.**
+> These flags read `WINTERMUTE_DB` from their own environment and fall back to a
+> *relative* `wintermute.db`. Under systemd the database is named in
+> `/etc/wintermute/wintermute.env`, which is an `EnvironmentFile` — it applies to
+> the service, and an interactive shell never sees it. Run the flags by hand and
+> you get a second database in whatever directory you happened to be in, with
+> the client registered in *that*. The token is genuine; the server simply never
+> opens that file, so the UI answers `invalid token` and nothing on either side
+> explains why.
+
+```bash
+sudo ./scripts/clients.sh list
+sudo ./scripts/clients.sh add laptop browser   # kind defaults to harness
+sudo ./scripts/clients.sh revoke laptop        # prompts first
+```
+
+It reads the database path out of the env file, refuses a relative path, refuses
+to create a database that isn't already there, and runs `wintermuted` as the
+service user so SQLite's `-wal`/`-shm` sidecars keep their ownership.
 
 ### 4. Run
 
@@ -359,6 +383,9 @@ else needs `Authorization: Bearer <token>`.
 running), installs both binaries, applies migrations, registers the first client
 tokens, and installs `deploy/wintermuted.service`. It is safe to re-run —
 anything that already exists is left alone.
+
+Once it is a service, issue and revoke tokens with `scripts/clients.sh` rather
+than the `wintermuted` flags directly — see the warning in step 3.
 
 ```bash
 ./scripts/setup.sh          # first time
@@ -431,19 +458,23 @@ The Hub search is proxied through the server rather than called from the browser
 because the Hub token, if you configured one, must not reach the client — and
 because the results are enriched with a fit verdict only the server can compute.
 
-## Workspace: tasks, CRM and company
+## Workspace: tasks, CRM, accounting and company
 
 Beyond the media assistant, the server carries the practice-management modules
 that moved here from an RCSA application: a task list, a CRM (clients,
-engagements, billable time, a billing rollup) and the company profile. They are
-views in the browser UI and endpoints under `/api/v1/todo`, `/api/v1/crm` and
-`/api/v1/company`, behind the same bearer token as everything else.
+engagements, billable time, a billing rollup) and the company profile — plus a
+double-entry accounting module built on top of the CRM. They are views in the
+browser UI and endpoints under `/api/v1/todo`, `/api/v1/crm`,
+`/api/v1/accounting` and `/api/v1/company`, behind the same bearer token as
+everything else.
 
 | View | What it holds |
 | --- | --- |
 | **Tasks** | Lists, tasks, an agenda bucketed into overdue / today / next 14 days |
 | **CRM** | Clients -> engagements -> billable time -> billing, with rates snapshotted at log time so a rate change never reprices invoiced work |
+| **Accounts** | A general ledger, invoicing with EU VAT and gap-free numbering, payments, expenses and the statements — see [docs/accounting.md](docs/accounting.md) |
 | **Company** | Your own legal name, address, registration numbers and contact details |
+| **Admin** | What the server is actually running with: configuration, backends, hardware, tools and client tokens |
 
 **These are single-user.** The application they came from scoped every row to a
 signed-in user; wintermute has no user accounts, and the boundary is the client
@@ -459,6 +490,38 @@ server already had all three.
 Google Calendar sync did **not** come across with the tasks: it was an OAuth
 integration with its own encrypted token store, and porting it is a separate
 piece of work.
+
+## Admin
+
+The **Admin** view answers "why is the server behaving like this?" without an
+ssh session, over `/api/v1/admin/*`:
+
+| Tab | Shows |
+| --- | --- |
+| **Status** | Uptime, database path and size, write-ahead log size, row counts, registered tool count |
+| **Configuration** | Listen address, database, backends file, model routing, token and iteration limits |
+| **Backends** | Each backend's kind, model and probe status, with a re-probe button |
+| **Hardware** | Host, CPU, memory and GPUs, as `GET /api/v1/system` reports them |
+| **Tools** | Every server-side tool with the risk level it declares |
+| **Clients** | Registered clients, when they were created and last seen, with revoke |
+
+Two things it deliberately does not do.
+
+**It never returns a secret.** API keys and the Hugging Face token are reported
+as configured or not, never by value — this is a page that gets left open and
+screenshotted. Client tokens could not be shown even if that were wanted, since
+the store keeps only their hashes.
+
+**It cannot issue a token.** `wintermuted -add-client` (or `scripts/clients.sh
+add`) remains the only way to mint one, which keeps issuance on the machine. A
+leaked browser token that could mint more would turn one stolen session into
+permanent access. Revocation is exposed because it only ever removes access —
+and revoking the client you are signed in as is refused with a `409`, since it
+would lock you out mid-click with no way to explain why.
+
+Configuration is read from the environment at startup and shown as a snapshot.
+Changing any of it needs a restart, so the page presents it read-only rather
+than offering fields it cannot honour.
 
 ## MCP server
 
@@ -554,9 +617,19 @@ would otherwise get on every rename — use it deliberately.
 ## Browser UI
 
 The server serves an embedded UI at its listen address (`http://localhost:8080`
-by default). Create a token with `-kind browser`, open the page, and paste it
-in; it's kept in `localStorage` and mirrored into a cookie so plain navigations
+by default). Create a token with `-kind browser` — or `scripts/clients.sh add
+<name> browser` on a service install — then open the page and paste it in; it's
+kept in `localStorage` and mirrored into a cookie so plain navigations
 authenticate too.
+
+If the page rejects a token you just issued, the token is almost certainly in a
+different database from the one the server reads; step 3 explains why. Confirm
+with `sudo ./scripts/clients.sh list` — if the client isn't in that listing, the
+server cannot see it either.
+
+The kind is recorded for the UI and the audit trail and gates nothing, so a
+`harness` token will log the browser in as well; use `browser` anyway so
+`-list-clients` stays meaningful.
 
 The browser has no local action set, so it can chat and use server-side lookups,
 but it cannot list or rename anything on your disks. That takes the desktop

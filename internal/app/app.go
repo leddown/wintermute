@@ -9,8 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"runtime"
 	"time"
 
+	"wintermute/internal/accounting"
 	"wintermute/internal/agent"
 	"wintermute/internal/api"
 	"wintermute/internal/company"
@@ -122,21 +125,47 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	// busy_timeout, all set in store.Open.
 	todoService := todo.NewService(todo.NewSQLiteRepository(st.DB()))
 	workspace := api.Workspace{
-		Company: company.NewService(company.NewStore(st.DB())),
-		CRM:     crm.NewService(crm.NewSQLiteRepository(st.DB())),
-		Todo:    todoService,
+		Company:    company.NewService(company.NewStore(st.DB())),
+		CRM:        crm.NewService(crm.NewSQLiteRepository(st.DB())),
+		Accounting: accounting.NewService(accounting.NewSQLiteRepository(st.DB())),
+		Todo:       todoService,
 	}
 
 	// The task tools go on the same registry the media and model tools use, so
 	// the assistant that already exists gains them. This is what the RCSA app's
 	// separate Assistant page did; it does not need a second agent here.
+	if err := accounting.Register(tools, workspace.Accounting); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("register accounting tools: %w", err)
+	}
 	if err := todo.Register(tools, todoService); err != nil {
 		st.Close()
 		return nil, fmt.Errorf("register task tools: %w", err)
 	}
 
 	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations)
-	srv := api.New(ag, st, tools, catalog, workspace, log)
+	// A snapshot of what the server is actually running with, for the admin
+	// screen. Assembled here because this is the only package that sees the
+	// whole configuration, and deliberately carrying no secret values.
+	info := api.ServerInfo{
+		Addr:                cfg.Addr,
+		DatabasePath:        cfg.DatabasePath,
+		BackendsPath:        os.Getenv("WINTERMUTE_BACKENDS"),
+		DefaultBackend:      cfg.DefaultBackend,
+		FallbackBackend:     cfg.FallbackBackend,
+		LLMMaxTokens:        cfg.LLMMaxTokens,
+		LLMTimeout:          cfg.LLMTimeout,
+		MaxToolIterations:   cfg.MaxToolIterations,
+		MetadataProviders:   providers.Names(),
+		HasHuggingFaceToken: cfg.HuggingFaceToken != "",
+		GoVersion:           runtime.Version(),
+		StartedAt:           time.Now().UTC(),
+	}
+	if cfg.Pool != nil {
+		info.PoolBackends = cfg.Pool.Backends
+	}
+
+	srv := api.New(ag, st, tools, catalog, workspace, info, log)
 
 	return &App{
 		cfg:     cfg,

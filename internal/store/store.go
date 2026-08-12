@@ -4,6 +4,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"embed"
 	"errors"
@@ -108,4 +109,24 @@ func (s *Store) migrate() error {
 		}
 	}
 	return nil
+}
+
+// Counts returns row counts for the tables an operator asks about. A table that
+// fails to count is reported as absent rather than failing the whole call: the
+// caller is an admin screen, and one broken count should not blank the page.
+func (s *Store) Counts(ctx context.Context) (map[string]int, error) {
+	out := map[string]int{}
+	var firstErr error
+	for _, table := range []string{"sessions", "messages", "tool_audit", "clients"} {
+		var n int
+		// The table name is from this fixed list, never from a request.
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		out[table] = n
+	}
+	return out, firstErr
 }

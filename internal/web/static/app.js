@@ -73,7 +73,14 @@ $('gate-form').addEventListener('submit', async (e) => {
     start(me);
   } catch (e2) {
     state.token = null;
-    err.textContent = e2.message;
+    // A rejected token is usually a real token that was issued into a different
+    // database from the one this server reads: `wintermuted -add-client`
+    // defaults to a relative wintermute.db, which is not the file a systemd
+    // install uses. Saying only "invalid" sends people to re-read the token
+    // they pasted, which is the one thing that is not wrong.
+    err.textContent = /invalid token/i.test(e2.message)
+      ? `${e2.message} — check it was issued into the database this server reads (sudo scripts/clients.sh list).`
+      : e2.message;
     err.hidden = false;
   }
 });
@@ -99,7 +106,9 @@ const loaded = new Set();
 const loaders = {
   tasks: () => Promise.all([loadLists(), renderTasks()]),
   crm: () => renderCRM(),
+  accounting: () => renderAccounting(),
   company: () => loadCompany(),
+  admin: () => renderAdmin(),
 };
 
 function switchView(name) {
@@ -848,4 +857,616 @@ if (saved) {
     state.token = null;
     localStorage.removeItem('wintermute_token');
   });
+}
+
+/* ---------- accounting ----------
+   The accounting API speaks minor units — integer cents — because the ledger
+   cannot use floats and stay balanced. Nothing here converts them back into a
+   float for arithmetic; `cents()` is a formatter and that is all it is. */
+
+const cents = (n) => ((Number(n) || 0) / 100).toLocaleString(undefined, {
+  minimumFractionDigits: 2, maximumFractionDigits: 2,
+});
+// Quantities arrive as thousandths so an hours figure stays exact.
+const qty = (n) => ((Number(n) || 0) / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 });
+
+const acct = { tab: 'overview', currency: '', accounts: [], vatRates: [] };
+
+for (const li of document.querySelectorAll('#acct-nav li')) {
+  li.addEventListener('click', () => {
+    acct.tab = li.dataset.tab;
+    for (const other of document.querySelectorAll('#acct-nav li')) {
+      other.classList.toggle('active', other === li);
+    }
+    renderAccounting().catch(showError);
+    closeSidebar();
+  });
+}
+
+$('acct-new').addEventListener('click', () => {
+  if (acct.tab === 'expenses') editExpense();
+  else if (acct.tab === 'invoices') newInvoiceFromTime();
+});
+
+async function renderAccounting() {
+  const body = $('acct-body');
+  const titles = {
+    overview: 'Overview', unbilled: 'Ready to bill', invoices: 'Invoices',
+    payments: 'Payments', expenses: 'Expenses', reports: 'Reports',
+    accounts: 'Chart of accounts',
+  };
+  $('acct-title').textContent = titles[acct.tab];
+  $('acct-new').hidden = !['expenses', 'invoices'].includes(acct.tab);
+  $('acct-new').textContent = acct.tab === 'invoices' ? 'Bill time' : 'New';
+  body.innerHTML = '';
+
+  if (!acct.currency) {
+    const s = await api('/api/v1/accounting/settings');
+    acct.currency = s.currency || '';
+  }
+  if (acct.tab === 'overview') return renderAcctOverview(body);
+  if (acct.tab === 'unbilled') return renderUnbilled(body);
+  if (acct.tab === 'invoices') return renderInvoices(body);
+  if (acct.tab === 'payments') return renderPayments(body);
+  if (acct.tab === 'expenses') return renderExpenses(body);
+  if (acct.tab === 'reports') return renderReports(body);
+  return renderChartOfAccounts(body);
+}
+
+async function renderAcctOverview(body) {
+  const d = await api('/api/v1/accounting/dashboard');
+  body.append(el('div', { class: 'stats' },
+    stat(cents(d.bank_balance), 'Bank'),
+    stat(cents(d.outstanding_total), 'Owed to us'),
+    stat(cents(d.overdue_total), 'Overdue'),
+    stat(cents(d.unbilled_time_amount), 'Unbilled time'),
+    stat(cents(d.profit_this_year), 'Profit YTD'),
+    stat(cents(Math.abs(d.vat_position)), d.vat_position >= 0 ? 'VAT payable' : 'VAT reclaimable')));
+
+  if (d.draft_invoice_count) {
+    body.append(el('div', { class: 'muted', text:
+      `${d.draft_invoice_count} draft invoice(s) not yet issued.` }));
+  }
+  if (d.recent_invoices && d.recent_invoices.length) {
+    body.append(el('div', { class: 'group-head', text: 'Recent invoices' }));
+    body.append(table(['Number', 'Client', 'Issued', 'Total', 'Outstanding', 'Status'],
+      d.recent_invoices.map((i) => [
+        i.number || 'draft', i.client_name, i.issue_date || '—',
+        cents(i.total), cents(i.total - i.paid), i.status,
+      ]), [false, false, false, true, true, false]));
+  }
+}
+
+async function renderUnbilled(body) {
+  const { entries } = await api('/api/v1/accounting/unbilled');
+  if (!entries || !entries.length) {
+    body.append(el('div', { class: 'empty muted', text: 'Nothing waiting to be billed.' }));
+    return;
+  }
+  // Grouped by client, because billing happens per client — an invoice cannot
+  // span two of them, and the module refuses if you try.
+  const byClient = new Map();
+  for (const e of entries) {
+    if (!byClient.has(e.client_id)) byClient.set(e.client_id, { name: e.client_name, rows: [], total: 0 });
+    const g = byClient.get(e.client_id);
+    g.rows.push(e);
+    g.total += e.amount;
+  }
+  for (const [clientID, g] of byClient) {
+    const head = el('div', { class: 'group-head' },
+      el('span', { text: `${g.name} — ${cents(g.total)}` }),
+      el('button', { class: 'ghost-btn', text: 'Draft invoice' }));
+    head.lastChild.addEventListener('click', () => draftFromTime(clientID));
+    body.append(head);
+    body.append(table(['Date', 'Engagement', 'Description', 'Hours', 'Rate', 'Amount'],
+      g.rows.map((e) => [e.entry_date, e.engagement_name, e.description,
+        qty(e.hours), cents(e.rate), cents(e.amount)]),
+      [false, false, false, true, true, true]));
+  }
+}
+
+async function draftFromTime(clientID) {
+  const inv = await api('/api/v1/accounting/unbilled/draft', {
+    method: 'POST', body: JSON.stringify({ client_id: clientID }),
+  });
+  toast(`Draft ${cents(inv.total)} created — review it under Invoices before issuing.`);
+  acct.tab = 'invoices';
+  for (const li of document.querySelectorAll('#acct-nav li')) {
+    li.classList.toggle('active', li.dataset.tab === 'invoices');
+  }
+  return renderAccounting();
+}
+
+function newInvoiceFromTime() {
+  acct.tab = 'unbilled';
+  for (const li of document.querySelectorAll('#acct-nav li')) {
+    li.classList.toggle('active', li.dataset.tab === 'unbilled');
+  }
+  renderAccounting().catch(showError);
+}
+
+async function renderInvoices(body) {
+  const { invoices } = await api('/api/v1/accounting/invoices');
+  if (!invoices || !invoices.length) {
+    body.append(el('div', { class: 'empty muted', text: 'No invoices yet.' }));
+    return;
+  }
+  body.append(table(
+    ['Number', 'Client', 'Issued', 'Due', 'Total', 'Outstanding', 'Status', ''],
+    invoices.map((i) => [
+      i.number || `draft #${i.id}`, i.client_name, i.issue_date || '—', i.due_date || '—',
+      cents(i.total), cents(i.total - i.paid), i.status, invoiceActions(i),
+    ]), [false, false, false, false, true, true, false, false]));
+}
+
+// Which actions exist depends on status, and the rules are the module's: a
+// draft can be issued or deleted, an issued invoice can only be paid, voided or
+// credited. Showing an Edit button on an issued invoice would promise something
+// the server will refuse.
+function invoiceActions(inv) {
+  const wrap = el('div', { class: 'row-actions' });
+  const add = (label, fn, cls) => {
+    const b = el('button', { class: cls || 'ghost-btn', text: label });
+    b.addEventListener('click', fn);
+    wrap.append(b);
+  };
+  add('View', () => viewInvoice(inv.id));
+  if (inv.status === 'draft') {
+    add('Issue', () => issueInvoice(inv), 'ghost-btn danger');
+    add('Delete', () => deleteDraft(inv));
+  } else if (inv.status !== 'void') {
+    if (inv.total !== inv.paid) add('Pay', () => payInvoice(inv));
+    add('Credit', () => creditInvoice(inv));
+    if (inv.paid === 0) add('Void', () => voidInvoice(inv), 'ghost-btn danger');
+  }
+  return wrap;
+}
+
+async function viewInvoice(id) {
+  const inv = await api(`/api/v1/accounting/invoices/${id}`);
+  const body = $('acct-body');
+  body.innerHTML = '';
+  const back = el('button', { class: 'ghost-btn', text: '← Invoices' });
+  back.addEventListener('click', () => renderAccounting().catch(showError));
+  body.append(back);
+  body.append(el('div', { class: 'group-head', text:
+    `${inv.number || `Draft #${inv.id}`} — ${inv.client_name} (${inv.status})` }));
+  body.append(el('div', { class: 'muted', text:
+    `Issued ${inv.issue_date || '—'}, due ${inv.due_date || '—'}` }));
+  if (inv.reverse_charge) {
+    body.append(el('div', { class: 'muted', text:
+      `Reverse charge — customer VAT ${inv.customer_vat_number}` }));
+  }
+  body.append(table(['Description', 'Qty', 'Unit', 'Net', 'VAT'],
+    (inv.lines || []).map((l) => [l.description, qty(l.quantity), cents(l.unit_price),
+      cents(l.net), cents(l.vat)]), [false, true, true, true, true]));
+  body.append(el('div', { class: 'stats' },
+    stat(cents(inv.subtotal), 'Subtotal'),
+    stat(cents(inv.vat), 'VAT'),
+    stat(cents(inv.total), 'Total'),
+    stat(cents(inv.total - inv.paid), 'Outstanding')));
+}
+
+// Issuing is irreversible, so the confirmation says so in the words that
+// matter rather than "Are you sure?".
+async function issueInvoice(inv) {
+  const ok = confirm(
+    `Issue this invoice for ${cents(inv.total)} to ${inv.client_name}?\n\n` +
+    `It will take the next number in the sequence and be posted to the ledger. ` +
+    `Afterwards it cannot be edited or deleted — only voided or corrected with a credit note.`);
+  if (!ok) return;
+  const issued = await api(`/api/v1/accounting/invoices/${inv.id}/issue`, { method: 'POST' });
+  toast(`Issued ${issued.number}`);
+  return renderAccounting();
+}
+
+async function deleteDraft(inv) {
+  if (!confirm('Delete this draft? Nothing has been posted, so nothing is lost.')) return;
+  await api(`/api/v1/accounting/invoices/${inv.id}`, { method: 'DELETE' });
+  return renderAccounting();
+}
+
+function payInvoice(inv) {
+  const outstanding = inv.total - inv.paid;
+  openEditor('Record payment', [
+    { name: 'amount', label: `Amount (${acct.currency})`, value: (outstanding / 100).toFixed(2) },
+    { name: 'paid_on', label: 'Received on', type: 'date' },
+    { name: 'reference', label: 'Reference' },
+    { name: 'method', label: 'Method', type: 'select', value: 'bank',
+      options: [{ value: 'bank', label: 'Bank' }, { value: 'card', label: 'Card' }, { value: 'cash', label: 'Cash' }] },
+  ], async (v) => {
+    await api('/api/v1/accounting/payments', {
+      method: 'POST',
+      body: JSON.stringify({
+        invoice_id: inv.id,
+        amount: Math.round(parseFloat(v.amount || '0') * 100),
+        paid_on: v.paid_on, reference: v.reference, method: v.method,
+      }),
+    });
+    await renderAccounting();
+  });
+}
+
+function voidInvoice(inv) {
+  openEditor(`Void ${inv.number}`, [
+    { name: 'reason', label: 'Reason', type: 'textarea' },
+  ], async (v) => {
+    await api(`/api/v1/accounting/invoices/${inv.id}/void`, {
+      method: 'POST', body: JSON.stringify({ reason: v.reason }),
+    });
+    await renderAccounting();
+  });
+}
+
+function creditInvoice(inv) {
+  openEditor(`Credit note for ${inv.number}`, [
+    { name: 'reason', label: 'Reason', type: 'textarea' },
+  ], async (v) => {
+    const note = await api(`/api/v1/accounting/invoices/${inv.id}/credit`, {
+      method: 'POST', body: JSON.stringify({ reason: v.reason }),
+    });
+    toast(`Credit note drafted for ${cents(note.total)} — issue it to post it.`);
+    await renderAccounting();
+  });
+}
+
+async function renderPayments(body) {
+  const { payments } = await api('/api/v1/accounting/payments');
+  if (!payments || !payments.length) {
+    body.append(el('div', { class: 'empty muted', text: 'No payments recorded.' }));
+    return;
+  }
+  body.append(table(['Date', 'Invoice', 'Client', 'Amount', 'Method', 'Reference'],
+    payments.map((p) => [p.paid_on, p.invoice_number, p.client_name,
+      cents(p.amount), p.method, p.reference]),
+    [false, false, false, true, false, false]));
+}
+
+async function renderExpenses(body) {
+  const { expenses } = await api('/api/v1/accounting/expenses');
+  if (!expenses || !expenses.length) {
+    body.append(el('div', { class: 'empty muted', text: 'No expenses recorded.' }));
+    return;
+  }
+  body.append(table(['Date', 'Vendor', 'Category', 'Net', 'VAT', 'Total', 'Paid from'],
+    expenses.map((x) => [x.spent_on, x.vendor, x.account_name,
+      cents(x.net), cents(x.vat), cents(x.total), x.paid_from_name]),
+    [false, false, false, true, true, true, false]));
+}
+
+async function editExpense() {
+  await loadAcctLookups();
+  const expenseAccounts = acct.accounts.filter((a) => a.type === 'expense' || a.type === 'asset');
+  const sources = acct.accounts.filter((a) => a.type === 'asset' || a.type === 'liability');
+  openEditor('Record expense', [
+    { name: 'vendor', label: 'Vendor' },
+    { name: 'description', label: 'Description' },
+    { name: 'spent_on', label: 'Date', type: 'date' },
+    { name: 'net', label: `Net amount (${acct.currency})` },
+    { name: 'account_id', label: 'Category', type: 'select',
+      options: expenseAccounts.map((a) => ({ value: String(a.id), label: `${a.code} ${a.name}` })) },
+    { name: 'paid_from_id', label: 'Paid from', type: 'select',
+      options: sources.map((a) => ({ value: String(a.id), label: `${a.code} ${a.name}` })) },
+    { name: 'vat_rate_id', label: 'VAT', type: 'select',
+      options: [{ value: '0', label: 'None' }].concat(
+        acct.vatRates.map((r) => ({ value: String(r.id), label: `${r.name} (${r.rate_bp / 100}%)` }))) },
+    { name: 'vat_reclaimable', label: 'VAT reclaimable', type: 'checkbox', value: true },
+  ], async (v) => {
+    await api('/api/v1/accounting/expenses', {
+      method: 'POST',
+      body: JSON.stringify({
+        vendor: v.vendor, description: v.description, spent_on: v.spent_on,
+        net: Math.round(parseFloat(v.net || '0') * 100),
+        account_id: Number(v.account_id), paid_from_id: Number(v.paid_from_id),
+        vat_rate_id: Number(v.vat_rate_id), vat_reclaimable: Boolean(v.vat_reclaimable),
+      }),
+    });
+    await renderAccounting();
+  });
+}
+
+async function loadAcctLookups() {
+  if (!acct.accounts.length) {
+    const { accounts } = await api('/api/v1/accounting/accounts');
+    acct.accounts = accounts || [];
+  }
+  if (!acct.vatRates.length) {
+    const { rates } = await api('/api/v1/accounting/vat-rates');
+    acct.vatRates = rates || [];
+  }
+}
+
+async function renderChartOfAccounts(body) {
+  const { accounts } = await api('/api/v1/accounting/accounts');
+  acct.accounts = accounts || [];
+  body.append(table(['Code', 'Name', 'Type', 'System'],
+    acct.accounts.map((a) => [a.code, a.name, a.type, a.system_key || '']),
+    [false, false, false, false]));
+}
+
+async function renderReports(body) {
+  const today = new Date().toISOString().slice(0, 10);
+  const yearStart = `${new Date().getFullYear()}-01-01`;
+  const picker = el('div', { class: 'row-form' },
+    el('label', { text: 'Report' }),
+    el('select', { id: 'acct-report' },
+      [['profit-loss', 'Profit and loss'], ['balance-sheet', 'Balance sheet'],
+       ['trial-balance', 'Trial balance'], ['aged-receivables', 'Aged receivables'],
+       ['vat', 'VAT summary']].map(([v, l]) => el('option', { value: v, text: l }))),
+    el('label', { text: 'From' }), el('input', { type: 'date', id: 'acct-from', value: yearStart }),
+    el('label', { text: 'To' }), el('input', { type: 'date', id: 'acct-to', value: today }),
+    el('button', { class: 'ghost-btn', text: 'Run' }));
+  picker.lastChild.addEventListener('click', () => runReport().catch(showError));
+  body.append(picker);
+  body.append(el('div', { id: 'acct-report-out' }));
+  return runReport();
+}
+
+async function runReport() {
+  const out = $('acct-report-out');
+  const kind = $('acct-report').value;
+  const from = $('acct-from').value;
+  const to = $('acct-to').value;
+  out.innerHTML = '';
+
+  if (kind === 'profit-loss') {
+    const r = await api(`/api/v1/accounting/reports/profit-loss?from=${from}&to=${to}`);
+    out.append(el('div', { class: 'group-head', text: 'Income' }));
+    out.append(table(['Code', 'Account', 'Amount'],
+      r.income.map((l) => [l.code, l.name, cents(l.amount)]), [false, false, true]));
+    out.append(el('div', { class: 'group-head', text: 'Expenses' }));
+    out.append(table(['Code', 'Account', 'Amount'],
+      r.expenses.map((l) => [l.code, l.name, cents(l.amount)]), [false, false, true]));
+    out.append(el('div', { class: 'stats' },
+      stat(cents(r.total_income), 'Income'),
+      stat(cents(r.total_expenses), 'Expenses'),
+      stat(cents(r.net_profit), 'Net profit')));
+  } else if (kind === 'balance-sheet') {
+    const r = await api(`/api/v1/accounting/reports/balance-sheet?as_of=${to}`);
+    for (const [label, rows] of [['Assets', r.assets], ['Liabilities', r.liabilities], ['Equity', r.equity]]) {
+      out.append(el('div', { class: 'group-head', text: label }));
+      out.append(table(['Code', 'Account', 'Amount'],
+        rows.map((l) => [l.code, l.name, cents(l.amount)]), [false, false, true]));
+    }
+    out.append(el('div', { class: 'stats' },
+      stat(cents(r.total_assets), 'Assets'),
+      stat(cents(r.total_liabilities), 'Liabilities'),
+      stat(cents(r.total_equity + r.current_earnings), 'Equity'),
+      stat(cents(r.current_earnings), 'Earnings not closed')));
+    if (!r.balanced) {
+      out.append(el('div', { class: 'error', text:
+        'This balance sheet does not balance — something has written to the ledger outside the module.' }));
+    }
+  } else if (kind === 'trial-balance') {
+    const r = await api(`/api/v1/accounting/reports/trial-balance?from=${from}&to=${to}`);
+    out.append(table(['Code', 'Account', 'Debit', 'Credit'],
+      r.rows.map((l) => [l.code, l.name, cents(l.debit), cents(l.credit)]),
+      [false, false, true, true]));
+    out.append(el('div', { class: 'stats' },
+      stat(cents(r.total_debit), 'Debits'),
+      stat(cents(r.total_credit), 'Credits'),
+      stat(r.balanced ? 'Yes' : 'NO', 'Balanced')));
+  } else if (kind === 'aged-receivables') {
+    const r = await api(`/api/v1/accounting/reports/aged-receivables?as_of=${to}`);
+    out.append(table(['Client', 'Current', '1–30', '31–60', '61–90', '90+', 'Total'],
+      r.rows.map((row) => [row.client_name, cents(row.buckets.current), cents(row.buckets.days_1_30),
+        cents(row.buckets.days_31_60), cents(row.buckets.days_61_90),
+        cents(row.buckets.days_90_plus), cents(row.buckets.total)]),
+      [false, true, true, true, true, true, true]));
+    out.append(el('div', { class: 'stats' },
+      stat(cents(r.totals.total), 'Total owed'),
+      stat(cents(r.totals.total - r.totals.current), 'Overdue')));
+  } else {
+    const r = await api(`/api/v1/accounting/reports/vat?from=${from}&to=${to}`);
+    out.append(table(['Line', 'Amount'], [
+      ['Standard-rated sales', cents(r.net_sales_standard)],
+      ['Zero-rated sales', cents(r.net_sales_zero)],
+      ['Exempt sales', cents(r.net_sales_exempt)],
+      ['Reverse-charge sales', cents(r.net_sales_reverse_charge)],
+      ['Output VAT', cents(r.output_vat)],
+      ['Purchases', cents(r.net_purchases)],
+      ['Input VAT', cents(r.input_vat)],
+      [r.net_due >= 0 ? 'Payable' : 'Reclaimable', cents(Math.abs(r.net_due))],
+    ], [false, true]));
+    if (r.note) out.append(el('div', { class: 'error', text: r.note }));
+    out.append(el('div', { class: 'muted', text:
+      'A summary to fill a return in from, not a filing.' }));
+  }
+}
+
+/* ---------- admin ----------
+   Answers "why is the server behaving like this?" without ssh. Everything here
+   is read-only except revoking a client, because the server exposes nothing
+   else: configuration comes from the environment and a restart, and pretending
+   otherwise with editable fields would be a lie the page cannot honour. */
+
+const admin = { tab: 'status' };
+
+for (const li of document.querySelectorAll('#admin-nav li')) {
+  li.addEventListener('click', () => {
+    admin.tab = li.dataset.tab;
+    for (const other of document.querySelectorAll('#admin-nav li')) {
+      other.classList.toggle('active', other === li);
+    }
+    renderAdmin().catch(showError);
+    closeSidebar();
+  });
+}
+$('admin-refresh').addEventListener('click', () => renderAdmin().catch(showError));
+
+const bytes = (n) => {
+  const v = Number(n) || 0;
+  if (v < 1024) return `${v} B`;
+  if (v < 1024 * 1024) return `${(v / 1024).toFixed(1)} KB`;
+  if (v < 1024 * 1024 * 1024) return `${(v / 1024 / 1024).toFixed(1)} MB`;
+  return `${(v / 1024 / 1024 / 1024).toFixed(2)} GB`;
+};
+
+// Two-column key/value list, the shape most of this page wants.
+function facts(pairs) {
+  return el('div', { class: 'table-wrap' },
+    el('table', {}, el('tbody', {}, pairs.filter(Boolean).map(([k, v]) =>
+      el('tr', {},
+        el('td', { class: 'muted', text: k }),
+        v && v.nodeType ? el('td', {}, v) : el('td', { text: String(v ?? '—') }))))));
+}
+
+async function renderAdmin() {
+  const body = $('admin-body');
+  const titles = {
+    status: 'Status', config: 'Configuration', backends: 'Backends',
+    hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
+  };
+  $('admin-title').textContent = titles[admin.tab];
+  body.innerHTML = '';
+
+  if (admin.tab === 'status') return renderAdminStatus(body);
+  if (admin.tab === 'config') return renderAdminConfig(body);
+  if (admin.tab === 'backends') return renderAdminBackends(body);
+  if (admin.tab === 'hardware') return renderAdminHardware(body);
+  if (admin.tab === 'tools') return renderAdminTools(body);
+  return renderAdminClients(body);
+}
+
+async function renderAdminStatus(body) {
+  const s = await api('/api/v1/admin/status');
+  body.append(el('div', { class: 'stats' },
+    stat(s.uptime, 'Uptime'),
+    stat(s.sessions, 'Sessions'),
+    stat(s.messages, 'Messages'),
+    stat(s.tool_audit, 'Audited calls'),
+    stat(s.clients, 'Clients'),
+    stat(s.server_tools, 'Server tools')));
+
+  body.append(el('div', { class: 'group-head', text: 'Database' }));
+  body.append(facts([
+    ['Path', s.database_path],
+    ['Size', bytes(s.database_bytes)],
+    // A WAL that keeps growing usually means a reader is holding a transaction
+    // open, so it is worth showing next to the database rather than buried.
+    ['Write-ahead log', bytes(s.wal_bytes)],
+    ['Started', s.started_at],
+  ]));
+}
+
+async function renderAdminConfig(body) {
+  const c = await api('/api/v1/admin/config');
+  body.append(el('div', { class: 'muted', text:
+    'Read from the environment at startup. Changing any of it needs a restart.' }));
+  body.append(el('div', { class: 'group-head', text: 'Server' }));
+  body.append(facts([
+    ['Listen address', c.addr],
+    ['Database', c.database_path],
+    ['Backends file', c.backends_path || '(not set — using environment)'],
+    ['Go version', c.go_version],
+  ]));
+
+  body.append(el('div', { class: 'group-head', text: 'Model' }));
+  body.append(facts([
+    ['Default backend', c.default_backend],
+    ['Fallback backend', c.fallback_backend || '(none — failures are reported, not rerouted)'],
+    ['Pool', (c.pool_backends || []).join(', ') || '(none — the batch tool is not offered)'],
+    ['Max tokens', c.llm_max_tokens],
+    ['Timeout', c.llm_timeout],
+    ['Max tool iterations', c.max_tool_iterations],
+  ]));
+
+  // Credentials are reported as present or absent and never by value. This page
+  // gets left open and screenshotted.
+  body.append(el('div', { class: 'group-head', text: 'Credentials' }));
+  body.append(facts([
+    ['Metadata providers', (c.metadata_providers || []).join(', ') ||
+      '(none — the assistant cannot verify a title before renaming)'],
+    ['Hugging Face token', c.has_huggingface_token ? 'configured' : 'not set'],
+  ]));
+  body.append(el('div', { class: 'muted', text:
+    'Secrets are never sent to this page — only whether they are set.' }));
+}
+
+async function renderAdminBackends(body) {
+  const d = await api('/api/v1/backends');
+  const rows = (d.backends || []).map((b) => [
+    b.name, b.kind, b.model || '—', b.status,
+    b.status_note || '', b.name === d.default ? 'default' : (b.name === d.fallback ? 'fallback' : ''),
+  ]);
+  body.append(table(['Name', 'Kind', 'Model', 'Status', 'Note', 'Role'], rows));
+
+  const refresh = el('button', { class: 'ghost-btn', text: 'Re-probe backends' });
+  refresh.addEventListener('click', async () => {
+    refresh.disabled = true;
+    try {
+      await api('/api/v1/backends/refresh', { method: 'POST' });
+      toast('Backends re-probed');
+      await renderAdmin();
+    } catch (err) {
+      showError(err);
+    } finally {
+      refresh.disabled = false;
+    }
+  });
+  body.append(refresh);
+  body.append(el('div', { class: 'muted', text:
+    'A backend that is down is recorded as unreachable and retried; it never stops the server starting.' }));
+}
+
+async function renderAdminHardware(body) {
+  const h = await api('/api/v1/system');
+  body.append(facts([
+    ['Host', h.hostname],
+    ['OS', `${h.os || ''} ${h.arch || ''}`.trim()],
+    ['CPUs', h.cpus],
+    ['Memory', h.memory_total ? bytes(h.memory_total) : null],
+  ]));
+  if (h.gpus && h.gpus.length) {
+    body.append(el('div', { class: 'group-head', text: 'GPUs' }));
+    body.append(table(['Name', 'VRAM'],
+      h.gpus.map((g) => [g.name, g.memory_total ? bytes(g.memory_total) : '—'])));
+  } else {
+    body.append(el('div', { class: 'muted', text:
+      'No GPU reported. If there is one, nvidia-smi is missing or the unit sets PrivateDevices=true.' }));
+  }
+}
+
+async function renderAdminTools(body) {
+  const { tools } = await api('/api/v1/admin/tools');
+  body.append(el('div', { class: 'muted', text:
+    'Server-side tools the model can call. Risk drives the approval policy: reads may be auto-approved, ' +
+    'writes prompt unless opted out, destructive actions always prompt.' }));
+  body.append(table(['Tool', 'Risk', 'Description'],
+    (tools || []).map((t) => [t.name, t.risk, t.description]),
+    [false, false, false]));
+}
+
+async function renderAdminClients(body) {
+  const { clients } = await api('/api/v1/admin/clients');
+  if (!clients || !clients.length) {
+    body.append(el('div', { class: 'empty muted', text: 'No clients registered.' }));
+    return;
+  }
+  // store.Client carries no JSON tags, so the wire keys are the Go field names.
+  body.append(table(['Name', 'Kind', 'Created', 'Last seen', ''],
+    clients.map((c) => [
+      c.Name, c.Kind,
+      String(c.CreatedAt || '').slice(0, 19).replace('T', ' '),
+      c.LastSeenAt ? String(c.LastSeenAt).slice(0, 19).replace('T', ' ') : 'never',
+      revokeButton(c.Name),
+    ])));
+  body.append(el('div', { class: 'muted', text:
+    'Tokens are stored only as hashes and cannot be shown again. New ones are issued on the server ' +
+    'with scripts/clients.sh add — deliberately not from here, so a stolen browser token cannot mint more.' }));
+}
+
+function revokeButton(name) {
+  const b = el('button', { class: 'ghost-btn danger', text: 'Revoke' });
+  b.addEventListener('click', async () => {
+    if (!confirm(`Revoke "${name}"? Its token stops working immediately and cannot be recovered.`)) return;
+    try {
+      await api(`/api/v1/admin/clients/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      toast(`Revoked ${name}`);
+      await renderAdmin();
+    } catch (err) {
+      showError(err);
+    }
+  });
+  return b;
 }

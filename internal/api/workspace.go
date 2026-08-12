@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"wintermute/internal/accounting"
 	"wintermute/internal/company"
 	"wintermute/internal/crm"
 	"wintermute/internal/todo"
@@ -23,9 +24,10 @@ import (
 // arguments to New because these arrive and depart together, and a constructor
 // with eight positional dependencies is one that gets called wrongly.
 type Workspace struct {
-	Company *company.Service
-	CRM     *crm.Service
-	Todo    *todo.Service
+	Company    *company.Service
+	CRM        *crm.Service
+	Todo       *todo.Service
+	Accounting *accounting.Service
 }
 
 func (s *Server) registerWorkspaceRoutes(authed func(string, http.HandlerFunc)) {
@@ -71,6 +73,7 @@ func (s *Server) registerWorkspaceRoutes(authed func(string, http.HandlerFunc)) 
 		authed("GET /api/v1/todo/agenda", s.handleTodoAgenda)
 		authed("GET /api/v1/todo/calendar", s.handleTodoCalendar)
 	}
+	s.registerAccountingRoutes(authed)
 }
 
 // ---- company ----

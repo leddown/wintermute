@@ -29,13 +29,15 @@ type Server struct {
 	serverTools *tool.Registry
 	catalog     *models.Catalog
 	workspace   Workspace
+	info        ServerInfo
 	log         *slog.Logger
 }
 
 // New builds a Server. A zero Workspace disables those routes rather than
 // registering handlers that would nil-panic on the first request.
-func New(a *agent.Agent, s *store.Store, serverTools *tool.Registry, cat *models.Catalog, ws Workspace, log *slog.Logger) *Server {
-	return &Server{agent: a, store: s, serverTools: serverTools, catalog: cat, workspace: ws, log: log}
+func New(a *agent.Agent, s *store.Store, serverTools *tool.Registry, cat *models.Catalog, ws Workspace, info ServerInfo, log *slog.Logger) *Server {
+	return &Server{agent: a, store: s, serverTools: serverTools, catalog: cat,
+		workspace: ws, info: info, log: log}
 }
 
 // Handler returns the fully wired HTTP handler.
@@ -73,6 +75,8 @@ func (s *Server) Handler() http.Handler {
 
 	// Model Context Protocol. Same bearer token as everything else, so an MCP
 	// client is registered with `wintermuted -add-client` like any other.
+	s.registerAdminRoutes(authed)
+
 	authed("POST /mcp", s.handleMCP)
 
 	// Company profile, CRM and tasks — see workspace.go.

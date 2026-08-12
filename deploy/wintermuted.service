@@ -50,8 +50,13 @@ MemoryDenyWriteExecute=true
 
 # Nothing here binds a privileged port under the shipped configuration
 # (WINTERMUTE_ADDR defaults to :8088 in the env file), so the service needs no
-# capabilities at all. If you move it to port 80 or 443, replace the empty set
-# below with: AmbientCapabilities=CAP_NET_BIND_SERVICE
+# capabilities at all. If you move it to port 80 or 443, add BOTH of these —
+# an ambient capability must also be in the bounding set, so granting it while
+# the set below stays empty leaves the service unable to bind and looks like
+# the capability was ignored:
+#
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+#   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=
 
 [Install]

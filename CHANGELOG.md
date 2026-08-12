@@ -1,5 +1,91 @@
 # Change Log
 
+## 2026-08-12 (Accounting, and an admin surface)
+
+A double-entry accounting module built on top of the CRM, and a view that says
+what the server is actually running with.
+
+### `internal/accounting`
+
+A general ledger with EU VAT invoicing, payments and expenses, sized for a
+consultancy of a handful of people. The shape follows what the mature
+open-source systems converge on — Bigcapital routes every money event through
+one ledger module that writes balanced entries atomically, GnuCash derives an
+account's normal balance from its type, Beancount refuses a transaction that
+does not balance rather than repairing it. This takes all three positions.
+
+Three rules run through it:
+
+- **Every balance comes from the ledger.** Invoices, payments and expenses are
+  *sources*: each posts a balanced journal entry and stores its id. Nothing sums
+  a document table to learn what revenue was.
+- **Money is `int64` minor units.** The CRM next door uses `REAL` for rates and
+  hours, which is fine for "roughly how much is outstanding" and unusable here:
+  a ledger's whole claim is that debits equal credits exactly. Conversion
+  happens once, at the CRM boundary. Hours become exact thousandths before they
+  ever touch a price.
+- **Issued documents are immutable.** EU VAT requires invoice numbers to be
+  unique, sequential and gap-free, and an issued invoice may not be deleted or
+  amended. Numbers are allocated inside the issuing transaction, so a failed
+  issue cannot leave a hole; corrections go through credit notes on their own
+  series.
+
+`crm_bridge.go` is the seam: unbilled billable time becomes a draft invoice, one
+line per time entry carrying `time_entry_id`, and issuing flags exactly those
+entries in the same transaction that posts the ledger. Two conditions stop
+double-billing — the CRM's `invoiced` flag, and a check against lines on
+existing non-void invoices that covers the window between drafting and issuing.
+
+Reports (trial balance, profit and loss, balance sheet, aged receivables, VAT
+summary) read the ledger and nothing else. The balance sheet carries current
+earnings explicitly, because the module posts no year-end closing entry. The VAT
+summary cross-checks the documents against the two control accounts and reports
+a mismatch rather than reconciling it silently — that difference means something
+was posted to a VAT account by hand.
+
+Ten tools go on the shared registry. `issue_invoice` is declared
+`RiskDestructive`: not destructive in the data sense, but irreversible, and
+under-declaring it would let `-yes` push invoices out of the door unseen.
+Editing the chart of accounts, changing VAT rates and locking periods are
+deliberately not exposed to the model.
+
+- `internal/store/migrations/0005_accounting.sql` — eleven tables, a seeded
+  chart of ~39 accounts and five VAT treatments. **The seeded 21% / 9% rates are
+  a placeholder**; they differ by member state and must be corrected.
+- `internal/api/accounting.go` — 36 routes. A locked period returns `409`, not
+  `400`: the request was fine, the books are closed.
+- An **Accounts** view in the browser UI, and [docs/accounting.md](docs/accounting.md).
+
+### Admin
+
+`/api/v1/admin/*` and an **Admin** view: status (uptime, database and WAL size,
+row counts), configuration, backends with their probe status, hardware, the
+server-side tools with their declared risk levels, and client tokens.
+
+It never returns a secret — API keys and the Hugging Face token are reported as
+configured or not, never by value, because this is a page that gets left open
+and screenshotted. It also cannot issue a token: `wintermuted -add-client`
+stays the only way to mint one, since a leaked browser token that could mint
+more would turn one stolen session into permanent access. Revoking the client
+you are signed in as is refused with a `409`.
+
+### Also
+
+- `scripts/clients.sh` — issue, list and revoke client tokens against the
+  database the *service* reads. `wintermuted -add-client` takes `WINTERMUTE_DB`
+  from its own environment and falls back to a relative path, so running it by
+  hand from a checkout silently creates a second database and registers the
+  client there; the token is real, the server never opens that file, and the UI
+  answers "invalid token" with nothing to explain why.
+- The browser UI's `hidden` attribute was inert on `.gate`, `.app` and
+  `.row-form`: an author rule setting `display` beats the user-agent rule that
+  makes `hidden` work, so the login card stayed on screen after a successful
+  login with the app stacked below it. One `[hidden] { display: none !important }`
+  fixes all three.
+- `deploy/wintermuted.service` — the comment about moving to port 80 told you to
+  set `AmbientCapabilities` alone, which cannot work while `CapabilityBoundingSet`
+  is empty: an ambient capability must also be in the bounding set.
+
 ## 2026-08-11 (Workspace: tasks, CRM and company profile)
 
 Three modules moved here from an RCSA/compliance application, which kept that

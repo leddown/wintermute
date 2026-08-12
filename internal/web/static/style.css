@@ -12,6 +12,15 @@
 
 * { box-sizing: border-box; }
 
+/* The hidden attribute only works through a user-agent rule, and any author
+   rule that sets display beats it — .gate, .app and .row-form all do. Without
+   this, `el.hidden = true` silently does nothing: the login card stayed on
+   screen after a successful login with the app stacked below it, each one
+   100dvh tall, so the UI looked like it needed scrolling to reach. Keep this
+   ahead of the layout rules; the !important is what makes hidden authoritative
+   against them. */
+[hidden] { display: none !important; }
+
 html, body {
   height: 100%;
   margin: 0;

@@ -12,7 +12,9 @@
     <form id="gate-form" class="gate-card">
       <h1>Wintermute</h1>
       <p class="muted">Paste a client token to connect. Create one on the server with
-        <code>wintermuted -add-client name -kind browser</code>.</p>
+        <code>scripts/clients.sh add name browser</code> — or
+        <code>wintermuted -add-client name -kind browser</code> if you run the
+        server by hand rather than as a service.</p>
       <input id="token" type="password" placeholder="wm_…" autocomplete="off" spellcheck="false" required>
       <button type="submit">Connect</button>
       <p id="gate-error" class="error" hidden></p>
@@ -30,7 +32,9 @@
         <button class="view-btn active" data-view="chat">Chat</button>
         <button class="view-btn" data-view="tasks">Tasks</button>
         <button class="view-btn" data-view="crm">CRM</button>
+        <button class="view-btn" data-view="accounting">Accounts</button>
         <button class="view-btn" data-view="company">Company</button>
+        <button class="view-btn" data-view="admin">Admin</button>
       </nav>
       <button id="logout" class="link-btn">Sign out</button>
     </header>
@@ -121,6 +125,55 @@
             </div>
           </div>
           <div id="crm-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- Accounting -->
+      <section class="view" data-view="accounting">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Accounting</span></div>
+          <ul id="acct-nav">
+            <li data-tab="overview" class="active">Overview</li>
+            <li data-tab="unbilled">Ready to bill</li>
+            <li data-tab="invoices">Invoices</li>
+            <li data-tab="payments">Payments</li>
+            <li data-tab="expenses">Expenses</li>
+            <li data-tab="reports">Reports</li>
+            <li data-tab="accounts">Chart of accounts</li>
+          </ul>
+        </aside>
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="acct-title">Overview</h2>
+            <div class="pane-actions">
+              <button id="acct-new" class="ghost-btn" hidden>New</button>
+            </div>
+          </div>
+          <div id="acct-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- Admin -->
+      <section class="view" data-view="admin">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Server</span></div>
+          <ul id="admin-nav">
+            <li data-tab="status" class="active">Status</li>
+            <li data-tab="config">Configuration</li>
+            <li data-tab="backends">Backends</li>
+            <li data-tab="hardware">Hardware</li>
+            <li data-tab="tools">Tools</li>
+            <li data-tab="clients">Clients</li>
+          </ul>
+        </aside>
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="admin-title">Status</h2>
+            <div class="pane-actions">
+              <button id="admin-refresh" class="ghost-btn">Refresh</button>
+            </div>
+          </div>
+          <div id="admin-body" class="pane-body"></div>
         </main>
       </section>
 
