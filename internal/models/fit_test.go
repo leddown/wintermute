@@ -14,6 +14,9 @@ func gtx1070() *Hardware {
 			ComputeCap: "6.1", BandwidthGBs: 256, Arch: "Pascal",
 		}},
 		RAMTotalMB: 32768, RAMAvailableMB: 24576, RAMBandwidthGBs: 40,
+		// This is the machine serving the model, which is what makes measuring
+		// it worth anything.
+		RunsInference: true,
 	}
 }
 
@@ -71,9 +74,9 @@ func TestKVCacheScalesWithContextAndType(t *testing.T) {
 
 func TestVerdicts(t *testing.T) {
 	tests := []struct {
-		name    string
-		in      FitInput
-		want    Verdict
+		name string
+		in   FitInput
+		want Verdict
 	}{
 		{
 			"8B Q4_K_M at 8K fits",
@@ -170,7 +173,7 @@ func TestPascalWarnsAboutHalfPrecision(t *testing.T) {
 }
 
 func TestNoGPUFallsBackToCPU(t *testing.T) {
-	hw := &Hardware{RAMTotalMB: 16384, RAMAvailableMB: 12288, RAMBandwidthGBs: 40}
+	hw := &Hardware{RAMTotalMB: 16384, RAMAvailableMB: 12288, RAMBandwidthGBs: 40, RunsInference: true}
 	fit := EstimateFit(FitInput{ParamsB: 8.0, Quant: "Q4_K_M", ContextTokens: 4096}, hw)
 
 	if fit.Verdict != VerdictPartial {
@@ -242,4 +245,70 @@ func containsSubstring(list []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// A server that runs no local backend must not answer a fit question from its
+// own hardware. This is the whole point of RunsInference: the light box serving
+// the UI has different RAM and no GPU, and a verdict computed from it would be
+// confidently about the wrong machine.
+func TestRemoteInferenceHostYieldsUnknownVerdict(t *testing.T) {
+	// Same box as the CPU-only test, but it is not the one running the models.
+	hw := &Hardware{RAMTotalMB: 16384, RAMAvailableMB: 12288, RAMBandwidthGBs: 40}
+	in := FitInput{ParamsB: 8.0, Quant: "Q4_K_M", ContextTokens: 4096}
+	fit := EstimateFit(in, hw)
+
+	if fit.Verdict != VerdictUnknown {
+		t.Errorf("verdict = %q, want %q when no backend is local", fit.Verdict, VerdictUnknown)
+	}
+	// The footprint is a property of the model, so it survives.
+	if fit.WeightsMB <= 0 || fit.TotalMB <= fit.WeightsMB {
+		t.Errorf("footprint was discarded: weights %.0fMB, total %.0fMB", fit.WeightsMB, fit.TotalMB)
+	}
+	// Anything describing the absent machine must not be invented.
+	if fit.FreeVRAMMB != 0 || fit.TotalVRAMMB != 0 || fit.TokensPerSec != 0 {
+		t.Errorf("reported hardware figures for a machine it cannot see: "+
+			"free %.0f, total %.0f, %.1f tok/s", fit.FreeVRAMMB, fit.TotalVRAMMB, fit.TokensPerSec)
+	}
+	if !fit.Estimated {
+		t.Error("an unknown verdict must be marked estimated")
+	}
+
+	// A nil profile means the same thing: nobody measured.
+	if got := EstimateFit(in, nil).Verdict; got != VerdictUnknown {
+		t.Errorf("verdict = %q for nil hardware, want %q", got, VerdictUnknown)
+	}
+}
+
+// The loopback rule decides whether the local profile is evidence at all.
+func TestRunsInferenceLocallyDetectsLoopback(t *testing.T) {
+	tests := []struct {
+		name     string
+		backends []Backend
+		want     bool
+	}{
+		{"localhost", []Backend{{BaseURL: "http://localhost:8080"}}, true},
+		{"127.0.0.1", []Backend{{BaseURL: "http://127.0.0.1:11434"}}, true},
+		{"ipv6 loopback", []Backend{{BaseURL: "http://[::1]:8080/v1"}}, true},
+		{"remote host", []Backend{{BaseURL: "http://gpu-box:8080"}}, false},
+		{"remote ip", []Backend{{BaseURL: "http://192.168.1.50:8080"}}, false},
+		{"no backends", nil, false},
+		// A cloud backend is somebody else's hardware and proves nothing either
+		// way, so it must not be mistaken for a local one.
+		{"cloud only", []Backend{{BaseURL: "https://api.anthropic.com", Cloud: true}}, false},
+		{"cloud beside local", []Backend{
+			{BaseURL: "https://api.anthropic.com", Cloud: true},
+			{BaseURL: "http://localhost:8080"},
+		}, true},
+		{"cloud beside remote", []Backend{
+			{BaseURL: "https://api.anthropic.com", Cloud: true},
+			{BaseURL: "http://gpu-box:8080"},
+		}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runsInferenceLocally(tt.backends); got != tt.want {
+				t.Errorf("runsInferenceLocally = %v, want %v", got, tt.want)
+			}
+		})
+	}
 }

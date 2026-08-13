@@ -164,7 +164,10 @@ func Recommend(req PlanRequest, hw *Hardware, installed []Model) *Plan {
 // model that would otherwise not fit is stepped down before being written off.
 func pickQuant(seed SeedModel, req PlanRequest, hw *Hardware) string {
 	candidates := []string{"Q5_K_M", DefaultQuant, "IQ4_XS", "Q3_K_M"}
-	if hw == nil || hw.PrimaryGPU() == nil {
+	// Without a measurement of the machine that will run it, every candidate
+	// comes back unknown and the loop below would just pick the first one on a
+	// coin toss. Fall through to the default instead.
+	if hw == nil || !hw.RunsInference || hw.PrimaryGPU() == nil {
 		return DefaultQuant
 	}
 	for _, q := range candidates {
@@ -264,12 +267,20 @@ func summarize(plan *Plan, req PlanRequest, hw *Hardware) string {
 	var b strings.Builder
 
 	gpu := (*GPU)(nil)
-	if hw != nil {
+	if hw != nil && hw.RunsInference {
 		gpu = hw.PrimaryGPU()
 	}
-	if gpu == nil {
+	switch {
+	case hw == nil || !hw.RunsInference:
+		// Ranking still holds — it is driven by task suitability — but every fit
+		// below is unknown, and a reader who is not told that will take the
+		// ordering for a hardware judgement.
+		b.WriteString("This server runs no local backend, so the models run on a machine whose " +
+			"hardware is not visible from here. Recommendations below are ranked on task " +
+			"suitability only, and none of the fit estimates apply to any particular GPU. ")
+	case gpu == nil:
 		b.WriteString("No GPU was detected, so every recommendation below assumes CPU inference — expect single-digit tokens per second. ")
-	} else {
+	default:
 		fmt.Fprintf(&b, "On the %s with %.1fGB free of %.1fGB VRAM, at %d tokens of context: ",
 			gpu.Name, float64(gpu.FreeMB)/1024, float64(gpu.TotalMB)/1024, req.ContextTokens)
 	}

@@ -22,6 +22,11 @@ const (
 	VerdictPartial Verdict = "partial"
 	// VerdictNo means it will not run usefully at all.
 	VerdictNo Verdict = "no"
+	// VerdictUnknown means the hardware that would run the model was not
+	// measured, so there is no verdict to give. It is distinct from VerdictNo:
+	// "it will not run" and "nobody looked" lead to opposite decisions, and
+	// collapsing them into one answer is how a usable model gets ruled out.
+	VerdictUnknown Verdict = "unknown"
 )
 
 // quantBPW maps a quantization name to its effective bits per weight.
@@ -172,8 +177,11 @@ func (f Fit) Headroom() float64 { return f.FreeVRAMMB - f.TotalMB }
 // EstimateFit computes the memory footprint and expected throughput of running
 // a model on the given hardware.
 //
-// hw may be nil or GPU-less, in which case the calculation is done against
-// system RAM and the verdict reflects CPU-only inference.
+// A GPU-less hw is calculated against system RAM, with the verdict reflecting
+// CPU-only inference. A nil hw, or one whose RunsInference is false, yields
+// VerdictUnknown with the footprint still filled in: the host being described
+// is not the host that would run the model, and a confident answer computed
+// from the wrong machine is worse than no answer.
 func EstimateFit(in FitInput, hw *Hardware) Fit {
 	fit := Fit{Estimated: false}
 
@@ -226,10 +234,17 @@ func EstimateFit(in FitInput, hw *Hardware) Fit {
 	fit.OverheadMB = 320 + float64(ctx)/1024*32
 	fit.TotalMB = fit.WeightsMB + fit.KVCacheMB + fit.OverheadMB
 
-	gpu := (*GPU)(nil)
-	if hw != nil {
-		gpu = hw.PrimaryGPU()
+	// The footprint above is a property of the model and is worth keeping. What
+	// follows is not: verdict, free VRAM and throughput are all statements about
+	// a particular machine, and this host is not it.
+	if hw == nil || !hw.RunsInference {
+		fit.Verdict = VerdictUnknown
+		fit.Estimated = true
+		fit.Notes = append(fit.Notes, unknownHostNote(hw))
+		return fit
 	}
+
+	gpu := hw.PrimaryGPU()
 	if gpu == nil {
 		return finishCPUOnly(fit, in, hw)
 	}
@@ -306,6 +321,16 @@ func EstimateFit(in FitInput, hw *Hardware) Fit {
 }
 
 // finishCPUOnly grades a machine with no usable GPU.
+func unknownHostNote(hw *Hardware) string {
+	if hw == nil {
+		return "No hardware profile was supplied, so whether this fits cannot be judged. " +
+			"The memory footprint above is a property of the model and holds anywhere."
+	}
+	return "This server runs no local backend, so the models run on another machine " +
+		"whose GPU and memory are not visible from here. The memory footprint above " +
+		"is a property of the model and holds anywhere; whether it fits is unknown."
+}
+
 func finishCPUOnly(fit Fit, in FitInput, hw *Hardware) Fit {
 	ramMB := 0.0
 	bandwidth := float64(defaultRAMBandwidthGBs)

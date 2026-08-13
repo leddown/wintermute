@@ -54,6 +54,15 @@ type Hardware struct {
 	DetectedAt       time.Time `json:"detected_at"`
 	Warnings         []string  `json:"warnings,omitempty"`
 	NvidiaSMIPresent bool      `json:"nvidia_smi_present"`
+
+	// RunsInference reports whether any configured non-cloud backend actually
+	// runs on this host. When it is false everything above is still true about
+	// the machine serving this API, and says nothing about the machine running
+	// the models — so no fit estimate may be computed from it.
+	//
+	// DetectHardware cannot know this; it is set by the Catalog, which is the
+	// only thing that sees both the host and the backend list.
+	RunsInference bool `json:"runs_inference"`
 }
 
 // PrimaryGPU returns the GPU with the most total memory, or nil.

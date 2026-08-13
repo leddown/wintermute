@@ -194,6 +194,41 @@ Every backend is probed at startup and recorded with its health. One being down
 is normal and never blocks the server; `GET /api/v1/backends` shows the state
 and `POST /api/v1/backends/refresh` re-checks.
 
+### Running the server away from the GPUs
+
+`wintermuted` never loads a model — every backend is reached over HTTP — so it
+does not want a graphics card and is happiest on a small always-on box. The
+inference servers stay on the machines with the hardware, and this file is what
+points at them. That is the whole configuration; there is no second binary and
+nothing to split.
+
+The one thing that does not travel is the hardware probe. `nvidia-smi`,
+`/proc/meminfo` and `/proc/cpuinfo` describe *this* host, and once the models
+run elsewhere this host is not the one that matters.
+
+So the catalog marks the profile: **if no non-cloud backend has a loopback
+`base_url`, `runs_inference` is false**, and everything downstream reports
+unknown rather than guessing —
+
+| Surface | With a local backend | Without one |
+|---|---|---|
+| `GET /api/v1/system` | the host's GPUs, VRAM, RAM | same figures, `runs_inference: false`, plus a warning naming what they are not |
+| `estimate_model_fit` | a verdict | `unknown`, with the memory footprint still filled in — that is a property of the model and holds anywhere |
+| `recommend_model` | ranked against free VRAM | ranked on task suitability only, and says so |
+| the Models list | a fit per model | no fit |
+
+The test is **loopback specifically**, not reachability. A backend addressed as
+`localhost` is unambiguously here; one addressed by hostname or LAN IP may or
+may not be, and settling that would mean matching against every local interface
+with DNS in the path — to answer a question whose wrong answer is silent. A host
+serving its own models through its external name therefore reads as remote, and
+the symptom is fit estimates going *unknown* rather than *wrong*. Point that
+backend at `localhost` to get them back.
+
+Restoring real estimates across the network needs the inference host to report
+its own hardware. That is not built; the design is in
+[hardware-nodes.md](hardware-nodes.md).
+
 ## Gotchas that will cost you performance
 
 **llama-swap thrashing.** Two backends pointing at one llama-swap instance with

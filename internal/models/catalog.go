@@ -3,6 +3,9 @@ package models
 import (
 	"context"
 	"log/slog"
+	"net"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -55,8 +58,62 @@ func (c *Catalog) Hardware(ctx context.Context) *Hardware {
 		return c.hardware
 	}
 	c.hardware = DetectHardware(ctx)
+	c.hardware.RunsInference = runsInferenceLocally(c.backends)
+	if !c.hardware.RunsInference {
+		c.hardware.Warnings = append(c.hardware.Warnings,
+			"No configured backend runs on this host, so these figures describe the "+
+				"machine serving the API rather than the one running the models. VRAM "+
+				"fit estimates are reported as unknown rather than computed from the "+
+				"wrong hardware.")
+	}
 	c.probedAt = time.Now()
 	return c.hardware
+}
+
+// runsInferenceLocally reports whether any non-cloud backend is served from
+// this host, which is what makes the local hardware profile evidence about
+// anything.
+//
+// The test is loopback, not "reachable" or "same subnet": a backend addressed
+// as localhost is unambiguously here, and one addressed by hostname or IP may
+// or may not be — resolving that would mean comparing against every local
+// interface, with DNS in the path, to answer a question whose wrong answer is
+// silent. A host that serves its own models through its external name is
+// therefore read as remote, and the symptom is fit estimates going unknown
+// rather than going wrong. Point the backend at localhost to get them back.
+func runsInferenceLocally(backends []Backend) bool {
+	for _, b := range backends {
+		// A cloud backend runs on somebody else's hardware by definition, so it
+		// is not evidence either way.
+		if b.Cloud {
+			continue
+		}
+		if isLoopbackURL(b.BaseURL) {
+			return true
+		}
+	}
+	return false
+}
+
+func isLoopbackURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	host := u.Hostname()
+	if host == "" {
+		// No scheme, so url.Parse put everything in Path. Try again with one.
+		if u2, err2 := url.Parse("http://" + strings.TrimSpace(raw)); err2 == nil {
+			host = u2.Hostname()
+		}
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // Refresh probes every backend and replaces the cached catalog.

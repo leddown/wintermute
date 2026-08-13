@@ -1478,21 +1478,62 @@ async function renderAdminBackends(body) {
     'A backend that is down is recorded as unreachable and retried; it never stops the server starting.' }));
 }
 
+// The probe reports megabytes, not bytes.
+const mb = (n) => (Number(n) > 0 ? `${(Number(n) / 1024).toFixed(1)} GB` : '—');
+
 async function renderAdminHardware(body) {
   const h = await api('/api/v1/system');
+
+  // Said first, because it decides whether anything below is worth reading.
+  // This panel describes the host serving the API; when the models run
+  // elsewhere, that is a different machine and the numbers are not about it.
+  if (!h.runs_inference) {
+    body.append(el('div', { class: 'muted', text:
+      'No configured backend runs on this host. The figures below describe this server, '
+      + 'not the machine running the models — so VRAM fit estimates are reported as '
+      + 'unknown rather than computed from the wrong hardware.' }));
+  }
+
   body.append(facts([
-    ['Host', h.hostname],
-    ['OS', `${h.os || ''} ${h.arch || ''}`.trim()],
-    ['CPUs', h.cpus],
-    ['Memory', h.memory_total ? bytes(h.memory_total) : null],
+    ['Runs inference', h.runs_inference ? 'yes — models run on this host' : 'no — models run elsewhere'],
+    ['CPU', h.cpu_model],
+    ['Logical CPUs', h.cpu_cores],
+    ['Memory', h.ram_total_mb ? `${mb(h.ram_total_mb)} (${mb(h.ram_available_mb)} available)` : null],
+    ['Memory bandwidth', h.ram_bandwidth_gbs ? `${h.ram_bandwidth_gbs} GB/s` : null],
+    ['nvidia-smi', h.nvidia_smi_present ? 'present' : 'not found'],
+    ['Probed', h.detected_at ? new Date(h.detected_at).toLocaleString() : null],
   ]));
+
   if (h.gpus && h.gpus.length) {
     body.append(el('div', { class: 'group-head', text: 'GPUs' }));
-    body.append(table(['Name', 'VRAM'],
-      h.gpus.map((g) => [g.name, g.memory_total ? bytes(g.memory_total) : '—'])));
-  } else {
+    body.append(table(['Name', 'VRAM', 'Free', 'Bandwidth', 'Arch', 'Compute', 'Driver'],
+      h.gpus.map((g) => [
+        g.name, mb(g.total_mb), mb(g.free_mb),
+        g.bandwidth_gbs ? `${g.bandwidth_gbs} GB/s` : '—',
+        g.arch || '—', g.compute_cap || '—', g.driver || '—',
+      ]),
+      [false, true, true, true, false, false, false]));
+
+    // Architecture notes exist because they invalidate generic advice — the
+    // Pascal FP16 trap being the one that costs an afternoon.
+    for (const g of h.gpus) {
+      for (const note of g.notes || []) {
+        body.append(el('div', { class: 'muted', text: `${g.name}: ${note}` }));
+      }
+    }
+  } else if (h.runs_inference) {
     body.append(el('div', { class: 'muted', text:
       'No GPU reported. If there is one, nvidia-smi is missing or the unit sets PrivateDevices=true.' }));
+  }
+
+  if (h.npus && h.npus.length) {
+    body.append(el('div', { class: 'group-head', text: 'Neural accelerators' }));
+    body.append(table(['Vendor', 'Device', 'Can run an LLM', 'Note'],
+      h.npus.map((n) => [n.vendor, n.device, n.llm_capable ? 'yes' : 'no', n.note || ''])));
+  }
+
+  for (const w of h.warnings || []) {
+    body.append(el('div', { class: 'muted', text: w }));
   }
 }
 
