@@ -325,30 +325,13 @@ applies them and exits.
 ### 3. Issue a client token
 
 There is no self-registration endpoint, by design. Every client is created on
-the server:
+the server — but **which command depends on how the server runs**, because the
+two find the database differently, and issuing a token into the wrong one is the
+single most common way to end up locked out of your own UI.
 
-```bash
-./wintermuted -add-client desktop              # a harness client (default)
-./wintermuted -add-client browser -kind browser
-./wintermuted -list-clients
-./wintermuted -revoke-client desktop           # removes the client outright
-```
-
-The token is printed **once** and stored only as a hash. Copy it now.
-
-`-revoke-client` deletes the client row rather than marking it dead, so the
-token stops working immediately and the name is free to reuse. There is no undo
-and no way to recover the old token.
-
-> **If the server runs as a systemd service, use `scripts/clients.sh` instead.**
-> These flags read `WINTERMUTE_DB` from their own environment and fall back to a
-> *relative* `wintermute.db`. Under systemd the database is named in
-> `/etc/wintermute/wintermute.env`, which is an `EnvironmentFile` — it applies to
-> the service, and an interactive shell never sees it. Run the flags by hand and
-> you get a second database in whatever directory you happened to be in, with
-> the client registered in *that*. The token is genuine; the server simply never
-> opens that file, so the UI answers `invalid token` and nothing on either side
-> explains why.
+**If the server runs as a systemd service** — what `scripts/setup.sh` installs,
+and what you have if you did not deliberately choose otherwise — use
+`scripts/clients.sh`:
 
 ```bash
 sudo ./scripts/clients.sh list
@@ -359,6 +342,35 @@ sudo ./scripts/clients.sh revoke laptop        # prompts first
 It reads the database path out of the env file, refuses a relative path, refuses
 to create a database that isn't already there, and runs `wintermuted` as the
 service user so SQLite's `-wal`/`-shm` sidecars keep their ownership.
+
+**If you run the server by hand**, the flags do the same jobs — but they read
+`WINTERMUTE_DB` from *their own* environment, so set it to the same file the
+server will open rather than relying on the fallback:
+
+```bash
+export WINTERMUTE_DB=/path/to/wintermute.db    # the same file the server opens
+./wintermuted -add-client desktop              # a harness client (default)
+./wintermuted -add-client browser -kind browser
+./wintermuted -list-clients
+./wintermuted -revoke-client desktop           # removes the client outright
+```
+
+> **Do not run these flags against a systemd install.** They fall back to a
+> *relative* `wintermute.db`, while under systemd the database is named in
+> `/etc/wintermute/wintermute.env` — an `EnvironmentFile`, which applies to the
+> service and which an interactive shell never sees. So the flags create a
+> second database in whatever directory you happened to be standing in and
+> register the client in *that*. The token is genuine; the server simply never
+> opens that file, so the UI answers `invalid token` and nothing on either side
+> explains why. `sudo ./scripts/clients.sh list` prints the database it used —
+> if the client you just made is missing from that listing, this is what
+> happened.
+
+The token is printed **once** and stored only as a hash. Copy it now.
+
+`-revoke-client` (and `clients.sh revoke`) deletes the client row rather than
+marking it dead, so the token stops working immediately and the name is free to
+reuse. There is no undo and no way to recover the old token.
 
 ### 4. Run
 

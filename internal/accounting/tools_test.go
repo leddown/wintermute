@@ -36,6 +36,9 @@ func TestToolRiskLevels(t *testing.T) {
 		"draft_invoice_from_time": tool.RiskWrite,
 		"record_payment":          tool.RiskWrite,
 		"record_expense":          tool.RiskWrite,
+		// Write rather than destructive: a funding record can be removed, and
+		// removing it reverses its entry rather than erasing it.
+		"record_funding": tool.RiskWrite,
 		// Irreversible: consumes a gap-free number, posts to the ledger, and
 		// produces a document that cannot afterwards be edited or deleted.
 		"issue_invoice": tool.RiskDestructive,
@@ -156,6 +159,38 @@ func TestBillingFlowThroughTools(t *testing.T) {
 		`{"invoice_id":`+itoa(invoices[0].ID)+`,"amount":"726.00"}`)
 	if !strings.Contains(paid, "paid") {
 		t.Errorf("payment did not report the resulting status:\n%s", paid)
+	}
+}
+
+// The funding tool's reply has to make the capital/loan distinction visible.
+// The model is the one relaying this to the user, and "recorded 25,000.00" says
+// nothing about whether the business now owes it.
+func TestFundingToolReportsWhatWasRecorded(t *testing.T) {
+	svc, _ := newTestService(t)
+	reg := registerTools(t, svc)
+
+	capital := callTool(t, reg, "record_funding",
+		`{"kind":"capital","amount":"25000.00","from_name":"Founder","received_on":"2026-01-02"}`)
+	if !strings.Contains(capital, "does not owe it back") {
+		t.Errorf("capital reply did not say it is equity:\n%s", capital)
+	}
+
+	loan := callTool(t, reg, "record_funding",
+		`{"kind":"loan","amount":"5000.00","from_name":"Founder","received_on":"2026-02-01"}`)
+	if !strings.Contains(loan, "5000.00") {
+		t.Errorf("loan reply did not report the outstanding balance:\n%s", loan)
+	}
+
+	repaid := callTool(t, reg, "record_funding",
+		`{"kind":"repayment","amount":"2000.00","received_on":"2026-03-01"}`)
+	if !strings.Contains(repaid, "3000.00") {
+		t.Errorf("repayment reply did not report the reduced balance:\n%s", repaid)
+	}
+
+	// An unlabelled deposit is refused rather than guessed at.
+	h, _ := reg.Handler("record_funding")
+	if _, err := h(context.Background(), json.RawMessage(`{"amount":"100.00"}`)); err == nil {
+		t.Error("funding with no kind came back as success")
 	}
 }
 

@@ -12,9 +12,11 @@
     <form id="gate-form" class="gate-card">
       <h1>Wintermute</h1>
       <p class="muted">Paste a client token to connect. Create one on the server with
-        <code>scripts/clients.sh add name browser</code> — or
-        <code>wintermuted -add-client name -kind browser</code> if you run the
-        server by hand rather than as a service.</p>
+        <code>sudo scripts/clients.sh add name browser</code>. The bare
+        <code>wintermuted -add-client</code> flag is only for a server you start
+        by hand, and needs <code>WINTERMUTE_DB</code> set to the same file that
+        server opens — otherwise it writes the client to a database nothing
+        reads and the token here is rejected.</p>
       <input id="token" type="password" placeholder="wm_…" autocomplete="off" spellcheck="false" required>
       <button type="submit">Connect</button>
       <p id="gate-error" class="error" hidden></p>
@@ -137,6 +139,7 @@
             <li data-tab="unbilled">Ready to bill</li>
             <li data-tab="invoices">Invoices</li>
             <li data-tab="payments">Payments</li>
+            <li data-tab="funding">Owner funding</li>
             <li data-tab="expenses">Expenses</li>
             <li data-tab="reports">Reports</li>
             <li data-tab="accounts">Chart of accounts</li>

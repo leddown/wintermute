@@ -52,6 +52,10 @@ func (s *Server) registerAccountingRoutes(authed func(string, http.HandlerFunc))
 	authed("POST /api/v1/accounting/payments", s.handleAcctRecordPayment)
 	authed("DELETE /api/v1/accounting/payments/{id}", s.handleAcctDeletePayment)
 
+	authed("GET /api/v1/accounting/funding", s.handleAcctListFunding)
+	authed("POST /api/v1/accounting/funding", s.handleAcctRecordFunding)
+	authed("DELETE /api/v1/accounting/funding/{id}", s.handleAcctDeleteFunding)
+
 	authed("GET /api/v1/accounting/expenses", s.handleAcctListExpenses)
 	authed("POST /api/v1/accounting/expenses", s.handleAcctRecordExpense)
 	authed("DELETE /api/v1/accounting/expenses/{id}", s.handleAcctDeleteExpense)
@@ -463,6 +467,59 @@ func (s *Server) handleAcctDeletePayment(w http.ResponseWriter, r *http.Request)
 	}
 	if err := s.workspace.Accounting.DeletePayment(id); err != nil {
 		s.acctError(w, "delete payment", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- owner funding ----
+
+// The listing carries the outstanding owner loan alongside the rows. It is the
+// figure the page exists to show — what the business still owes — and deriving
+// it in the browser by summing loans and subtracting repayments would put a
+// second, disagreeing implementation of the balance in front of the operator.
+func (s *Server) handleAcctListFunding(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	funding, err := s.workspace.Accounting.ListFunding(accounting.FundingFilter{
+		Kind: accounting.FundingKind(q.Get("kind")),
+		From: q.Get("from"),
+		To:   q.Get("to"),
+	})
+	if err != nil {
+		s.acctError(w, "list funding", err)
+		return
+	}
+	outstanding, err := s.workspace.Accounting.OwnerLoanOutstanding(q.Get("as_of"))
+	if err != nil {
+		s.acctError(w, "owner loan outstanding", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"funding":          funding,
+		"loan_outstanding": outstanding,
+	})
+}
+
+func (s *Server) handleAcctRecordFunding(w http.ResponseWriter, r *http.Request) {
+	var in accounting.Funding
+	if !decode(w, r, &in) {
+		return
+	}
+	out, err := s.workspace.Accounting.RecordFunding(in)
+	if err != nil {
+		s.acctError(w, "record funding", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleAcctDeleteFunding(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.workspace.Accounting.DeleteFunding(id); err != nil {
+		s.acctError(w, "delete funding", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

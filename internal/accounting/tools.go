@@ -158,6 +158,32 @@ func Register(reg *tool.Registry, svc *Service) error {
 		},
 		{
 			def: tool.Definition{
+				Name: "record_funding",
+				Description: "Record the owner putting their own money into the business, or taking " +
+					"a loan back out. `kind` is required and is not a formality: \"capital\" is equity " +
+					"the business does not owe back, \"loan\" is a debt it does, and \"repayment\" pays " +
+					"a loan down. If the user has not said which, ask — the two are different at tax " +
+					"time and cannot be told apart afterwards. A repayment larger than the outstanding " +
+					"loan is refused.",
+				Parameters: json.RawMessage(`{
+					"type": "object",
+					"properties": {
+						"kind": {"type": "string", "description": "capital, loan or repayment."},
+						"amount": {"type": "string", "description": "Amount, as a decimal such as \"25000.00\"."},
+						"received_on": {"type": "string", "description": "Date, YYYY-MM-DD. Defaults to today."},
+						"from_name": {"type": "string", "description": "Who it came from or went to. Defaults to \"Owner\"."},
+						"reference": {"type": "string", "description": "Bank reference."},
+						"note": {"type": "string", "description": "Anything worth recording about it."},
+						"cash_account_id": {"type": "integer", "description": "Bank account it moved through. Defaults to the main bank account."}
+					},
+					"required": ["kind", "amount"]
+				}`),
+				Risk: tool.RiskWrite,
+			},
+			handler: recordFundingHandler(svc),
+		},
+		{
+			def: tool.Definition{
 				Name: "record_expense",
 				Description: "Record a business cost. Needs a category account — call " +
 					"list_accounts first and choose one, rather than guessing a code. Recoverable VAT " +
@@ -443,6 +469,58 @@ func recordPaymentHandler(svc *Service) tool.Handler {
 		}
 		return fmt.Sprintf("Recorded %s against %s on %s. Invoice is now %s; %s outstanding.",
 			p.Amount, p.InvoiceNumber, p.PaidOn, inv.Status, inv.Outstanding()), nil
+	}
+}
+
+func recordFundingHandler(svc *Service) tool.Handler {
+	return func(ctx context.Context, raw json.RawMessage) (string, error) {
+		var in struct {
+			Kind          string `json:"kind"`
+			Amount        string `json:"amount"`
+			ReceivedOn    string `json:"received_on"`
+			FromName      string `json:"from_name"`
+			Reference     string `json:"reference"`
+			Note          string `json:"note"`
+			CashAccountID int64  `json:"cash_account_id"`
+		}
+		if err := unmarshal(raw, &in); err != nil {
+			return "", err
+		}
+		amount, err := ParseMoney(in.Amount)
+		if err != nil {
+			return "", invalid("amount: %s", err)
+		}
+		f, err := svc.RecordFunding(Funding{
+			Kind:          FundingKind(strings.ToLower(strings.TrimSpace(in.Kind))),
+			Amount:        amount,
+			ReceivedOn:    in.ReceivedOn,
+			FromName:      in.FromName,
+			Reference:     in.Reference,
+			Note:          in.Note,
+			CashAccountID: in.CashAccountID,
+		})
+		if err != nil {
+			return "", err
+		}
+		// The reply names the account the other side landed in, so the operator
+		// can see that a loan went to a liability and capital did not.
+		owed, err := svc.OwnerLoanOutstanding(f.ReceivedOn)
+		if err != nil {
+			return "", err
+		}
+		switch f.Kind {
+		case FundingCapital:
+			return fmt.Sprintf("Recorded %s of capital from %s on %s, into %s against %s. "+
+				"Equity, so the business does not owe it back.",
+				f.Amount, f.FromName, f.ReceivedOn, f.CashAccountName, f.OwnerAccountName), nil
+		case FundingLoan:
+			return fmt.Sprintf("Recorded a %s loan from %s on %s, into %s against %s. "+
+				"Outstanding owner loan is now %s.",
+				f.Amount, f.FromName, f.ReceivedOn, f.CashAccountName, f.OwnerAccountName, owed), nil
+		default:
+			return fmt.Sprintf("Repaid %s to %s on %s from %s. Outstanding owner loan is now %s.",
+				f.Amount, f.FromName, f.ReceivedOn, f.CashAccountName, owed), nil
+		}
 	}
 }
 

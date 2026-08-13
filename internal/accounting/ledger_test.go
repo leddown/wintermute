@@ -40,6 +40,7 @@ func TestSeededSystemAccountsResolve(t *testing.T) {
 	for _, key := range []string{
 		SysBank, SysAR, SysAP, SysVATOutput, SysVATInput,
 		SysSales, SysRecharged, SysRetained, SysRounding,
+		SysCapital, SysOwnerLoan,
 	} {
 		a := mustAccount(t, svc, key)
 		if a.ID == 0 || a.Code == "" {

@@ -51,6 +51,7 @@ consequence, which is exactly why they can be edited freely.
 | `acct_journal_entries` / `_lines` | The ledger. A line carries exactly one of debit/credit, enforced by CHECK. |
 | `acct_invoices` / `_lines` | Invoices and credit notes. Totals stored, not recomputed. Lines carry `time_entry_id` provenance. |
 | `acct_payments` | Receipts against an invoice; partial payments are the norm. |
+| `acct_funding` | The owner's own money in and out. `kind` separates capital from a loan, which decides the account the other side posts to. |
 | `acct_expenses` | Costs, with recoverable VAT split out. |
 | `acct_vat_rates` | Rates in basis points. `kind` separates zero-rated, exempt and reverse charge, which share 0% but are different lines on a return. |
 | `acct_sequences` | Gap-free numbering, read and bumped inside the issuing transaction. |
@@ -110,6 +111,51 @@ than being silently reconciled — it means something was posted to a VAT accoun
 by hand, and that is worth knowing before filing. It is a summary to fill a
 return in from, not a filing.
 
+## Owner funding
+
+Before there is anything to invoice, the money in the bank got there because
+somebody put it there. That event had no home here until `acct_funding`: the
+only way to record it was a hand-written journal entry, which asks the operator
+to know double entry — the one thing this module exists to avoid asking.
+
+The distinction the table is built around is **capital versus loan**, and it is
+not presentational:
+
+| Kind | Posts | Because |
+|------|-------|---------|
+| `capital` | `Dr` bank, `Cr` **3000 Owner Capital** (equity) | The business does not owe it back. |
+| `loan` | `Dr` bank, `Cr` **2500 Loan from Owner** (liability) | It does owe it back, and the balance is the answer to "how much". |
+| `repayment` | `Dr` 2500, `Cr` bank | The loan running down. |
+
+Recording a loan as capital understates liabilities; recording capital as a loan
+invents a debt. Neither is visible in the amount or the date afterwards, so the
+kind is stored per event and **there is no default** — `RecordFunding` refuses a
+deposit that does not say which it was, and the tool description tells the model
+to ask rather than guess.
+
+A repayment is a kind rather than a negative amount. A negative amount would
+defeat the CHECK that stops a typo posting a credit where a debit belongs, and
+"what was repaid" should not require the reader to know a sign convention.
+
+**A repayment cannot exceed what is outstanding.** The balance is read from the
+ledger as of the repayment's own date, not summed from this table — a loan
+repaid by a manual journal entry is real whether or not this module wrote it,
+and a loan made *after* the repayment should not retroactively fund it. Letting
+an over-repayment through would leave the liability with a debit balance: the
+business appearing to have lent the owner money it never received. Deleting a
+loan that has since been partly repaid is refused for the same reason, from the
+other end.
+
+Drawings — the owner taking money out that was never a loan — are deliberately
+not here. That is a different event with different tax treatment, and `3100
+Owner Drawings` is where it goes, by manual entry.
+
+> **Renaming for a limited company.** The seeded names are sole-trader shaped.
+> If you incorporate, rename 3000 to *Share Capital* and 2500 to *Director's
+> Loan Account* in the chart of accounts. The system keys `capital` and
+> `owner_loan` are what the code resolves, and they survive a rename — only the
+> `system_key` is load-bearing, never the code or the name.
+
 ## Reports
 
 Trial balance, profit and loss, balance sheet, aged receivables and the VAT
@@ -127,14 +173,18 @@ it is ever false, something wrote to the ledger outside this package.
 draft. A locked period returns **409**, not 400: the request was fine, the books
 are closed.
 
+`GET /api/v1/accounting/funding` returns the rows *and* `loan_outstanding`.
+The balance ships with the listing rather than being summed in the browser, so
+there is one implementation of "still owed" and not two that can disagree.
+
 ## Agent tools
 
-Ten tools on the shared registry. The risk levels are the approval policy:
+Eleven tools on the shared registry. The risk levels are the approval policy:
 
 | Risk | Tools |
 |------|-------|
 | `RiskRead` | `accounting_overview`, `list_invoices`, `get_invoice`, `list_unbilled_time`, `list_accounts`, `financial_report` |
-| `RiskWrite` | `draft_invoice_from_time`, `record_payment`, `record_expense` |
+| `RiskWrite` | `draft_invoice_from_time`, `record_payment`, `record_expense`, `record_funding` |
 | `RiskDestructive` | `issue_invoice` |
 
 `issue_invoice` is destructive in the sense that matters: irreversible. It
@@ -154,7 +204,7 @@ without one.
 - **VAT rates are seeded at 21% standard and 9% reduced.** These are a starting
   point, not advice — rates differ by member state. Correct them before issuing
   anything.
-- **The chart of accounts is ~39 accounts**, the range small-business guidance
+- **The chart of accounts is 40 accounts**, the range small-business guidance
   converges on. Accounts with postings are archived, never deleted, and their
   type cannot change once posted to.
 - **`acct_invoices.client_id` is `ON DELETE RESTRICT`.** A CRM client with

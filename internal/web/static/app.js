@@ -885,6 +885,7 @@ for (const li of document.querySelectorAll('#acct-nav li')) {
 
 $('acct-new').addEventListener('click', () => {
   if (acct.tab === 'expenses') editExpense();
+  else if (acct.tab === 'funding') editFunding();
   else if (acct.tab === 'invoices') newInvoiceFromTime();
 });
 
@@ -892,12 +893,13 @@ async function renderAccounting() {
   const body = $('acct-body');
   const titles = {
     overview: 'Overview', unbilled: 'Ready to bill', invoices: 'Invoices',
-    payments: 'Payments', expenses: 'Expenses', reports: 'Reports',
-    accounts: 'Chart of accounts',
+    payments: 'Payments', funding: 'Owner funding', expenses: 'Expenses',
+    reports: 'Reports', accounts: 'Chart of accounts',
   };
   $('acct-title').textContent = titles[acct.tab];
-  $('acct-new').hidden = !['expenses', 'invoices'].includes(acct.tab);
-  $('acct-new').textContent = acct.tab === 'invoices' ? 'Bill time' : 'New';
+  $('acct-new').hidden = !['expenses', 'funding', 'invoices'].includes(acct.tab);
+  $('acct-new').textContent = acct.tab === 'invoices' ? 'Bill time'
+    : acct.tab === 'funding' ? 'Record' : 'New';
   body.innerHTML = '';
 
   if (!acct.currency) {
@@ -908,6 +910,7 @@ async function renderAccounting() {
   if (acct.tab === 'unbilled') return renderUnbilled(body);
   if (acct.tab === 'invoices') return renderInvoices(body);
   if (acct.tab === 'payments') return renderPayments(body);
+  if (acct.tab === 'funding') return renderFunding(body);
   if (acct.tab === 'expenses') return renderExpenses(body);
   if (acct.tab === 'reports') return renderReports(body);
   return renderChartOfAccounts(body);
@@ -1120,6 +1123,72 @@ async function renderPayments(body) {
     payments.map((p) => [p.paid_on, p.invoice_number, p.client_name,
       cents(p.amount), p.method, p.reference]),
     [false, false, false, true, false, false]));
+}
+
+// Owner funding. The outstanding loan leads the page because it is the figure
+// with a consequence — it is a debt the business owes — and the server sends it
+// rather than the browser deriving it, so there is only one implementation of
+// what "still owed" means.
+async function renderFunding(body) {
+  const { funding, loan_outstanding } = await api('/api/v1/accounting/funding');
+
+  body.append(el('div', { class: 'stats' },
+    stat(cents(loan_outstanding), 'Owed to owner'),
+    stat(cents((funding || []).filter((f) => f.kind === 'capital')
+      .reduce((sum, f) => sum + Number(f.amount), 0)), 'Capital introduced')));
+
+  if (!funding || !funding.length) {
+    body.append(el('div', { class: 'empty muted', text:
+      'Nothing recorded. Use Record for an opening deposit, a further contribution, '
+      + 'or a loan from the owner.' }));
+    return;
+  }
+
+  const labels = { capital: 'Capital', loan: 'Loan', repayment: 'Repayment' };
+  body.append(table(['Date', 'Kind', 'From', 'Amount', 'Posted to', 'Account', 'Reference'],
+    funding.map((f) => [
+      f.received_on, labels[f.kind] || f.kind, f.from_name,
+      // A repayment is money leaving, and showing it with the same sign as a
+      // deposit makes a column of numbers that do not add up to the balance.
+      (f.kind === 'repayment' ? '−' : '') + cents(f.amount),
+      f.owner_account_name, f.cash_account_name, f.reference,
+    ]),
+    [false, false, false, true, false, false, false]));
+}
+
+async function editFunding() {
+  await loadAcctLookups();
+  const banks = acct.accounts.filter((a) => a.type === 'asset');
+  openEditor('Record owner funding', [
+    // Kind first, and with no blank option: it decides whether this becomes
+    // equity or a debt, and it cannot be worked out afterwards from the amount.
+    { name: 'kind', label: 'Kind', type: 'select', options: [
+      { value: 'capital', label: 'Capital introduced — equity, not repayable' },
+      { value: 'loan', label: 'Loan from owner — repayable' },
+      { value: 'repayment', label: 'Repayment of an owner loan' },
+    ] },
+    { name: 'amount', label: `Amount (${acct.currency})` },
+    { name: 'received_on', label: 'Date', type: 'date' },
+    { name: 'from_name', label: 'From' },
+    { name: 'cash_account_id', label: 'Bank account', type: 'select',
+      options: banks.map((a) => ({ value: String(a.id), label: `${a.code} ${a.name}` })) },
+    { name: 'reference', label: 'Reference' },
+    { name: 'note', label: 'Note' },
+  ], async (v) => {
+    await api('/api/v1/accounting/funding', {
+      method: 'POST',
+      body: JSON.stringify({
+        kind: v.kind,
+        amount: Math.round(parseFloat(v.amount || '0') * 100),
+        received_on: v.received_on,
+        from_name: v.from_name,
+        cash_account_id: Number(v.cash_account_id),
+        reference: v.reference,
+        note: v.note,
+      }),
+    });
+    await renderAccounting();
+  });
 }
 
 async function renderExpenses(body) {

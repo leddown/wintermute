@@ -44,6 +44,12 @@ type Repository interface {
 	RecordPayment(p Payment, memo string, postings []Posting) (Payment, error)
 	DeletePayment(id int64) error
 
+	ListFunding(f FundingFilter) ([]Funding, error)
+	GetFunding(id int64) (Funding, error)
+	RecordFunding(f Funding, memo string, postings []Posting) (Funding, error)
+	DeleteFunding(id int64) error
+	OwnerLoanBalance(asOf string) (Money, error)
+
 	ListExpenses(f ExpenseFilter) ([]Expense, error)
 	GetExpense(id int64) (Expense, error)
 	RecordExpense(e Expense, memo string, postings []Posting) (Expense, error)

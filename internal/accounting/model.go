@@ -56,6 +56,8 @@ const (
 	SysRecharged = "recharged"  // rebilled client costs
 	SysRetained  = "retained"   // retained earnings
 	SysRounding  = "rounding"   // sub-cent VAT residue
+	SysCapital   = "capital"    // owner capital introduced
+	SysOwnerLoan = "owner_loan" // money the owner lent the business, repayable
 )
 
 // Account is one line of the chart of accounts.
@@ -120,11 +122,13 @@ const (
 	SourceCreditNote JournalSource = "credit_note"
 	SourcePayment    JournalSource = "payment"
 	SourceExpense    JournalSource = "expense"
+	SourceFunding    JournalSource = "funding"
 )
 
 func (s JournalSource) valid() bool {
 	switch s {
-	case SourceManual, SourceOpening, SourceInvoice, SourceCreditNote, SourcePayment, SourceExpense:
+	case SourceManual, SourceOpening, SourceInvoice, SourceCreditNote, SourcePayment,
+		SourceExpense, SourceFunding:
 		return true
 	}
 	return false
