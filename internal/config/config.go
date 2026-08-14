@@ -54,6 +54,24 @@ type Config struct {
 	TVDBAPIKey string
 	TVDBPin    string
 	OMDBAPIKey string
+
+	// Knowledge sources an agent profile can be given. Each is optional, and
+	// an unset one means the corresponding tools are never offered rather than
+	// offered and failing.
+
+	// GRCBaseURL and GRCToken point at a GRC application's read-only knowledge
+	// API — its Security NFR catalog, controls, regulations, policies and
+	// risks. The token cannot write; the API it opens has no write path.
+	GRCBaseURL string
+	GRCToken   string
+
+	// SearxURL is the operator's own SearXNG instance, which backs web_search
+	// and fetch_url. A self-hosted instance rather than a search API keeps the
+	// assistant's queries off somebody else's log, which is the same reason
+	// this program runs local models.
+	SearxURL        string
+	SearxCategories string
+	SearxLanguage   string
 }
 
 // Load reads configuration from the environment, applying defaults. It loads
@@ -106,6 +124,11 @@ func Load() (*Config, error) {
 		TVDBAPIKey:        os.Getenv("TVDB_API_KEY"),
 		TVDBPin:           os.Getenv("TVDB_PIN"),
 		OMDBAPIKey:        os.Getenv("OMDB_API_KEY"),
+		GRCBaseURL:        strings.TrimSpace(os.Getenv("GRC_URL")),
+		GRCToken:          strings.TrimSpace(os.Getenv("GRC_KNOWLEDGE_TOKEN")),
+		SearxURL:          strings.TrimSpace(os.Getenv("SEARXNG_URL")),
+		SearxCategories:   strings.TrimSpace(os.Getenv("SEARXNG_CATEGORIES")),
+		SearxLanguage:     strings.TrimSpace(os.Getenv("SEARXNG_LANGUAGE")),
 	}
 
 	if cfg.DefaultBackend == "" {

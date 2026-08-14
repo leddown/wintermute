@@ -66,6 +66,29 @@ type Agent struct {
 	log           *slog.Logger
 	maxIterations int
 	system        string
+	// scope, when set, layers the session's agent profile over the base tool
+	// set and system prompt. It is optional so the loop still runs — unscoped,
+	// as it did before agents existed — in a deployment that has none.
+	scope Scoper
+}
+
+// Scoper narrows a turn to the profile the session belongs to: which knowledge
+// tools it may use, and what to add to the system prompt.
+//
+// It is an interface so the agent loop does not depend on the knowledge, grc
+// and websearch packages, all of which would otherwise have to be imported
+// here purely to be passed through. What the loop needs to know is only "given
+// this session, what may it reach"; internal/app answers that.
+type Scoper interface {
+	// Scope registers the session's permitted knowledge tools onto registry and
+	// returns any prompt text to append to the base system prompt.
+	Scope(ctx context.Context, agentID string, registry *tool.Registry) (prompt string, err error)
+}
+
+// WithScope attaches the profile scoper.
+func (a *Agent) WithScope(s Scoper) *Agent {
+	a.scope = s
+	return a
 }
 
 // New builds an Agent. serverTools holds only tools the server executes;
@@ -101,11 +124,16 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		return nil, err
 	}
 
-	registry, err := a.registryFor(sess, clientTools)
+	registry, extraPrompt, err := a.registryFor(ctx, sess, clientTools)
 	if err != nil {
 		return nil, err
 	}
 	defs := registry.Definitions()
+
+	system := a.system
+	if extraPrompt != "" {
+		system += "\n\n" + extraPrompt
+	}
 
 	turn := &Turn{SessionID: sess.ID}
 	for i := 0; i < a.maxIterations; i++ {
@@ -115,7 +143,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		}
 
 		res, err := a.router.Complete(ctx, sess.Backend, llm.Request{
-			System:   a.system,
+			System:   system,
 			Messages: history,
 			Tools:    defs,
 			Model:    sess.Model,
@@ -174,24 +202,37 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 	return nil, ErrTooManyIterations
 }
 
-// registryFor layers a client's declared tools over the server's own.
+// registryFor layers a client's declared tools over the server's own, then
+// narrows the result to what this session's agent profile may reach.
 //
 // The batch tool is added here rather than at startup because it has to be
 // bound to a session: that is what puts each worker's tool calls in the right
-// audit trail.
-func (a *Agent) registryFor(sess *store.Session, clientTools []tool.Definition) (*tool.Registry, error) {
+// audit trail. The knowledge tools are added here for a stronger reason — they
+// are bound to the session's agent, so the library a model can search is
+// decided by the session rather than named in a tool argument it could change.
+func (a *Agent) registryFor(ctx context.Context, sess *store.Session, clientTools []tool.Definition) (*tool.Registry, string, error) {
 	registry := a.serverTools.Clone()
 	if a.pool != nil {
 		if err := registry.Register(batchDefinition(a.pool), a.batchHandler(sess)); err != nil {
-			return nil, fmt.Errorf("batch tool: %w", err)
+			return nil, "", fmt.Errorf("batch tool: %w", err)
 		}
 	}
+
+	var extraPrompt string
+	if a.scope != nil {
+		prompt, err := a.scope.Scope(ctx, sess.AgentID, registry)
+		if err != nil {
+			return nil, "", err
+		}
+		extraPrompt = prompt
+	}
+
 	for _, def := range clientTools {
 		if err := registry.RegisterClient(def); err != nil {
-			return nil, fmt.Errorf("client tool %q: %w", def.Name, err)
+			return nil, "", fmt.Errorf("client tool %q: %w", def.Name, err)
 		}
 	}
-	return registry, nil
+	return registry, extraPrompt, nil
 }
 
 // runServerTool executes one server-side tool and records it in the audit

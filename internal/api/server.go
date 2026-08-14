@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"wintermute/internal/agent"
+	"wintermute/internal/knowledge"
 	"wintermute/internal/models"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
@@ -29,8 +30,14 @@ type Server struct {
 	serverTools *tool.Registry
 	catalog     *models.Catalog
 	workspace   Workspace
-	info        ServerInfo
-	log         *slog.Logger
+	knowledge   *knowledge.Service
+	// grcConfigured and webConfigured report whether the server can actually
+	// back those sources, so the UI can say "declared but not configured"
+	// rather than leaving an agent quietly toothless.
+	grcConfigured bool
+	webConfigured bool
+	info          ServerInfo
+	log           *slog.Logger
 }
 
 // New builds a Server. A zero Workspace disables those routes rather than
@@ -38,6 +45,20 @@ type Server struct {
 func New(a *agent.Agent, s *store.Store, serverTools *tool.Registry, cat *models.Catalog, ws Workspace, info ServerInfo, log *slog.Logger) *Server {
 	return &Server{agent: a, store: s, serverTools: serverTools, catalog: cat,
 		workspace: ws, info: info, log: log}
+}
+
+// WithKnowledge attaches agent profiles and their libraries. Without it the
+// agent routes are not registered and every session is the unscoped assistant,
+// which is what this server was before agents existed.
+//
+// grcAvailable and webAvailable report whether those sources have been
+// configured on this server, so the UI can distinguish "this agent does not use
+// the web" from "this server cannot".
+func (s *Server) WithKnowledge(svc *knowledge.Service, grcAvailable, webAvailable bool) *Server {
+	s.knowledge = svc
+	s.grcConfigured = grcAvailable
+	s.webConfigured = webAvailable
+	return s
 }
 
 // Handler returns the fully wired HTTP handler.
@@ -64,6 +85,9 @@ func (s *Server) Handler() http.Handler {
 	authed("GET /api/v1/system", s.handleSystem)
 	authed("GET /api/v1/backends", s.handleBackends)
 	authed("POST /api/v1/backends/refresh", s.handleRefreshBackends)
+	// Send one prompt to one backend and see what comes back — see
+	// backendtest.go for why it neither falls back nor keeps a transcript.
+	authed("POST /api/v1/backends/{name}/test", s.handleTestBackend)
 	authed("GET /api/v1/models", s.handleModels)
 	authed("GET /api/v1/models/search", s.handleModelSearch)
 	// The Hub id contains a slash ("author/name"), so it needs a trailing
@@ -81,6 +105,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Company profile, CRM and tasks — see workspace.go.
 	s.registerWorkspaceRoutes(authed)
+
+	// Agent profiles and their document libraries — see agents.go.
+	s.registerAgentRoutes(authed)
 
 	mux.Handle("/", web.Handler())
 
@@ -117,6 +144,9 @@ type createSessionRequest struct {
 	// server default.
 	Backend string `json:"backend"`
 	Model   string `json:"model"`
+	// Agent names an agent profile, which decides the documents and external
+	// sources this conversation may reach. Empty is the unscoped assistant.
+	Agent string `json:"agent"`
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -128,8 +158,13 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	agentID, backend, model, err := s.resolveAgent(r.Context(), req.Agent, req.Backend, req.Model)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	c := clientFrom(r.Context())
-	sess, err := s.store.CreateSession(r.Context(), c.ID, req.Title, req.Backend, req.Model)
+	sess, err := s.store.CreateSession(r.Context(), c.ID, req.Title, backend, model, agentID)
 	if err != nil {
 		s.fail(w, "create session", err)
 		return

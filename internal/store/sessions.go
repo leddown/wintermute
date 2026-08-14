@@ -23,44 +23,49 @@ type Session struct {
 	// the server's configured default. They are per session rather than global
 	// so a user can keep a local model for routine work and open a separate
 	// conversation against a cloud model when they want one.
-	Backend   string    `json:"backend,omitempty"`
-	Model     string    `json:"model,omitempty"`
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+	// AgentID names the agent profile this conversation belongs to, which
+	// decides the documents and external sources it may reach. Empty is the
+	// unscoped assistant — what every session was before agents existed, and
+	// what a session keeps working as if its agent is later deleted.
+	AgentID   string    `json:"agent_id,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // sessionColumns is the shared SELECT list, so the scan order below cannot
 // drift from the query.
-const sessionColumns = `id, client_id, title, backend, model, created_at, updated_at`
+const sessionColumns = `id, client_id, title, backend, model, agent_id, created_at, updated_at`
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	err := row.Scan(&sess.ID, &sess.ClientID, &sess.Title, &sess.Backend, &sess.Model,
-		&sess.CreatedAt, &sess.UpdatedAt)
+		&sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	return &sess, nil
 }
 
-// CreateSession starts a new conversation for a client. backend and model may
-// be empty, meaning the server default.
-func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backend, model string) (*Session, error) {
+// CreateSession starts a new conversation for a client. backend, model and
+// agentID may be empty, meaning the server default and the unscoped assistant.
+func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backend, model, agentID string) (*Session, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, client_id, title, backend, model, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		id, clientID, title, backend, model, now, now)
+		`INSERT INTO sessions (id, client_id, title, backend, model, agent_id, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, clientID, title, backend, model, agentID, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
 	return &Session{
 		ID: id, ClientID: clientID, Title: title,
-		Backend: backend, Model: model, CreatedAt: now, UpdatedAt: now,
+		Backend: backend, Model: model, AgentID: agentID, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 

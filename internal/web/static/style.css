@@ -268,3 +268,16 @@ dialog h3 { margin: 0; font-size: 15px; }
   .pane-body { padding: 12px; }
   .row-form { flex-wrap: wrap; }
 }
+
+/* Agents: the picker beside the composer, and the library list. */
+.chat-agent { display: flex; align-items: center; gap: 8px; padding: 0 14px 8px; font-size: 13px; }
+.chat-agent select {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 4px 8px; color: inherit; font: inherit; max-width: 320px;
+}
+ul.plain { list-style: none; margin: 10px 0 0; padding: 0; }
+ul.plain li {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 0; border-top: 1px solid var(--border);
+}
+pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inherit; }

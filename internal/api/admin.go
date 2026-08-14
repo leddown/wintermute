@@ -35,6 +35,12 @@ type ServerInfo struct {
 	MetadataProviders   []string `json:"metadata_providers"`
 	HasHuggingFaceToken bool     `json:"has_huggingface_token"`
 
+	// Knowledge sources an agent profile can be given, described rather than
+	// disclosed: a base URL is configuration worth seeing on the admin screen,
+	// the token behind it is not.
+	GRC       string `json:"grc"`
+	WebSearch string `json:"web_search"`
+
 	GoVersion string    `json:"go_version"`
 	StartedAt time.Time `json:"started_at"`
 }

@@ -165,6 +165,20 @@ func (r *Router) Complete(ctx context.Context, backend string, req Request) (*Re
 	return res, nil
 }
 
+// CompleteOn runs one turn against exactly the named backend, with no
+// fallback.
+//
+// This is for testing a backend rather than getting an answer: Complete's
+// fallback is what you want in a conversation and precisely what you do not
+// want here, because a broken backend would report someone else's success.
+func (r *Router) CompleteOn(ctx context.Context, backend string, req Request) (*Result, error) {
+	b, ok := r.Backend(backend)
+	if !ok {
+		return nil, fmt.Errorf("%q: %w", backend, ErrNoBackend)
+	}
+	return r.complete(ctx, b, req)
+}
+
 func (r *Router) complete(ctx context.Context, b *Backend, req Request) (*Result, error) {
 	if req.Model == "" {
 		req.Model = b.Model

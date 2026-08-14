@@ -73,7 +73,7 @@ func newBatchAgent(t *testing.T, main llm.Provider, workers *workerProvider, reg
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(context.Background(), client.ID, "test", "", "")
+	sess, err := st.CreateSession(context.Background(), client.ID, "test", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

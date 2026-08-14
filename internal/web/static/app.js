@@ -7,7 +7,13 @@
 'use strict';
 
 const $ = (id) => document.getElementById(id);
-const state = { token: null, sessionId: null, sending: false, view: 'chat' };
+const state = {
+  token: null, sessionId: null, sending: false, view: 'chat',
+  // The agent a new chat is opened against, and the one being edited in the
+  // Agents view. Null means the unscoped assistant, which is what every
+  // session was before agents existed.
+  chatAgent: null, agents: [], agentAvailable: {}, selectedAgent: null,
+};
 
 function api(path, options = {}) {
   const headers = Object.assign(
@@ -96,6 +102,14 @@ function start(me) {
   $('app').hidden = false;
   $('model').textContent = me.default_backend ? `${me.default_backend}` : '';
   loadSessions().catch(showError);
+  // The agent list is fetched at boot rather than on first view, because the
+  // chat needs it to say which agent a session is talking to — a question gets
+  // a different answer depending on which library is behind it.
+  api('/api/v1/agents').then((data) => {
+    state.agents = data.agents || [];
+    state.agentAvailable = data.available || {};
+    renderChatAgentPicker();
+  }).catch(() => { /* agents are optional; the chat works without them */ });
 }
 
 /* ---------- view switching ---------- */
@@ -104,6 +118,7 @@ function start(me) {
 // not cost four extra round trips for panes nobody looked at.
 const loaded = new Set();
 const loaders = {
+  agents: () => loadAgents(),
   tasks: () => Promise.all([loadLists(), renderTasks()]),
   crm: () => renderCRM(),
   accounting: () => renderAccounting(),
@@ -218,14 +233,23 @@ async function confirmDelete(what, fn) {
 
 /* ================= CHAT ================= */
 
+let sessionIndex = [];
+
+function agentOfSession(id) {
+  const found = sessionIndex.find((s) => s.id === id);
+  return found ? (found.agent_id || null) : null;
+}
+
 async function loadSessions() {
   const { sessions } = await api('/api/v1/sessions');
+  sessionIndex = sessions || [];
   const list = $('sessions');
   list.innerHTML = '';
   for (const s of sessions) {
+    const label = s.agent_id ? `${s.title || 'Untitled'} · ${s.agent_id}` : (s.title || 'Untitled');
     const li = el('li', {
-      text: s.title || 'Untitled',
-      title: s.title || 'Untitled',
+      text: label,
+      title: label,
       class: s.id === state.sessionId ? 'active' : '',
       onclick: () => openSession(s.id).catch(showError),
     });
@@ -234,21 +258,60 @@ async function loadSessions() {
 }
 
 async function newSession() {
-  const sess = await api('/api/v1/sessions', { method: 'POST', body: JSON.stringify({ title: '' }) });
+  const sess = await api('/api/v1/sessions', {
+    method: 'POST',
+    body: JSON.stringify({ title: '', agent: state.chatAgent || '' }),
+  });
   state.sessionId = sess.id;
-  $('messages').replaceChildren(
-    el('div', { class: 'empty muted', text: 'Ask about your media library, your tasks, or anything else.' }));
+  state.chatAgent = sess.agent_id || null;
+  $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
   await loadSessions();
   return sess.id;
 }
 
+// What the composer says it is talking to. Naming the agent matters: the same
+// question gets a different answer depending on which library is behind it,
+// and a reader who cannot see which one is reading tea leaves.
+function emptyChatHint() {
+  const agent = state.agents.find((a) => a.id === state.chatAgent);
+  if (agent) return `Talking to ${agent.name}. It can read the documents and sources given to it.`;
+  return 'Ask about your media library, your tasks, or anything else.';
+}
+
 async function openSession(id) {
   state.sessionId = id;
+  const known = (state.agents || []).find((a) => a.id === agentOfSession(id));
+  state.chatAgent = known ? known.id : agentOfSession(id);
   const { messages } = await api(`/api/v1/sessions/${id}/messages`);
   $('messages').innerHTML = '';
   for (const m of messages || []) appendMessage(m);
   await loadSessions();
   closeSidebar();
+}
+
+// The chat's agent picker. Changing it affects the *next* session rather than
+// the current one: a transcript belongs to the agent it was held with, and
+// re-pointing it halfway would leave the earlier turns unexplainable.
+function renderChatAgentPicker() {
+  const holder = $('chat-agent');
+  if (!holder) return;
+  if (!state.agents.length) {
+    holder.replaceChildren();
+    return;
+  }
+  const select = el('select', {
+    id: 'chat-agent-select',
+    title: 'Which agent a new chat is opened against',
+    onchange: (e) => { state.chatAgent = e.target.value || null; },
+  }, [
+    el('option', { value: '', text: 'No agent (general assistant)' }),
+    ...state.agents.map((a) => {
+      const opt = el('option', { value: a.id, text: a.name });
+      if (a.id === state.chatAgent) opt.selected = true;
+      return opt;
+    }),
+  ]);
+  holder.replaceChildren(el('span', { class: 'muted', text: 'New chat as' }), select);
 }
 
 $('new-session').addEventListener('click', () => newSession().catch(showError));
@@ -325,6 +388,242 @@ $('composer').addEventListener('submit', async (e) => {
     $('send').disabled = false;
     input.focus();
   }
+});
+
+/* ================= AGENTS =================
+   An agent is a named configuration of the assistant: a prompt, a model pin,
+   the sources it may consult, and the documents uploaded to it. This view is
+   where they are made and fed — including from the GRC application, which
+   links here rather than growing an upload page of its own. */
+
+const SOURCE_LABELS = {
+  documents: 'Documents uploaded here',
+  grc: 'GRC application (NFRs, controls, regulations, policies, risks)',
+  web: 'Web search and page fetch',
+};
+
+async function loadAgents() {
+  const data = await api('/api/v1/agents');
+  state.agents = data.agents || [];
+  state.agentAvailable = data.available || {};
+  renderAgentList();
+  if (state.selectedAgent && !state.agents.some((a) => a.id === state.selectedAgent)) {
+    state.selectedAgent = null;
+  }
+  await renderAgent();
+}
+
+function renderAgentList() {
+  const list = $('agent-list');
+  list.replaceChildren();
+  if (!state.agents.length) {
+    list.append(el('li', { class: 'muted', text: 'No agents yet' }));
+    return;
+  }
+  for (const agent of state.agents) {
+    list.append(el('li', {
+      text: agent.name,
+      title: agent.description || agent.name,
+      class: agent.id === state.selectedAgent ? 'active' : '',
+      onclick: () => { state.selectedAgent = agent.id; renderAgent().catch(showError); },
+    }));
+  }
+}
+
+function selectedAgent() {
+  return state.agents.find((a) => a.id === state.selectedAgent) || null;
+}
+
+async function renderAgent() {
+  const body = $('agent-body');
+  const agent = selectedAgent();
+  $('agent-delete').hidden = !agent;
+  $('agent-chat').hidden = !agent;
+  renderAgentList();
+
+  if (!agent) {
+    $('agent-title').textContent = 'Agents';
+    body.replaceChildren(el('p', { class: 'muted' },
+      'An agent scopes a conversation: it can read the documents uploaded to it and the ',
+      'sources it is given, and nothing else. Make one per client, per engagement, or per ',
+      'subject — then pick it when you start a chat, or point the GRC application at it.'));
+    return;
+  }
+
+  $('agent-title').textContent = agent.name;
+  body.replaceChildren(el('p', { class: 'muted', text: 'Loading…' }));
+
+  const { documents } = await api(`/api/v1/agents/${encodeURIComponent(agent.id)}/documents`);
+  const rows = [];
+
+  rows.push(el('div', { class: 'card' },
+    el('div', { class: 'row' },
+      el('span', { class: 'muted', text: 'id' }), el('span', { text: agent.id })),
+    agent.description ? el('p', { text: agent.description }) : null,
+    el('div', { class: 'row' },
+      el('span', { class: 'muted', text: 'sources' }),
+      el('span', { text: agent.sources.length ? agent.sources.map(sourceLabel).join(', ') : 'none' })),
+    (agent.backend || agent.model) ? el('div', { class: 'row' },
+      el('span', { class: 'muted', text: 'model' }),
+      el('span', { text: [agent.backend, agent.model].filter(Boolean).join(' / ') })) : null,
+    el('div', { class: 'row-actions' },
+      el('button', { class: 'ghost-btn', text: 'Edit', onclick: () => editAgent(agent) })),
+  ));
+
+  if (agent.system_prompt) {
+    rows.push(el('div', { class: 'card' },
+      el('h3', { text: 'Instructions' }),
+      el('pre', { class: 'wrap', text: agent.system_prompt })));
+  }
+
+  rows.push(el('div', { class: 'card' },
+    el('h3', { text: `Documents (${documents.length})` }),
+    el('p', { class: 'muted' },
+      'Uploaded here, then searched by this agent during a conversation. ',
+      'PDF, text, markdown, HTML, CSV, JSON or YAML.'),
+    uploadForm(agent),
+    documents.length
+      ? el('ul', { class: 'plain' }, documents.map((doc) => documentRow(agent, doc)))
+      : el('p', { class: 'muted', text: 'Nothing uploaded yet.' }),
+  ));
+
+  body.replaceChildren(...rows.filter(Boolean));
+}
+
+function sourceLabel(source) {
+  const label = SOURCE_LABELS[source] || source;
+  // A source the agent asks for that this server cannot back is a
+  // configuration mistake, and silence about it is how it stays one.
+  if (state.agentAvailable[source] === false) return `${label} — not configured on this server`;
+  return label;
+}
+
+function uploadForm(agent) {
+  const file = el('input', { type: 'file', id: 'agent-file' });
+  const title = el('input', { type: 'text', id: 'agent-doc-title', placeholder: 'Title (optional)' });
+  const status = el('span', { class: 'muted' });
+
+  const submit = el('button', {
+    class: 'ghost-btn',
+    text: 'Upload',
+    onclick: async () => {
+      if (!file.files || !file.files[0]) { status.textContent = 'Choose a file first.'; return; }
+      const form = new FormData();
+      form.append('file', file.files[0]);
+      form.append('title', title.value);
+      status.textContent = 'Reading and indexing…';
+      submit.disabled = true;
+      try {
+        // Not api(): a multipart body must not carry a JSON content type, and
+        // the browser has to set its own boundary.
+        const res = await fetch(`/api/v1/agents/${encodeURIComponent(agent.id)}/documents`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${state.token}` },
+          body: form,
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload.error || `${res.status} ${res.statusText}`);
+        status.textContent = '';
+        file.value = '';
+        title.value = '';
+        toast(`Added "${payload.title}" (${payload.chunk_count} passages)`);
+        await loadAgents();
+      } catch (err) {
+        status.textContent = err.message;
+      } finally {
+        submit.disabled = false;
+      }
+    },
+  });
+
+  return el('div', { class: 'row-form' }, file, title, submit, status);
+}
+
+function documentRow(agent, doc) {
+  return el('li', {},
+    el('div', {},
+      el('strong', { text: doc.title }),
+      el('span', { class: 'muted', text: ` — ${doc.chunk_count} passages, ${doc.extract_via}` })),
+    el('button', {
+      class: 'ghost-btn danger',
+      text: 'Remove',
+      onclick: async () => {
+        if (!confirm(`Remove "${doc.title}" from ${agent.name}?`)) return;
+        await api(`/api/v1/agents/${encodeURIComponent(agent.id)}/documents/${doc.id}`,
+          { method: 'DELETE' });
+        await loadAgents();
+      },
+    }),
+  );
+}
+
+function agentFields(agent) {
+  const has = (s) => Boolean(agent && agent.sources && agent.sources.includes(s));
+  return [
+    { name: 'name', label: 'Name', value: agent ? agent.name : '' },
+    { name: 'description', label: 'What it is for', value: agent ? agent.description : '' },
+    {
+      name: 'system_prompt', label: 'Instructions (optional)', type: 'textarea',
+      value: agent ? agent.system_prompt : '',
+    },
+    { name: 'src_documents', label: SOURCE_LABELS.documents, type: 'checkbox', value: agent ? has('documents') : true },
+    { name: 'src_grc', label: SOURCE_LABELS.grc, type: 'checkbox', value: has('grc') },
+    { name: 'src_web', label: SOURCE_LABELS.web, type: 'checkbox', value: has('web') },
+    { name: 'backend', label: 'Backend (optional)', value: agent ? agent.backend : '' },
+    { name: 'model', label: 'Model (optional)', value: agent ? agent.model : '' },
+  ];
+}
+
+function agentPayload(values) {
+  const sources = [];
+  if (values.src_documents) sources.push('documents');
+  if (values.src_grc) sources.push('grc');
+  if (values.src_web) sources.push('web');
+  return {
+    name: values.name,
+    description: values.description,
+    system_prompt: values.system_prompt,
+    backend: values.backend,
+    model: values.model,
+    sources,
+  };
+}
+
+function newAgent() {
+  openEditor('New agent', agentFields(null), async (values) => {
+    const created = await api('/api/v1/agents',
+      { method: 'POST', body: JSON.stringify(agentPayload(values)) });
+    state.selectedAgent = created.id;
+    await loadAgents();
+  });
+}
+
+function editAgent(agent) {
+  openEditor(`Edit ${agent.name}`, agentFields(agent), async (values) => {
+    await api(`/api/v1/agents/${encodeURIComponent(agent.id)}`,
+      { method: 'PUT', body: JSON.stringify(agentPayload(values)) });
+    await loadAgents();
+  });
+}
+
+$('new-agent').addEventListener('click', () => newAgent());
+
+$('agent-delete').addEventListener('click', async () => {
+  const agent = selectedAgent();
+  if (!agent) return;
+  if (!confirm(`Delete ${agent.name} and its documents? Conversations it held are kept.`)) return;
+  await api(`/api/v1/agents/${encodeURIComponent(agent.id)}`, { method: 'DELETE' });
+  state.selectedAgent = null;
+  await loadAgents();
+});
+
+$('agent-chat').addEventListener('click', async () => {
+  const agent = selectedAgent();
+  if (!agent) return;
+  state.chatAgent = agent.id;
+  switchView('chat');
+  await newSession();
+  toast(`New chat as ${agent.name}`);
 });
 
 /* ================= TASKS ================= */
@@ -1476,6 +1775,66 @@ async function renderAdminBackends(body) {
   body.append(refresh);
   body.append(el('div', { class: 'muted', text:
     'A backend that is down is recorded as unreachable and retried; it never stops the server starting.' }));
+
+  body.append(backendTestBench(d));
+}
+
+// Send one question to one backend and see what comes back.
+//
+// A probe says a backend answers HTTP; this says it answers *questions*, which
+// is a different fact and the one that matters before pointing work at it. The
+// call deliberately does not fall back to another backend — the whole question
+// is whether this one works — and creates no session, so testing leaves no
+// transcripts behind.
+function backendTestBench(d) {
+  const names = (d.backends || []).map((b) => b.name);
+  if (!names.length) return el('div', {});
+
+  const pick = el('select', { id: 'test-backend' },
+    names.map((n) => el('option', { value: n, text: n + (n === d.default ? ' (default)' : '') })));
+  const model = el('input', { type: 'text', id: 'test-model', placeholder: 'model (blank = backend default)' });
+  const prompt = el('input', { type: 'text', id: 'test-prompt', placeholder: 'Ask something…' });
+  const out = el('div', { class: 'muted' });
+  const run = el('button', { class: 'ghost-btn', text: 'Send' });
+
+  run.addEventListener('click', async () => {
+    run.disabled = true;
+    out.className = 'muted';
+    out.textContent = 'Waiting for ' + pick.value + '…';
+    const started = Date.now();
+    try {
+      const res = await api(`/api/v1/backends/${encodeURIComponent(pick.value)}/test`, {
+        method: 'POST',
+        body: JSON.stringify({ prompt: prompt.value, model: model.value }),
+      });
+      if (res.error) {
+        out.className = 'err';
+        out.textContent = `${pick.value} failed after ${res.elapsed_ms} ms: ${res.error}`;
+        return;
+      }
+      out.className = '';
+      out.replaceChildren(
+        el('div', { class: 'muted', text:
+          `${res.backend} · ${res.model} · ${res.elapsed_ms} ms · ` +
+          `${res.usage.prompt_tokens}→${res.usage.completion_tokens} tokens` }),
+        el('pre', { class: 'wrap', text: res.reply }),
+      );
+    } catch (err) {
+      out.className = 'err';
+      out.textContent = `${pick.value} failed after ${Date.now() - started} ms: ${err.message}`;
+    } finally {
+      run.disabled = false;
+    }
+  });
+
+  return el('div', { class: 'card' },
+    el('h3', { text: 'Send a test question' }),
+    el('p', { class: 'muted', text:
+      'Goes to the backend you pick and no other — no fallback, no tools, no session. '
+      + 'Use it to check a backend answers, and how long it takes.' }),
+    el('div', { class: 'row-form' }, pick, model, prompt, run),
+    out,
+  );
 }
 
 // The probe reports megabytes, not bytes.

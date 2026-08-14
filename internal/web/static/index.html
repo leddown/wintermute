@@ -32,6 +32,7 @@
       </div>
       <nav id="views" class="views">
         <button class="view-btn active" data-view="chat">Chat</button>
+        <button class="view-btn" data-view="agents">Agents</button>
         <button class="view-btn" data-view="tasks">Tasks</button>
         <button class="view-btn" data-view="crm">CRM</button>
         <button class="view-btn" data-view="accounting">Accounts</button>
@@ -60,7 +61,32 @@
             <textarea id="input" rows="1" placeholder="Message Wintermute…" autocomplete="off"></textarea>
             <button id="send" type="submit" aria-label="Send">↑</button>
           </form>
+          <div id="chat-agent" class="chat-agent"></div>
           <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
+        </main>
+      </section>
+
+      <!-- Agents -->
+      <section class="view" data-view="agents">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <span class="muted">Agents</span>
+            <button id="new-agent" class="link-btn">New</button>
+          </div>
+          <ul id="agent-list"></ul>
+          <p class="hint muted">An agent is a named set of documents and sources.
+            A conversation started against one can read those and nothing else.</p>
+        </aside>
+
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="agent-title">Agents</h2>
+            <div class="row-actions">
+              <button id="agent-chat" class="ghost-btn" hidden>Start a chat</button>
+              <button id="agent-delete" class="ghost-btn danger" hidden>Delete</button>
+            </div>
+          </div>
+          <div id="agent-body" class="pane-body"></div>
         </main>
       </section>
 

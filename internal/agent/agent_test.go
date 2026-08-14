@@ -61,7 +61,7 @@ func newTestAgent(t *testing.T, p llm.Provider, reg *tool.Registry) (*Agent, *st
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(context.Background(), client.ID, "test", "", "")
+	sess, err := st.CreateSession(context.Background(), client.ID, "test", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

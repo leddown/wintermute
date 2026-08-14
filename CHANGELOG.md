@@ -1,5 +1,93 @@
 # Change Log
 
+## 2026-08-14 (Agents: named document libraries and sources)
+
+An **agent** is a named configuration of the assistant — a prompt, a model pin,
+the sources it may consult, and a library of documents uploaded to it. Pick one
+when starting a chat, or name one from another application, and the
+conversation reaches that material and nothing else. Not a second agent loop:
+the loop, the transcript and the approval model are unchanged, and an agent
+narrows what a turn can reach. See [docs/agents.md](docs/agents.md).
+
+Two problems, one answer. Separation — a conversation about one client's
+engagement should not reach another's documents, and before this every session
+saw every tool and no documents at all. And groundedness — asked "how many
+Security NFRs are focused on network segmentation?", a model with no access to
+the catalog explains what it would need in order to answer and offers to work
+through the list if someone pastes it in. It cannot know the list is one HTTP
+call away. Now it is a tool call away, and the answer comes back with
+references.
+
+### `internal/knowledge`
+
+Agents and their libraries. Migration 0007 adds `agents`, `agent_documents`,
+`agent_document_chunks`, and `sessions.agent_id`. Uploads are extracted (PDF
+via `pdftotext`; text, markdown, HTML, CSV, JSON and YAML directly), split at
+headings rather than at a fixed width, and searched with BM25 — the heading
+scored with the body, so a section titled "Incident reporting" is found by that
+phrase even when its body says "notify the authority".
+
+Only the extracted text is kept, not the original bytes: nothing here serves
+the file back, and storing it would grow the database with material it never
+reads. PDF extraction has no pure-Go fallback on purpose — poppler's layout
+mode preserves the structure the chunker splits on, and a PDF parser would be
+this program's third dependency for a job it would do worse.
+
+The document tools are registered per session and bound to the session's agent,
+so there is no agent argument for a model to change: one agent cannot read
+another's library by naming it. A test covers exactly that.
+
+### `internal/grc` and `internal/websearch`
+
+Two new sources an agent can be given.
+
+`grc` queries a GRC application's read-only knowledge API — its Security NFR
+catalog, 800-53 controls, regulation coverage, policies and risk register —
+through four tools. `grc_search` passes through both of that API's counts, how
+many records matched any term and how many matched every term, because for a
+two-word question those differ and reporting the first as the second turns a
+precise question into an overstatement. `grc_list_nfrs` returns the whole
+catalog, which is the only honest way to answer "how many".
+
+`websearch` is `web_search` against the operator's own SearXNG instance plus
+`fetch_url`. SearXNG rather than a search API for the same reason this program
+runs local models: a search API makes every query — which client, which
+regulation, which vulnerability — somebody else's log. `fetch_url` refuses
+private address space in the dialer rather than on the hostname, so a name that
+resolves publicly during validation and to a metadata endpoint a moment later
+is still refused.
+
+### Scoping the loop
+
+`agent.WithScope` narrows the registry to the session agent's sources and
+layers its prompt over the base one. `internal/app/scope.go` holds the wiring,
+because the loop should not have to import three modules to pass them through.
+
+A session with no agent, or one whose agent was deleted, gets no knowledge
+tools — the assistant this was before — rather than everything. A source an
+agent declares that the server has not configured is reported to the model so
+it can say so; a test found that the prompt stayed silent when *every* declared
+source was unconfigured, which was the case where silence misleads most.
+
+### API and UI
+
+`GET/POST/PUT/DELETE /api/v1/agents`, document upload and delete beneath each,
+and `POST /api/v1/sessions` now accepts an `agent`. A new **Agents** view
+creates them, uploads to them and starts a chat as one; the chat names the
+agent it is talking to, because the same question gets a different answer
+depending on which library is behind it.
+
+### Testing a backend from the UI
+
+**Admin → Backends → Send a test question** sends one prompt to one backend and
+reports the reply, the model, the elapsed time and the token counts. It creates
+no session, offers no tools, and does not fall back to another backend: a probe
+says a backend answers HTTP, this says it answers questions, and an answer from
+its neighbour would be a lie. `Router.CompleteOn` is the no-fallback path a
+test needs. A failure comes back as a result with its timing rather than as a
+server error.
+
+
 ## 2026-08-12 (Accounting, and an admin surface)
 
 A double-entry accounting module built on top of the CRM, and a view that says

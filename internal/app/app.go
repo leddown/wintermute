@@ -19,12 +19,15 @@ import (
 	"wintermute/internal/company"
 	"wintermute/internal/config"
 	"wintermute/internal/crm"
+	"wintermute/internal/grc"
+	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
 	"wintermute/internal/lookup"
 	"wintermute/internal/models"
 	"wintermute/internal/store"
 	"wintermute/internal/todo"
 	"wintermute/internal/tool"
+	"wintermute/internal/websearch"
 )
 
 // App holds the assembled server dependencies.
@@ -143,7 +146,19 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("register task tools: %w", err)
 	}
 
-	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations)
+	// Agent profiles: the document libraries, and the external sources a
+	// profile may consult. The scoper is what makes a profile mean something —
+	// without it every session sees every tool, which is what this replaced.
+	knowledgeService := knowledge.NewService(knowledge.NewStore(st.DB()))
+	grcClient := grc.New(grc.Config{BaseURL: cfg.GRCBaseURL, Token: cfg.GRCToken})
+	webClient := websearch.New(websearch.Config{
+		SearxURL:   cfg.SearxURL,
+		Categories: cfg.SearxCategories,
+		Language:   cfg.SearxLanguage,
+	})
+
+	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations).
+		WithScope(&agentScope{knowledge: knowledgeService, grc: grcClient, web: webClient})
 	// A snapshot of what the server is actually running with, for the admin
 	// screen. Assembled here because this is the only package that sees the
 	// whole configuration, and deliberately carrying no secret values.
@@ -157,6 +172,8 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		LLMTimeout:          cfg.LLMTimeout,
 		MaxToolIterations:   cfg.MaxToolIterations,
 		MetadataProviders:   providers.Names(),
+		GRC:                 grcClient.Describe(),
+		WebSearch:           webClient.Describe(),
 		HasHuggingFaceToken: cfg.HuggingFaceToken != "",
 		GoVersion:           runtime.Version(),
 		StartedAt:           time.Now().UTC(),
@@ -165,7 +182,8 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		info.PoolBackends = cfg.Pool.Backends
 	}
 
-	srv := api.New(ag, st, tools, catalog, workspace, info, log)
+	srv := api.New(ag, st, tools, catalog, workspace, info, log).
+		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil)
 
 	return &App{
 		cfg:     cfg,

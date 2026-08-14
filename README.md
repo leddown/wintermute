@@ -15,6 +15,8 @@ It also carries a small practice-management workspace — tasks, a CRM and your
 company profile — reachable from the same browser UI and the same token. See
 [Workspace](#workspace-tasks-crm-and-company).
 
+- [Agents](docs/agents.md) — named sets of documents and sources, so a
+  conversation reaches one client's material and not another's
 - [Set up a local model server](docs/local-models.md) — GPU, drivers, llama.cpp
 - [Running several backends](docs/backends.md) — multiple models at once, and
   when that actually makes anything faster

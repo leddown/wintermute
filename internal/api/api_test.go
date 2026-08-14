@@ -127,7 +127,7 @@ func TestSessionsAreNotVisibleAcrossClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, owner.ID, "private", "", "")
+	sess, err := st.CreateSession(ctx, owner.ID, "private", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
