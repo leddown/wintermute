@@ -36,6 +36,7 @@
         <button class="view-btn" data-view="tasks">Tasks</button>
         <button class="view-btn" data-view="crm">CRM</button>
         <button class="view-btn" data-view="accounting">Accounts</button>
+        <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="admin">Admin</button>
       </nav>
@@ -130,6 +131,31 @@
             <button type="submit">Add</button>
           </form>
           <div id="tasks-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- Portfolio: the investment ledger moved across from morpheus. -->
+      <section class="view" data-view="portfolio">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Portfolio</span></div>
+          <ul id="pf-nav">
+            <li data-tab="holdings" class="active">Holdings</li>
+            <li data-tab="trades">Trades</li>
+            <li data-tab="forecasts">Forecasts</li>
+            <li data-tab="watchlist">Watchlist</li>
+            <li data-tab="reviews">Reviews</li>
+          </ul>
+          <div id="pf-status" class="muted" style="margin-top:16px;font-size:12px;"></div>
+        </aside>
+
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="pf-title">Holdings</h2>
+            <div class="pane-actions">
+              <button id="pf-refresh" class="ghost-btn">Refresh</button>
+            </div>
+          </div>
+          <div id="pf-body" class="pane-body"></div>
         </main>
       </section>
 

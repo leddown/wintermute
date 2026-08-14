@@ -9,6 +9,7 @@ import (
 	"wintermute/internal/accounting"
 	"wintermute/internal/company"
 	"wintermute/internal/crm"
+	"wintermute/internal/fintech"
 	"wintermute/internal/todo"
 )
 
@@ -28,6 +29,10 @@ type Workspace struct {
 	CRM        *crm.Service
 	Todo       *todo.Service
 	Accounting *accounting.Service
+	// Fintech is the investment ledger — holdings, forecasts and the periodic
+	// position review. Nil leaves its routes unregistered, the same way an
+	// absent CRM does.
+	Fintech *fintech.Service
 }
 
 func (s *Server) registerWorkspaceRoutes(authed func(string, http.HandlerFunc)) {
@@ -74,6 +79,7 @@ func (s *Server) registerWorkspaceRoutes(authed func(string, http.HandlerFunc)) 
 		authed("GET /api/v1/todo/calendar", s.handleTodoCalendar)
 	}
 	s.registerAccountingRoutes(authed)
+	s.registerFintechRoutes(authed)
 }
 
 // ---- company ----

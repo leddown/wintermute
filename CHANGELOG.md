@@ -1,5 +1,61 @@
 # Change Log
 
+## 2026-08-14 (Portfolio: the investment ledger moves in from morpheus)
+
+`internal/fintech` — a transaction ledger with holdings derived from it, AI
+price forecasts scored against what actually happened, and a periodic position
+review — moved here from morpheus. It is reachable under `/api/v1/fintech/*`,
+as agent tools, and in the browser UI under **Portfolio**.
+
+It moved for the model. Forecasting and reviewing cost one call per symbol, and
+there those calls could only go to Anthropic; here they go through the router,
+so a local model on your own hardware can do the work — which is the argument
+this whole program makes, applied to the one module that was paying a per-token
+price to disagree with it.
+
+### What changed in the port
+
+**No owner column.** Morpheus scoped every row to a signed-in user. This server
+authenticates clients by token and holds one portfolio, so `user_id`, the
+`userID` parameter threaded through every method, and the `(user_id,
+dedupe_hash)` uniqueness constraint are gone rather than stubbed — the same
+decision, for the same reason, that 0004 made for the workspace tables.
+
+**Quantities are summed in Go.** Postgres had `NUMERIC(28,10)` and could add
+fractions of a bitcoin exactly in SQL. SQLite would coerce them to float64 and
+lose the eighth decimal, so quantities stay TEXT and every aggregation runs
+through `math/big`. Prices, fees and totals were always integer cents and stay
+INTEGER, which is exact everywhere.
+
+**Structured output degrades instead of failing.** Morpheus forced a tool call
+to guarantee schema-valid JSON, which is a property of Anthropic's API and not
+of a llama.cpp server. `structured.go` declares the schema as a tool *and*
+states it in the system prompt, takes the tool call when there is one, finds
+the JSON object in the text when there is not — brace-depth scan, string-aware,
+so a rationale containing `}` does not truncate it — and on a failure retries
+once, telling the model what could not be read. What is left is a validation
+error someone can see, not a forecast assembled from a half-parsed reply.
+
+**Secrets come from the environment.** `MARKET_DATA_API_KEY`,
+`MARKET_DATA_PROVIDER`, `KRAKEN_API_KEY`/`SECRET`,
+`ALPACA_PAPER_KEY`/`SECRET`. Morpheus encrypted these into the database with a
+key it already had for signing sessions; this server has none, and a secret it
+cannot protect at rest it does not store. `FINTECH_SCAN_INTERVAL` and
+`FINTECH_REVIEW_INTERVAL` enable the background passes and default to off:
+they spend model time on their own schedule, which should be asked for.
+
+**The tests actually run.** They needed a live PostgreSQL server before and
+skipped themselves without one, which meant the ledger's arithmetic — the
+moving-average cost basis, realised P&L, the closed position that must not
+appear — went unverified on most runs. In-memory SQLite has no such excuse: 25
+tests, every run, in milliseconds.
+
+**No email digest.** Morpheus mailed the review digest through the SMTP setup
+it shared with its canary alerts. Nothing here sends mail, so the `Alerter`
+seam is left unwired: reviews are still generated, still stored, still read in
+the UI, and the carry-over queue still works — it simply has nothing to hand a
+digest to.
+
 ## 2026-08-14 (Agents: named document libraries and sources)
 
 An **agent** is a named configuration of the assistant — a prompt, a model pin,

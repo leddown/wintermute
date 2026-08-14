@@ -72,6 +72,44 @@ type Config struct {
 	SearxURL        string
 	SearxCategories string
 	SearxLanguage   string
+
+	// Fintech: the investment ledger's outside connections. All optional, and
+	// each absent one means the corresponding feature reports itself as not
+	// configured rather than failing when it is used.
+	//
+	// These are environment variables rather than rows in the database, unlike
+	// the application this module came from: that one encrypted them at rest
+	// with a key it already had for signing sessions, and this server has no
+	// such key. Secrets it cannot protect at rest, it does not store.
+
+	// MarketDataProvider names which quote source to build — "finnhub" or
+	// "alphavantage". Empty with a key present defaults to Finnhub.
+	MarketDataProvider string
+	// MarketDataAPIKey is that provider's key. Without it there are no quotes,
+	// so no live valuation and no forecasting.
+	MarketDataAPIKey string
+
+	// Kraken credentials for the read-only trade sync. The key needs query
+	// permissions only; nothing here ever places an order.
+	KrakenAPIKey    string
+	KrakenAPISecret string
+
+	// AlpacaPaperKey and AlpacaPaperSecret enable the paper broker — simulated
+	// orders against Alpaca's paper endpoint, which touches no real money.
+	AlpacaPaperKey    string
+	AlpacaPaperSecret string
+
+	// FintechForecastBackend pins forecasting to one backend by name. Empty
+	// uses the server default, which is the usual case.
+	FintechForecastBackend string
+
+	// FintechScanInterval and FintechReviewInterval drive the background
+	// passes: the first forecasts watchlist symbols and scores matured
+	// predictions, the second runs the position review. Zero means off, which
+	// is the default — these spend model time on their own schedule, and that
+	// should be asked for rather than assumed.
+	FintechScanInterval   time.Duration
+	FintechReviewInterval time.Duration
 }
 
 // Load reads configuration from the environment, applying defaults. It loads
@@ -91,6 +129,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	maxTokens, err := envInt("WINTERMUTE_LLM_MAX_TOKENS", 16000)
+	if err != nil {
+		return nil, err
+	}
+	fintechScan, err := envDuration("FINTECH_SCAN_INTERVAL", 0)
+	if err != nil {
+		return nil, err
+	}
+	fintechReview, err := envDuration("FINTECH_REVIEW_INTERVAL", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -129,6 +175,16 @@ func Load() (*Config, error) {
 		SearxURL:          strings.TrimSpace(os.Getenv("SEARXNG_URL")),
 		SearxCategories:   strings.TrimSpace(os.Getenv("SEARXNG_CATEGORIES")),
 		SearxLanguage:     strings.TrimSpace(os.Getenv("SEARXNG_LANGUAGE")),
+
+		MarketDataProvider:     strings.TrimSpace(os.Getenv("MARKET_DATA_PROVIDER")),
+		MarketDataAPIKey:       strings.TrimSpace(os.Getenv("MARKET_DATA_API_KEY")),
+		KrakenAPIKey:           strings.TrimSpace(os.Getenv("KRAKEN_API_KEY")),
+		KrakenAPISecret:        strings.TrimSpace(os.Getenv("KRAKEN_API_SECRET")),
+		AlpacaPaperKey:         strings.TrimSpace(os.Getenv("ALPACA_PAPER_KEY")),
+		AlpacaPaperSecret:      strings.TrimSpace(os.Getenv("ALPACA_PAPER_SECRET")),
+		FintechForecastBackend: strings.TrimSpace(os.Getenv("FINTECH_FORECAST_BACKEND")),
+		FintechScanInterval:    fintechScan,
+		FintechReviewInterval:  fintechReview,
 	}
 
 	if cfg.DefaultBackend == "" {

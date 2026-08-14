@@ -7,6 +7,11 @@
   --muted: #8b93a3;
   --accent: #6ea8fe;
   --error: #ff8a8a;
+  /* Gain and loss, for the portfolio's P&L figures. The loss colour is the
+     error red already in use: a position down on the day is not an error, but
+     it is the same "look here" the palette already spends that hue on. */
+  --gain: #7ddc9a;
+  --loss: #ff8a8a;
   --radius: 10px;
 }
 
@@ -233,6 +238,10 @@ tbody tr:hover { background: var(--surface); }
 .pill.high { color: var(--error); border-color: var(--error); }
 
 button.danger { border-color: var(--error); color: var(--error); }
+
+/* A signed money figure, in the portfolio's tables. */
+.pos { color: var(--gain); }
+.neg { color: var(--loss); }
 .row-actions { display: flex; gap: 6px; }
 .row-actions button { padding: 4px 10px; font-size: 12px; }
 

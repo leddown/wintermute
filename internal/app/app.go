@@ -19,6 +19,7 @@ import (
 	"wintermute/internal/company"
 	"wintermute/internal/config"
 	"wintermute/internal/crm"
+	"wintermute/internal/fintech"
 	"wintermute/internal/grc"
 	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
@@ -37,6 +38,9 @@ type App struct {
 	store   *store.Store
 	catalog *models.Catalog
 	http    *http.Server
+	// fintech is held so Run can start its background passes alongside the
+	// server, and stop them with it.
+	fintech *fintech.Service
 }
 
 // buildRouter turns the configured backends into live providers.
@@ -127,11 +131,13 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	// database handle rather than opening their own — one file, one WAL, one
 	// busy_timeout, all set in store.Open.
 	todoService := todo.NewService(todo.NewSQLiteRepository(st.DB()))
+	fintechService := buildFintech(cfg, st, router, log)
 	workspace := api.Workspace{
 		Company:    company.NewService(company.NewStore(st.DB())),
 		CRM:        crm.NewService(crm.NewSQLiteRepository(st.DB())),
 		Accounting: accounting.NewService(accounting.NewSQLiteRepository(st.DB())),
 		Todo:       todoService,
+		Fintech:    fintechService,
 	}
 
 	// The task tools go on the same registry the media and model tools use, so
@@ -144,6 +150,12 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	if err := todo.Register(tools, todoService); err != nil {
 		st.Close()
 		return nil, fmt.Errorf("register task tools: %w", err)
+	}
+	// The portfolio's tools, so the assistant can answer about holdings and
+	// forecasts rather than about markets in general.
+	if err := fintech.Register(tools, fintechService); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("register fintech tools: %w", err)
 	}
 
 	// Agent profiles: the document libraries, and the external sources a
@@ -190,6 +202,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		log:     log,
 		store:   st,
 		catalog: catalog,
+		fintech: fintechService,
 		http: &http.Server{
 			Addr:    cfg.Addr,
 			Handler: srv.Handler(),
@@ -201,6 +214,54 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 			IdleTimeout:       120 * time.Second,
 		},
 	}, nil
+}
+
+// buildFintech wires the investment ledger from the environment.
+//
+// Every outside connection is optional and independently so: with no market
+// data key there are no quotes and no forecasts, but the ledger still records
+// trades and derives holdings; with no Kraken keys the sync is simply not
+// offered. Each stub reports Configured() false and the API says so, which is
+// what lets this be built unconditionally rather than left nil.
+//
+// Forecasting goes through the model router, so it answers from whichever
+// backend this server is running — a local model included. That is the point of
+// the move: morpheus could only ask Anthropic.
+func buildFintech(cfg *config.Config, st *store.Store, router *llm.Router, log *slog.Logger) *fintech.Service {
+	marketData := fintech.MarketDataProvider(fintech.NewNotConfiguredProvider())
+	provider := cfg.MarketDataProvider
+	if cfg.MarketDataAPIKey != "" {
+		if provider == "" {
+			provider = fintech.ProviderFinnhub
+		}
+		built, err := fintech.NewMarketDataProvider(provider, cfg.MarketDataAPIKey)
+		if err != nil {
+			log.Warn("market data provider not configured", "provider", provider, "error", err)
+			provider = ""
+		} else {
+			marketData = built
+		}
+	} else {
+		provider = ""
+	}
+
+	svc := fintech.NewService(
+		fintech.NewRepository(st.DB()),
+		provider,
+		marketData,
+		fintech.NewAlpacaPaperBroker(cfg.AlpacaPaperKey, cfg.AlpacaPaperSecret),
+		fintech.NewKrakenSync(cfg.KrakenAPIKey, cfg.KrakenAPISecret),
+		fintech.NewRouterForecaster(router, cfg.FintechForecastBackend, cfg.LLMMaxTokens),
+		// No alerter: morpheus mailed the review digest through its own SMTP
+		// configuration, and this server has none. Reviews are still generated
+		// and stored, and are read in the UI.
+		nil,
+	)
+	log.Info("fintech configured",
+		"market_data", provider,
+		"kraken", svc.KrakenConfigured(),
+		"paper_broker", svc.BrokerConfigured())
+	return svc
 }
 
 // metadataProviders registers whichever metadata sources have credentials.
@@ -239,6 +300,15 @@ func (a *App) Run(ctx context.Context) error {
 		a.log.Warn("initial backend probe failed", "error", err)
 	}
 	cancelProbe()
+
+	// The portfolio's background passes, when they have been given an
+	// interval. They stop with ctx, so shutdown needs nothing extra.
+	if a.fintech != nil && a.cfg.FintechScanInterval > 0 {
+		go fintech.NewScheduler(a.fintech, a.cfg.FintechScanInterval).Run(ctx)
+	}
+	if a.fintech != nil && a.cfg.FintechReviewInterval > 0 {
+		go fintech.NewReviewScheduler(a.fintech, a.cfg.FintechReviewInterval).Run(ctx)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {

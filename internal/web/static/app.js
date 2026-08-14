@@ -1,7 +1,8 @@
 // Browser client for Wintermute.
 //
-// Four views over one API: the chat that has always been here, plus the tasks,
-// CRM and company modules that moved across from the RCSA application. The
+// Several views over one API: the chat that has always been here, the tasks,
+// CRM and company modules that moved across from the RCSA application, and the
+// portfolio that moved across from morpheus. The
 // browser declares no client-side tools, so a turn from here either completes
 // or reports an error — file operations belong to the desktop harness.
 'use strict';
@@ -123,6 +124,7 @@ const loaders = {
   crm: () => renderCRM(),
   accounting: () => renderAccounting(),
   company: () => loadCompany(),
+  portfolio: () => loadPortfolio(),
   admin: () => renderAdmin(),
 };
 
@@ -1938,4 +1940,348 @@ function revokeButton(name) {
     }
   });
   return b;
+}
+
+/* ---------- portfolio ---------- */
+//
+// The investment ledger that moved across from morpheus: what is held, what was
+// traded, what the assistant predicts and what its scheduled review made of it.
+//
+// Money arrives as integer cents and is only ever divided for display, never
+// for arithmetic — the same rule the Go side keeps, for the same reason.
+
+const pf = { tab: 'holdings', status: null };
+
+// Amounts are integer cents, formatted by the accounting view's cents() —
+// one formatter for both ledgers, since both hold the same kind of number.
+
+// signedCents marks a gain or a loss, since "-1,204.00" and "1,204.00" are the
+// whole story on a P&L line and the minus alone is easy to miss.
+function signedCents(n) {
+  const v = Number(n) || 0;
+  const node = el('span', { class: v < 0 ? 'neg' : v > 0 ? 'pos' : '', text: (v > 0 ? '+' : '') + cents(v) });
+  return node;
+}
+
+async function loadPortfolio() {
+  for (const li of document.querySelectorAll('#pf-nav li')) {
+    li.addEventListener('click', () => {
+      for (const other of document.querySelectorAll('#pf-nav li')) {
+        other.classList.toggle('active', other === li);
+      }
+      pf.tab = li.dataset.tab;
+      renderPortfolio().catch(showError);
+    });
+  }
+  $('pf-refresh').addEventListener('click', () => renderPortfolio().catch(showError));
+  await renderPortfolio();
+}
+
+async function renderPortfolio() {
+  const body = $('pf-body');
+  body.textContent = '';
+  $('pf-title').textContent = {
+    holdings: 'Holdings', trades: 'Trades', forecasts: 'Forecasts',
+    watchlist: 'Watchlist', reviews: 'Reviews',
+  }[pf.tab];
+
+  // The status line says which outside services are configured, so a page
+  // showing cost basis and no market value explains itself.
+  pf.status = await api('/api/v1/fintech/status');
+  const bits = [
+    pf.status.market_data_configured
+      ? `market data: ${pf.status.market_data_provider}`
+      : 'market data: not configured',
+    pf.status.forecasting_configured ? 'forecasting: on' : 'forecasting: off',
+    pf.status.kraken_configured ? 'kraken: linked' : null,
+    pf.status.broker_configured ? 'paper broker: on' : null,
+  ].filter(Boolean);
+  $('pf-status').textContent = bits.join(' · ');
+
+  if (pf.tab === 'holdings') return renderHoldings(body);
+  if (pf.tab === 'trades') return renderTrades(body);
+  if (pf.tab === 'forecasts') return renderForecasts(body);
+  if (pf.tab === 'watchlist') return renderWatchlist(body);
+  return renderReviews(body);
+}
+
+async function renderHoldings(body) {
+  const summary = await api('/api/v1/fintech/portfolio');
+  body.append(el('div', { class: 'stats' },
+    stat(summary.Holdings ? summary.Holdings.length : 0, 'Positions'),
+    stat(cents(summary.TotalCostCents), 'Cost basis'),
+    stat(cents(summary.TotalValueCents), 'Market value'),
+    stat(cents(summary.RealizedPLCents), 'Realised P&L')));
+
+  if (!summary.MarketDataConfigured) {
+    body.append(el('div', { class: 'muted', text:
+      'No market data provider is configured, so positions are shown at cost. ' +
+      'Set MARKET_DATA_API_KEY (and MARKET_DATA_PROVIDER, finnhub or alphavantage) to value them.' }));
+  }
+
+  const holdings = summary.Holdings || [];
+  if (!holdings.length) {
+    body.append(el('div', { class: 'muted', text: 'Nothing held yet. Record a trade under Trades.' }));
+    return;
+  }
+  body.append(table(
+    ['Symbol', 'Class', 'Quantity', 'Avg cost', 'Cost', 'Value', 'Unrealised'],
+    holdings.map((h) => [
+      h.Symbol, h.AssetClass, h.Quantity, cents(h.AvgCostCents),
+      cents(h.TotalCostCents), cents(h.CurrentValueCents), signedCents(h.UnrealizedPLCents),
+    ]),
+    [false, false, true, true, true, true, true]));
+}
+
+async function renderTrades(body) {
+  body.append(tradeForm());
+  const { trades } = await api('/api/v1/fintech/trades');
+  if (!trades || !trades.length) {
+    body.append(el('div', { class: 'muted', text: 'The ledger is empty.' }));
+    return;
+  }
+  body.append(table(
+    ['Executed', 'Symbol', 'Side', 'Quantity', 'Price', 'Fee', 'Total', 'Source'],
+    trades.map((t) => [
+      (t.ExecutedAt || '').slice(0, 10), t.Symbol, t.Side, t.Quantity,
+      cents(t.PriceCents), cents(t.FeeCents), signedCents(t.TotalCents), t.Source,
+    ]),
+    [false, false, false, true, true, true, true, false]));
+}
+
+// tradeForm records a trade made elsewhere. Prices are typed in the units
+// anyone reads them in and converted to cents here — asking for "12345" when
+// the screen says 123.45 is how a position ends up a hundred times too large.
+function tradeForm() {
+  const symbol = el('input', { placeholder: 'AAPL', autocomplete: 'off' });
+  const side = el('select', {}, el('option', { value: 'buy', text: 'Buy' }), el('option', { value: 'sell', text: 'Sell' }));
+  const assetClass = el('select', {},
+    el('option', { value: 'equity', text: 'Equity' }),
+    el('option', { value: 'etf', text: 'ETF' }),
+    el('option', { value: 'crypto', text: 'Crypto' }));
+  const quantity = el('input', { placeholder: 'Quantity', autocomplete: 'off' });
+  const price = el('input', { placeholder: 'Price', autocomplete: 'off' });
+  const fee = el('input', { placeholder: 'Fee', autocomplete: 'off' });
+  const date = el('input', { type: 'date' });
+
+  const form = el('form', { class: 'row-form' },
+    symbol, side, assetClass, quantity, price, fee, date,
+    el('button', { type: 'submit', text: 'Record' }));
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const toCents = (v) => Math.round((Number(v) || 0) * 100);
+    try {
+      await api('/api/v1/fintech/trades', {
+        method: 'POST',
+        body: JSON.stringify({
+          symbol: symbol.value,
+          asset_class: assetClass.value,
+          side: side.value,
+          quantity: quantity.value,
+          price_cents: toCents(price.value),
+          fee_cents: toCents(fee.value),
+          executed_at: date.value ? new Date(date.value + 'T12:00:00Z').toISOString() : '',
+        }),
+      });
+      toast(`Recorded ${side.value} ${quantity.value} ${symbol.value.toUpperCase()}`);
+      symbol.value = quantity.value = price.value = fee.value = '';
+      await renderPortfolio();
+    } catch (err) {
+      showError(err);
+    }
+  });
+  return form;
+}
+
+async function renderForecasts(body) {
+  body.append(forecastForm());
+  if (!pf.status.forecasting_configured) {
+    body.append(el('div', { class: 'muted', text: 'No model backend is available for forecasting.' }));
+  }
+  const { forecasts } = await api('/api/v1/fintech/forecasts?limit=25');
+  if (!forecasts || !forecasts.length) {
+    body.append(el('div', { class: 'muted', text: 'No forecasts yet.' }));
+    return;
+  }
+  for (const f of forecasts) {
+    body.append(el('div', { class: 'group-head', text:
+      `${f.Symbol} · ${(f.RequestedAt || '').slice(0, 10)} · reference ${cents(f.ReferencePriceCents)}` }));
+    body.append(table(
+      ['Horizon', 'Target', 'Direction', 'Range', 'Confidence', 'Actual', 'Hit'],
+      (f.Horizons || []).map((h) => [
+        `${h.HorizonDays}d`,
+        (h.TargetDate || '').slice(0, 10),
+        h.PredictedDirection,
+        `${cents(h.PredictedLowCents)} – ${cents(h.PredictedHighCents)}`,
+        (Number(h.Confidence) || 0).toFixed(2),
+        h.ActualPriceCents === null || h.ActualPriceCents === undefined ? '—' : cents(h.ActualPriceCents),
+        h.WithinPredictedRange === null || h.WithinPredictedRange === undefined
+          ? '—' : (h.WithinPredictedRange ? 'in range' : 'missed'),
+      ]),
+      [false, false, false, true, true, true, false]));
+    if (f.Rationale) body.append(el('p', { class: 'muted', text: f.Rationale }));
+    body.append(el('div', { class: 'pane-actions' },
+      forecastAction('Score matured horizons', `/api/v1/fintech/forecasts/${f.ID}/evaluate`),
+      forecastAction('Deep dive', `/api/v1/fintech/forecasts/${f.ID}/enrich`),
+      deleteForecastButton(f)));
+    if (f.Enrichment && f.Enrichment.summary) {
+      body.append(el('p', { class: 'muted', text: f.Enrichment.summary }));
+    }
+  }
+}
+
+function forecastAction(label, path) {
+  const b = el('button', { class: 'ghost-btn', text: label });
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await api(path, { method: 'POST' });
+      await renderPortfolio();
+    } catch (err) {
+      showError(err);
+    } finally {
+      b.disabled = false;
+    }
+  });
+  return b;
+}
+
+function deleteForecastButton(f) {
+  const b = el('button', { class: 'ghost-btn danger', text: 'Delete' });
+  b.addEventListener('click', async () => {
+    if (!confirm(`Delete the ${f.Symbol} forecast from ${(f.RequestedAt || '').slice(0, 10)}?`)) return;
+    try {
+      await api(`/api/v1/fintech/forecasts/${f.ID}`, { method: 'DELETE' });
+      await renderPortfolio();
+    } catch (err) {
+      showError(err);
+    }
+  });
+  return b;
+}
+
+function forecastForm() {
+  const symbol = el('input', { placeholder: 'Symbol', autocomplete: 'off' });
+  const horizons = el('input', { placeholder: 'Horizons, e.g. 3,10,30', autocomplete: 'off', value: '3,10,30' });
+  const extra = el('input', { placeholder: 'Extra context (optional)', autocomplete: 'off' });
+  const form = el('form', { class: 'row-form' }, symbol, horizons, extra,
+    el('button', { type: 'submit', text: 'Forecast' }));
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const days = horizons.value.split(',').map((d) => parseInt(d.trim(), 10)).filter(Boolean);
+    const button = form.querySelector('button');
+    button.disabled = true;
+    // A local model thinking about eight horizons is not instant, and a button
+    // that does nothing visible for a minute reads as broken.
+    toast('Asking the model…');
+    try {
+      await api('/api/v1/fintech/forecasts', {
+        method: 'POST',
+        body: JSON.stringify({ symbol: symbol.value, horizon_days: days, context: extra.value }),
+      });
+      symbol.value = '';
+      await renderPortfolio();
+    } catch (err) {
+      showError(err);
+    } finally {
+      button.disabled = false;
+    }
+  });
+  return form;
+}
+
+async function renderWatchlist(body) {
+  const symbol = el('input', { placeholder: 'Symbol', autocomplete: 'off' });
+  const horizons = el('input', { placeholder: 'Horizons', value: '5,14,30', autocomplete: 'off' });
+  const form = el('form', { class: 'row-form' }, symbol, horizons,
+    el('button', { type: 'submit', text: 'Watch' }));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/v1/fintech/watchlist', {
+        method: 'POST',
+        body: JSON.stringify({
+          symbol: symbol.value,
+          horizon_days: horizons.value.split(',').map((d) => parseInt(d.trim(), 10)).filter(Boolean),
+        }),
+      });
+      symbol.value = '';
+      await renderPortfolio();
+    } catch (err) {
+      showError(err);
+    }
+  });
+  body.append(form);
+
+  const { watchlist } = await api('/api/v1/fintech/watchlist');
+  if (!watchlist || !watchlist.length) {
+    body.append(el('div', { class: 'muted', text:
+      'Nothing watched. A watched symbol is forecast and reviewed on the schedule, ' +
+      'if FINTECH_SCAN_INTERVAL or FINTECH_REVIEW_INTERVAL is set.' }));
+    return;
+  }
+  body.append(table(['Symbol', 'Horizons', 'Last forecast', ''],
+    watchlist.map((e) => [
+      e.Symbol,
+      (e.Horizons || []).join(', '),
+      e.LastForecastAt ? String(e.LastForecastAt).slice(0, 10) : 'never',
+      unwatchButton(e.Symbol),
+    ]),
+    [false, false, false, false]));
+}
+
+function unwatchButton(symbol) {
+  const b = el('button', { class: 'ghost-btn danger', text: 'Remove' });
+  b.addEventListener('click', async () => {
+    try {
+      await api(`/api/v1/fintech/watchlist/${encodeURIComponent(symbol)}`, { method: 'DELETE' });
+      await renderPortfolio();
+    } catch (err) {
+      showError(err);
+    }
+  });
+  return b;
+}
+
+async function renderReviews(body) {
+  const run = el('button', { text: 'Run a review cycle now' });
+  run.addEventListener('click', async () => {
+    run.disabled = true;
+    // One model call per watched or held symbol, in series. On a local backend
+    // that is minutes, not seconds, so the wait is stated rather than implied.
+    toast('Reviewing every watched and held symbol — this takes a while…');
+    try {
+      const { reviewed } = await api('/api/v1/fintech/reviews/run', { method: 'POST' });
+      toast(`Reviewed ${reviewed} symbol(s)`);
+      await renderPortfolio();
+    } catch (err) {
+      showError(err);
+    } finally {
+      run.disabled = false;
+    }
+  });
+  body.append(el('div', { class: 'row-form' }, run));
+
+  const { reviews } = await api('/api/v1/fintech/reviews?limit=50');
+  if (!reviews || !reviews.length) {
+    body.append(el('div', { class: 'muted', text:
+      'No reviews yet. A cycle forecasts every watched and held symbol, then commits to a verdict on each.' }));
+    return;
+  }
+  body.append(table(['Reviewed', 'Symbol', 'Source', 'Verdict', 'Reasoning'],
+    reviews.map((r) => [
+      (r.ReviewedAt || '').slice(0, 10), r.Symbol, r.Source,
+      ratingLabel(r.Rating), r.Rationale,
+    ]),
+    [false, false, false, false, false]));
+}
+
+// ratingLabel spells the five-point scale out. "max_sell" is a database value,
+// not something to put in front of a person.
+function ratingLabel(rating) {
+  return {
+    max_sell: 'Sell hard', sell: 'Sell', hold: 'Hold', buy: 'Buy', max_buy: 'Buy hard',
+  }[rating] || rating;
 }
