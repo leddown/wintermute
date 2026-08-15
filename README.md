@@ -310,6 +310,7 @@ OMDB_API_KEY=...
 | `WINTERMUTE_LLM_MAX_TOKENS` | `16000` | Cap on one response, thinking included |
 | `WINTERMUTE_LLM_TIMEOUT` | `10m` | Bound on a single completion |
 | `WINTERMUTE_MAX_TOOL_ITERATIONS` | `12` | Tool round-trips allowed per turn |
+| `WINTERMUTE_BACKEND_PROBE_INTERVAL` | `1m` | How often backend health is re-checked; `0` probes only on demand |
 | `HUGGINGFACE_TOKEN` | *(none)* | Only needed to search gated Hub repositories |
 | `ANTHROPIC_API_KEY` | *(none)* | Required only by an `anthropic` backend |
 

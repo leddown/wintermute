@@ -31,6 +31,10 @@ type Catalog struct {
 	mu       sync.Mutex
 	hardware *Hardware
 	probedAt time.Time
+	// staleAfter is how old a probe may be before its verdict is no longer
+	// reported as current. Zero means never, which is what manual probing
+	// asks for. Watch sets it.
+	staleAfter time.Duration
 }
 
 // NewCatalog builds a Catalog over the configured backends.
@@ -135,6 +139,11 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 
 		found, err := c.prober.Probe(ctx, b)
 		if err != nil {
+			// A sweep cut short by shutdown says nothing about the backend, so
+			// it must not be written down as one that failed to answer.
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			row.Status = store.BackendUnreachable
 			row.StatusNote = err.Error()
 			c.log.Warn("backend probe failed", "backend", b.Name, "kind", b.Kind, "error", err)
@@ -173,6 +182,41 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Watch re-probes every backend on an interval until ctx is cancelled. A
+// non-positive interval disables it and returns immediately.
+//
+// Health is a snapshot of the last probe, so without this the recorded status
+// of a machine that has since been powered off stays whatever it was when the
+// server started — "ok", indefinitely — and both the admin UI and the
+// models_list tool report a dead backend as available.
+//
+// The sweep is bounded only by ctx: each request already carries its own
+// probeTimeout, and capping the whole pass at the interval would record the
+// backends it never reached as unreachable.
+func (c *Catalog) Watch(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	c.mu.Lock()
+	// Three missed sweeps is the point at which an "ok" is more likely to mean
+	// the prober stopped running than that the backend is still up.
+	c.staleAfter = 3 * interval
+	c.mu.Unlock()
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.Refresh(ctx); err != nil && ctx.Err() == nil {
+				c.log.Warn("backend refresh failed", "error", err)
+			}
+		}
+	}
 }
 
 // Models returns the cached catalog with a fit estimate attached to each entry.
@@ -236,8 +280,33 @@ func (c *Catalog) Models(ctx context.Context, contextTokens int) ([]Model, error
 }
 
 // BackendHealth returns the stored health of every backend.
+//
+// A verdict older than the staleness horizon is reported as unknown rather
+// than repeated: the row records that the backend answered once, not that it
+// would answer now, and a host can be switched off between sweeps. Saying
+// unknown is the honest reading, and it is the difference between the UI
+// admitting it has lost touch and it claiming a dead machine is healthy.
 func (c *Catalog) BackendHealth(ctx context.Context) ([]store.BackendRow, error) {
-	return c.store.Backends(ctx)
+	rows, err := c.store.Backends(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	staleAfter := c.staleAfter
+	c.mu.Unlock()
+	if staleAfter <= 0 {
+		return rows, nil
+	}
+	for i := range rows {
+		if rows[i].Status == store.BackendUnknown {
+			continue
+		}
+		if rows[i].ProbedAt == nil || time.Since(*rows[i].ProbedAt) > staleAfter {
+			rows[i].StatusNote = "last probe is too old to trust; it reported: " + rows[i].Status
+			rows[i].Status = store.BackendUnknown
+		}
+	}
+	return rows, nil
 }
 
 // Recommend answers a planning request against live hardware and the models

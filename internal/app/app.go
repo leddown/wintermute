@@ -301,6 +301,12 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	cancelProbe()
 
+	// Keep probing after that. A recorded status is only evidence about the
+	// moment it was taken, and the machines serving local models get switched
+	// off; without this the UI and the models_list tool would go on reporting
+	// the state of the world at startup.
+	go a.catalog.Watch(ctx, a.cfg.BackendProbeInterval)
+
 	// The portfolio's background passes, when they have been given an
 	// interval. They stop with ctx, so shutdown needs nothing extra.
 	if a.fintech != nil && a.cfg.FintechScanInterval > 0 {

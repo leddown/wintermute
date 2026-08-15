@@ -194,6 +194,14 @@ Every backend is probed at startup and recorded with its health. One being down
 is normal and never blocks the server; `GET /api/v1/backends` shows the state
 and `POST /api/v1/backends/refresh` re-checks.
 
+Probing then repeats every `WINTERMUTE_BACKEND_PROBE_INTERVAL` (default one
+minute), because a stored status is only evidence about the moment it was
+taken — the machine serving a local model can be switched off at any point
+after the last probe. Set the interval to `0` to probe only on demand. A result
+older than three intervals is reported as `unknown` rather than repeated, so a
+prober that has stopped running shows up as lost contact instead of as lasting
+good health.
+
 ### Running the server away from the GPUs
 
 `wintermuted` never loads a model — every backend is reached over HTTP — so it

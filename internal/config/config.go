@@ -110,6 +110,13 @@ type Config struct {
 	// should be asked for rather than assumed.
 	FintechScanInterval   time.Duration
 	FintechReviewInterval time.Duration
+
+	// BackendProbeInterval is how often every backend is re-probed for health.
+	// Probing costs one cheap inventory request per backend, and without it a
+	// backend's recorded status is frozen at the last manual refresh — a host
+	// powered off after startup would keep reporting "ok". Zero disables the
+	// background pass, leaving health to explicit refreshes.
+	BackendProbeInterval time.Duration
 }
 
 // Load reads configuration from the environment, applying defaults. It loads
@@ -137,6 +144,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	fintechReview, err := envDuration("FINTECH_REVIEW_INTERVAL", 0)
+	if err != nil {
+		return nil, err
+	}
+	probeInterval, err := envDuration("WINTERMUTE_BACKEND_PROBE_INTERVAL", time.Minute)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +196,7 @@ func Load() (*Config, error) {
 		FintechForecastBackend: strings.TrimSpace(os.Getenv("FINTECH_FORECAST_BACKEND")),
 		FintechScanInterval:    fintechScan,
 		FintechReviewInterval:  fintechReview,
+		BackendProbeInterval:   probeInterval,
 	}
 
 	if cfg.DefaultBackend == "" {

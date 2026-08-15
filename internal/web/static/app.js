@@ -1753,13 +1753,25 @@ async function renderAdminConfig(body) {
     'Secrets are never sent to this page — only whether they are set.' }));
 }
 
+// How long ago a backend was last probed. A status is only evidence about the
+// moment it was taken, so the age is shown next to it: "ok" from four seconds
+// ago and "ok" from yesterday are different claims.
+function probedAge(iso) {
+  if (!iso) return 'never';
+  const secs = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
+  return new Date(iso).toLocaleString();
+}
+
 async function renderAdminBackends(body) {
   const d = await api('/api/v1/backends');
   const rows = (d.backends || []).map((b) => [
-    b.name, b.kind, b.model || '—', b.status,
+    b.name, b.kind, b.model || '—', b.status, probedAge(b.probed_at),
     b.status_note || '', b.name === d.default ? 'default' : (b.name === d.fallback ? 'fallback' : ''),
   ]);
-  body.append(table(['Name', 'Kind', 'Model', 'Status', 'Note', 'Role'], rows));
+  body.append(table(['Name', 'Kind', 'Model', 'Status', 'Probed', 'Note', 'Role'], rows));
 
   const refresh = el('button', { class: 'ghost-btn', text: 'Re-probe backends' });
   refresh.addEventListener('click', async () => {
