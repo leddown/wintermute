@@ -63,9 +63,33 @@
 }
 :root[data-theme="matrix"] .ghost-btn,
 :root[data-theme="matrix"] .icon-btn,
+:root[data-theme="matrix"] .link-btn,
 :root[data-theme="chaos"] .ghost-btn,
-:root[data-theme="chaos"] .icon-btn {
+:root[data-theme="chaos"] .icon-btn,
+:root[data-theme="chaos"] .link-btn {
   color: var(--text);
+}
+
+/* The topbar view switcher is transparent-backed, so the black above landed it
+   on black: the menu was all but invisible, and the dim --muted it asks for in
+   the base rule is barely better on this palette. Full phosphor green instead,
+   with the glow carrying the emphasis that a surface tint carries in the other
+   themes. */
+:root[data-theme="matrix"] .view-btn,
+:root[data-theme="chaos"] .view-btn {
+  color: var(--accent);
+  text-shadow: 0 0 6px rgba(0, 255, 65, 0.5);
+}
+:root[data-theme="matrix"] .view-btn:hover,
+:root[data-theme="chaos"] .view-btn:hover,
+:root[data-theme="matrix"] .view-btn.active,
+:root[data-theme="chaos"] .view-btn.active {
+  color: #c8ffd6;
+  text-shadow: 0 0 10px rgba(0, 255, 65, 0.9);
+}
+:root[data-theme="matrix"] .view-btn.active,
+:root[data-theme="chaos"] .view-btn.active {
+  border-color: var(--accent);
 }
 
 /* The falling-glyph backdrop, painted by /matrix-rain.js. Fixed rather than
