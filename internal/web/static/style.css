@@ -94,6 +94,28 @@
   border-color: var(--accent);
 }
 
+/* The phrase chips take the pale end of the phosphor rather than --muted,
+   which on this palette is a dim green that reads as disabled — wrong for a
+   control whose whole job is to be picked up and used. The glow is what the
+   surface tint does on the other themes. */
+:root[data-theme="matrix"] .chip,
+:root[data-theme="chaos"] .chip {
+  color: #c8ffd6;
+  text-shadow: 0 0 6px rgba(0, 255, 65, 0.35);
+}
+:root[data-theme="matrix"] .chip:hover,
+:root[data-theme="chaos"] .chip:hover {
+  color: #eaffef;
+  border-color: var(--accent);
+  text-shadow: 0 0 10px rgba(0, 255, 65, 0.7);
+}
+/* The line above the chips stays the dimmer green: it is a caption, and it
+   should not compete with the things it is captioning. */
+:root[data-theme="matrix"] .word-cloud-note,
+:root[data-theme="chaos"] .word-cloud-note {
+  color: #7dffa4;
+}
+
 /* ---------- 40K ----------
 
    A gothic-industrial cogitator terminal: bone text and brass rule on a warm
@@ -471,10 +493,24 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* Ready-made phrasings for a small backend, above the composer. Wraps rather
    than scrolls: it is a set of options to scan, and a hidden option is not
-   one. */
+   one.
+
+   It rises out of the composer rather than appearing: the strip belongs to
+   the input it fills in, and coming up from there says so. Same shape as the
+   chat dock's slide — hidden is removed first, then .open on the next frame,
+   because a transition applied to an element already at its final position
+   does nothing. */
 .word-cloud {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   padding: 8px 20px 0;
+  opacity: 0;
+  transform: translateY(14px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.word-cloud.open { opacity: 1; transform: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  .word-cloud { transition: none; }
 }
 .word-cloud-note { width: 100%; font-size: 11.5px; }
 .chip {

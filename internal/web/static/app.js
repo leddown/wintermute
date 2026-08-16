@@ -594,20 +594,46 @@ const smallBackendBytes = 8 * 1000 * 1000 * 1000;
 // Placeholders are wrapped in guillemets so inserting a phrase can select the
 // first one for typing over. They are not sent to the model as-is: the user
 // either replaces them or edits the line.
+// Every phrase here names something the task tools can actually do. That is
+// the constraint worth keeping: the assistant's reach is the tasks group and
+// nothing else (see WINTERMUTE_ASSISTANT_TOOLS), so a suggestion about
+// invoices or holdings would be an invitation to a failure.
 function wordCloudPhrases() {
   const soon = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  const month = new Date().toISOString().slice(0, 7);
   return [
+    // Capture
     ['Add task', `Add task «Fix car» to list «Home» due ${soon}`],
     ['New list', 'Create list «Home» with tasks «Fix car», «Book MOT»'],
+    ['List + tasks', 'Create list «Trip» with tasks «passport», «insurance», «currency»'],
+    ['Note', 'Write a note: «ring the garage back»'],
+    // Read
     ['Agenda', 'Show my agenda'],
     ['Open tasks', 'List tasks with status todo'],
     ['Tasks on a list', 'List tasks on list «Home»'],
+    ['All lists', 'Show all my to-do lists'],
+    ['Search', 'Find tasks matching «car»'],
+    ['Finished', 'List tasks with status done'],
+    ['My notes', 'List my notes'],
+    // Change a task
     ['Complete', 'Mark task #«12» done'],
+    ['In progress', 'Set task #«12» status to doing'],
     ['Reschedule', `Change the due date of task #«12» to ${soon}`],
+    ['Clear due date', 'Clear the due date on task #«12»'],
     ['Priority', 'Set task #«12» priority to high'],
     ['Rename', 'Change the title of task #«12» to «Fix car brakes»'],
+    ['Add notes', 'Add notes to task #«12»: «ring the garage first»'],
     ['Delete', 'Delete task #«12»'],
-    ['Note', 'Write a note: «ring the garage back»'],
+    // Change a list
+    ['Rename list', 'Rename list #«2» to «Garage»'],
+    ['Archive list', 'Archive list #«2»'],
+    // Notes
+    ['Note done', 'Mark note #«5» done'],
+    ['Delete note', 'Delete note #«5»'],
+    // Calendar
+    ['Schedule', `Schedule «MOT test» on ${soon}`],
+    ['This month', `Show my calendar for ${month}`],
+    ['Delete event', 'Delete calendar event #«3»'],
   ];
 }
 
@@ -626,6 +652,7 @@ function renderWordCloud() {
   // backend nobody annotated must not be treated as the worst case.
   const bytes = backend ? Number(backend.memory_bytes) || 0 : 0;
   if (bytes <= 0 || bytes >= smallBackendBytes) {
+    box.classList.remove('open');
     box.hidden = true;
     box.replaceChildren();
     return;
@@ -643,6 +670,10 @@ function renderWordCloud() {
       `${backend.name} is ${backend.memory || 'small'} — these phrasings match what the tools expect:` }),
     ...chips);
   box.hidden = false;
+  // Unhide first, then animate on the next frame. Setting both at once leaves
+  // the strip already at its resting position when the transition is applied,
+  // and nothing moves — the same reason openDock() waits a frame.
+  requestAnimationFrame(() => box.classList.add('open'));
 }
 
 // insertPhrase puts a phrase in the composer and selects its first
