@@ -55,20 +55,88 @@ type App struct {
 // llama.cpp, Ollama, vLLM, LM Studio and hailo-ollama all speak that API, and
 // the differences between them show up in the catalog's probing rather than in
 // how a completion is requested.
-func buildRouter(cfg *config.Config, log *slog.Logger) (*llm.Router, error) {
-	backends := make([]*llm.Backend, 0, len(cfg.Backends))
-	for _, b := range cfg.Backends {
+func buildRouter(cfg *config.Config, backends []models.Backend, log *slog.Logger) (*llm.Router, error) {
+	return llm.NewRouter(buildProviders(cfg, backends, log), cfg.DefaultBackend, cfg.FallbackBackend, log)
+}
+
+func buildProviders(cfg *config.Config, backends []models.Backend, log *slog.Logger) []*llm.Backend {
+	out := make([]*llm.Backend, 0, len(backends))
+	for _, b := range backends {
 		entry := &llm.Backend{Name: b.Name, Model: b.Model, Cloud: b.Cloud}
 		if b.Kind == models.KindAnthropic {
 			entry.Provider = llm.NewAnthropic(b.APIKey, b.Model, b.BaseURL, cfg.LLMMaxTokens, cfg.LLMTimeout)
 		} else {
 			entry.Provider = llm.NewOpenAI(b.BaseURL, b.APIKey, b.Model, cfg.LLMMaxTokens, cfg.LLMTimeout)
 		}
-		backends = append(backends, entry)
+		out = append(out, entry)
 		log.Info("backend configured",
 			"name", b.Name, "kind", b.Kind, "url", b.BaseURL, "model", b.Model, "cloud", b.Cloud)
 	}
-	return llm.NewRouter(backends, cfg.DefaultBackend, cfg.FallbackBackend, log)
+	return out
+}
+
+// backendSet resolves the backends this server should serve: the ones declared
+// in backends.json (or, with no file, the environment), then the ones declared
+// through the UI.
+//
+// A name present in both belongs to the file. The file is the declaration an
+// operator can read, diff and keep in version control, and a database row that
+// silently shadowed it would make the running config stop matching the one on
+// disk with nothing to show for it.
+func backendSet(ctx context.Context, cfg *config.Config, st *store.Store) ([]models.Backend, error) {
+	out := make([]models.Backend, 0, len(cfg.Backends))
+	out = append(out, cfg.Backends...)
+
+	fromFile := make(map[string]bool, len(out))
+	for _, b := range out {
+		fromFile[b.Name] = true
+	}
+
+	rows, err := st.BackendConfigs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if fromFile[r.Name] {
+			continue
+		}
+		kind := models.Kind(r.Kind)
+		b := models.Backend{
+			Name:    r.Name,
+			Kind:    kind,
+			BaseURL: r.BaseURL,
+			Model:   r.Model,
+			Cloud:   !kind.Local(),
+		}
+		// The key is read from the environment at every reload, never stored.
+		if r.APIKeyEnv != "" {
+			b.APIKey = os.Getenv(r.APIKeyEnv)
+		}
+		if kind == models.KindAnthropic && b.Model == "" {
+			b.Model = llm.DefaultModel
+		}
+		out = append(out, b)
+	}
+	return out, nil
+}
+
+// reloadBackends rebuilds the live backend set and swaps it into the router and
+// the catalog, so a backend added in the UI serves turns and gets probed
+// without a restart.
+//
+// The router is replaced first and the catalog only if that succeeded: a set
+// the router rejects is not one the Backends page should start listing.
+func reloadBackends(ctx context.Context, cfg *config.Config, st *store.Store,
+	router *llm.Router, catalog *models.Catalog, log *slog.Logger) error {
+	set, err := backendSet(ctx, cfg, st)
+	if err != nil {
+		return err
+	}
+	if err := router.Replace(buildProviders(cfg, set, log), cfg.DefaultBackend, cfg.FallbackBackend); err != nil {
+		return err
+	}
+	catalog.SetBackends(set)
+	return nil
 }
 
 // buildPool resolves the declared batch pool against the live backends. It
@@ -106,7 +174,16 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, err
 	}
 
-	router, err := buildRouter(cfg, log)
+	// Backends declared in the UI are resolved here, at startup, alongside the
+	// ones from backends.json — so they survive a restart rather than existing
+	// only until the process that created them exits.
+	backends, err := backendSet(context.Background(), cfg, st)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+
+	router, err := buildRouter(cfg, backends, log)
 	if err != nil {
 		st.Close()
 		return nil, err
@@ -118,7 +195,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, err
 	}
 
-	catalog := models.NewCatalog(cfg.Backends, st, models.NewHub("", cfg.HuggingFaceToken), log)
+	catalog := models.NewCatalog(backends, st, models.NewHub("", cfg.HuggingFaceToken), log)
 
 	tools := tool.NewRegistry()
 	providers := metadataProviders(cfg, log)
@@ -217,7 +294,10 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	srv := api.New(ag, st, tools, catalog, workspace, info, log).
 		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil).
 		WithTwire(twireService).
-		WithUtilities(utilitiesService)
+		WithUtilities(utilitiesService).
+		WithBackendAdmin(func(ctx context.Context) error {
+			return reloadBackends(ctx, cfg, st, router, catalog, log)
+		})
 
 	return &App{
 		cfg:     cfg,

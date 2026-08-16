@@ -2210,11 +2210,20 @@ function probedAge(iso) {
 
 async function renderAdminBackends(body) {
   const d = await api('/api/v1/backends');
+  // Which backends this page may edit: the ones stored in the database. The
+  // rest come from backends.json, and the server refuses to rewrite those, so
+  // offering the control would only produce a 409.
+  const declared = new Set(d.declared || []);
   const rows = (d.backends || []).map((b) => [
     b.name, b.kind, b.model || '—', b.status, probedAge(b.probed_at),
     b.status_note || '', b.name === d.default ? 'default' : (b.name === d.fallback ? 'fallback' : ''),
+    declared.has(b.name) ? 'UI' : 'backends.json',
+    d.editable && declared.has(b.name) ? removeBackendButton(b.name) : '',
   ]);
-  body.append(table(['Name', 'Kind', 'Model', 'Status', 'Probed', 'Note', 'Role'], rows));
+  body.append(table(
+    ['Name', 'Kind', 'Model', 'Status', 'Probed', 'Note', 'Role', 'Source', ''], rows));
+
+  if (d.editable) body.append(addBackendForm(d));
 
   const refresh = el('button', { class: 'ghost-btn', text: 'Re-probe backends' });
   refresh.addEventListener('click', async () => {
@@ -2234,6 +2243,85 @@ async function renderAdminBackends(body) {
     'A backend that is down is recorded as unreachable and retried; it never stops the server starting.' }));
 
   body.append(backendTestBench(d));
+}
+
+function removeBackendButton(name) {
+  const btn = el('button', { class: 'ghost-btn danger', text: 'Remove' });
+  btn.addEventListener('click', () => {
+    // Sessions pinned to this backend are not rewritten: they keep the name,
+    // and fall back to the server default once it stops resolving. Saying so
+    // matters because the alternative reading — that the conversations go too
+    // — is the one that would stop someone clicking.
+    confirmDelete(`the "${name}" backend (conversations that used it are kept)`, async () => {
+      await api(`/api/v1/backends/${encodeURIComponent(name)}`, { method: 'DELETE' });
+      await renderAdmin();
+    });
+  });
+  return btn;
+}
+
+// Declare a backend without editing backends.json and restarting.
+//
+// The API key is named, not entered: the field takes the *environment
+// variable* holding the key, which is how backends.json does it and why a
+// credential never travels through this form. For Anthropic that is normally
+// ANTHROPIC_API_KEY, already set on the server, which is the whole reason this
+// form can add Claude at all.
+function addBackendForm(d) {
+  const kinds = ['anthropic', 'ollama', 'llamacpp', 'vllm', 'openai', 'hailo'];
+  const name = el('input', { type: 'text', placeholder: 'name, e.g. claude' });
+  const kind = el('select', {}, kinds.map((k) => el('option', { value: k, text: k })));
+  const baseURL = el('input', { type: 'text', placeholder: 'http://127.0.0.1:11434/v1' });
+  const model = el('input', { type: 'text', placeholder: 'model (blank = backend default)' });
+  const keyEnv = el('input', { type: 'text', placeholder: 'API key env var' });
+
+  // Anthropic needs no URL and does need a key variable; every local kind is
+  // the other way round. Following the kind keeps the form from asking for
+  // something the server would reject.
+  const follow = () => {
+    const anthropic = kind.value === 'anthropic';
+    baseURL.disabled = anthropic;
+    baseURL.placeholder = anthropic ? 'not needed for anthropic' : 'http://127.0.0.1:11434/v1';
+    if (anthropic && !keyEnv.value) keyEnv.value = 'ANTHROPIC_API_KEY';
+  };
+  kind.addEventListener('change', follow);
+  follow();
+
+  const form = el('form', { class: 'row-form' },
+    name, kind, baseURL, model, keyEnv,
+    el('button', { type: 'submit', text: 'Add backend' }));
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      await api('/api/v1/backends', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: name.value.trim(),
+          kind: kind.value,
+          base_url: kind.value === 'anthropic' ? '' : baseURL.value.trim(),
+          model: model.value.trim(),
+          api_key_env: keyEnv.value.trim(),
+        }),
+      });
+      toast(`Backend "${name.value.trim()}" added`);
+      await renderAdmin();
+    } catch (err) {
+      showError(err);
+    }
+  });
+
+  return el('div', {},
+    el('div', { class: 'group-head', text: 'Add a backend' }),
+    el('p', { class: 'muted', text:
+      'Takes effect immediately — no restart. The key itself is never entered '
+      + 'or stored here: give the name of the environment variable the server '
+      + 'reads it from. Adding one with the same name as a backends.json entry '
+      + 'is refused, because the file wins.' }),
+    form,
+    el('p', { class: 'muted', text:
+      `Default backend is "${d.default}". A backend added here is selectable per `
+      + 'conversation from the picker under the chat box; it does not become the '
+      + 'default, which still comes from backends.json.' }));
 }
 
 // Send one question to one backend and see what comes back.

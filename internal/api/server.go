@@ -4,6 +4,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,8 +45,13 @@ type Server struct {
 	// utilities is the housekeeping surface: backups, diagnostics, vacuum and
 	// pruning. Nil likewise leaves its routes off.
 	utilities *utilities.Service
-	info      ServerInfo
-	log       *slog.Logger
+	// reloadBackends re-resolves the backend set and swaps it into the router
+	// and catalog. Nil leaves the backend-management routes unregistered, so a
+	// server assembled without it is read-only about its backends rather than
+	// accepting writes it could not apply.
+	reloadBackends func(context.Context) error
+	info           ServerInfo
+	log            *slog.Logger
 }
 
 // New builds a Server. A zero Workspace disables those routes rather than
@@ -79,6 +85,14 @@ func (s *Server) WithTwire(svc *twire.Service) *Server {
 // WithUtilities attaches the housekeeping operations.
 func (s *Server) WithUtilities(svc *utilities.Service) *Server {
 	s.utilities = svc
+	return s
+}
+
+// WithBackendAdmin enables declaring backends through the API. reload rebuilds
+// the live backend set from the config file plus the stored declarations and
+// applies it, so a change takes effect without a restart.
+func (s *Server) WithBackendAdmin(reload func(context.Context) error) *Server {
+	s.reloadBackends = reload
 	return s
 }
 
@@ -133,6 +147,7 @@ func (s *Server) Handler() http.Handler {
 
 	// The canary tripwire — see twire.go.
 	s.registerTwireRoutes(authed)
+	s.registerBackendAdminRoutes(authed)
 
 	// Backups, diagnostics and maintenance — see utilities.go.
 	s.registerUtilitiesRoutes(authed)

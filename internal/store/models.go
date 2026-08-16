@@ -141,3 +141,80 @@ func (s *Store) Catalog(ctx context.Context) ([]CatalogRow, error) {
 	}
 	return out, rows.Err()
 }
+
+/* ---------- backends declared through the UI ---------- */
+
+// BackendConfig is a backend declared in the UI rather than in backends.json.
+//
+// APIKeyEnv names an environment variable; the key itself is never stored.
+// See 0011_backend_config.sql for why that is not a limitation to be worked
+// around later.
+type BackendConfig struct {
+	Name      string    `json:"name"`
+	Kind      string    `json:"kind"`
+	BaseURL   string    `json:"base_url,omitempty"`
+	Model     string    `json:"model,omitempty"`
+	APIKeyEnv string    `json:"api_key_env,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// BackendConfigs lists the declared backends, by name.
+func (s *Store) BackendConfigs(ctx context.Context) ([]BackendConfig, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT name, kind, base_url, model, api_key_env, created_at, updated_at
+		 FROM backend_config ORDER BY name`)
+	if err != nil {
+		return nil, fmt.Errorf("list backend config: %w", err)
+	}
+	defer rows.Close()
+
+	var out []BackendConfig
+	for rows.Next() {
+		var b BackendConfig
+		if err := rows.Scan(&b.Name, &b.Kind, &b.BaseURL, &b.Model, &b.APIKeyEnv,
+			&b.CreatedAt, &b.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan backend config: %w", err)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// SaveBackendConfig declares a backend, or updates one already declared under
+// the same name.
+func (s *Store) SaveBackendConfig(ctx context.Context, b BackendConfig) error {
+	now := time.Now().UTC()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO backend_config (name, kind, base_url, model, api_key_env, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(name) DO UPDATE SET
+		   kind = excluded.kind,
+		   base_url = excluded.base_url,
+		   model = excluded.model,
+		   api_key_env = excluded.api_key_env,
+		   updated_at = excluded.updated_at`,
+		b.Name, b.Kind, b.BaseURL, b.Model, b.APIKeyEnv, now, now)
+	if err != nil {
+		return fmt.Errorf("save backend config: %w", err)
+	}
+	return nil
+}
+
+// DeleteBackendConfig undeclares a backend, reporting ErrNotFound when there
+// was nothing to remove. The probe cache row in `backends` is left alone: it
+// is rewritten by the next sweep, which will simply stop including this name.
+func (s *Store) DeleteBackendConfig(ctx context.Context, name string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM backend_config WHERE name = ?`, name)
+	if err != nil {
+		return fmt.Errorf("delete backend config: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete backend config: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

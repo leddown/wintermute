@@ -1,10 +1,18 @@
 package api
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
+	"os"
+	"regexp"
 	"strconv"
+	"strings"
 
 	"wintermute/internal/models"
+	"wintermute/internal/store"
 )
 
 // defaultPlanContext is the context length assumed when a caller does not say.
@@ -15,16 +23,179 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.catalog.Hardware(r.Context()))
 }
 
+// registerBackendAdminRoutes exposes declaring backends at runtime. Without a
+// reload hook the routes are left off entirely, the same way an absent twire
+// leaves its own unregistered.
+func (s *Server) registerBackendAdminRoutes(authed func(string, http.HandlerFunc)) {
+	if s.reloadBackends == nil {
+		return
+	}
+	authed("POST /api/v1/backends", s.handleSaveBackend)
+	authed("DELETE /api/v1/backends/{name}", s.handleDeleteBackend)
+}
+
+// backendInput is a backend declared through the UI.
+//
+// There is no api_key field, only api_key_env. A key reaches this process
+// through its environment; accepting one here would put a credential in a
+// browser POST, the request log and the database, which is exactly what
+// backends.json refuses to do.
+type backendInput struct {
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	BaseURL   string `json:"base_url"`
+	Model     string `json:"model"`
+	APIKeyEnv string `json:"api_key_env"`
+}
+
+// backendNamePattern keeps a name usable as a path segment and recognisable in
+// a session row, and stops one that only differs by whitespace or case-tricks.
+var backendNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,31}$`)
+
+func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
+	var req backendInput
+	if !decode(w, r, &req) {
+		return
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	req.BaseURL = strings.TrimSpace(req.BaseURL)
+	req.Model = strings.TrimSpace(req.Model)
+	req.APIKeyEnv = strings.TrimSpace(req.APIKeyEnv)
+
+	if !backendNamePattern.MatchString(req.Name) {
+		writeError(w, http.StatusBadRequest,
+			"name must be 1-32 characters of letters, digits, dash or underscore, starting with a letter or digit")
+		return
+	}
+	kind := models.Kind(req.Kind)
+	if !kind.Valid() {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown kind %q", req.Kind))
+		return
+	}
+
+	// The same rules config.resolve applies to the file, so a backend declared
+	// here cannot be one the file would have rejected at startup.
+	if kind == models.KindAnthropic {
+		if req.APIKeyEnv == "" {
+			req.APIKeyEnv = "ANTHROPIC_API_KEY"
+		}
+		// Checked now rather than at first use: a backend whose key is missing
+		// answers nothing, and finding that out here names the fix, where
+		// finding it out mid-conversation just looks like the model is broken.
+		if os.Getenv(req.APIKeyEnv) == "" {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf(
+				"%s is not set on the server, so this backend could not authenticate. "+
+					"Add it to the environment and restart before declaring the backend.", req.APIKeyEnv))
+			return
+		}
+	} else if req.BaseURL == "" {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("base_url is required for kind %q", kind))
+		return
+	}
+	if req.BaseURL != "" {
+		u, err := url.Parse(req.BaseURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			writeError(w, http.StatusBadRequest, "base_url must be an absolute http:// or https:// URL")
+			return
+		}
+	}
+
+	// A name from backends.json is not ours to redefine: the file wins at
+	// resolve time, so accepting the write would store a row that never takes
+	// effect and report success for a change nobody made.
+	if s.fileBackend(r.Context(), req.Name) {
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"%q is declared in backends.json; edit that file instead", req.Name))
+		return
+	}
+
+	if err := s.store.SaveBackendConfig(r.Context(), store.BackendConfig{
+		Name: req.Name, Kind: string(kind), BaseURL: req.BaseURL,
+		Model: req.Model, APIKeyEnv: req.APIKeyEnv,
+	}); err != nil {
+		s.fail(w, "save backend", err)
+		return
+	}
+	if err := s.reloadBackends(r.Context()); err != nil {
+		s.fail(w, "reload backends", err)
+		return
+	}
+	// Probe it straight away, so the row the UI draws next carries a real
+	// verdict rather than "unknown" until the next sweep.
+	if err := s.catalog.Refresh(r.Context()); err != nil {
+		s.log.Warn("probe after declaring backend failed", "backend", req.Name, "error", err)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"name": req.Name})
+}
+
+func (s *Server) handleDeleteBackend(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	if s.fileBackend(r.Context(), name) {
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"%q is declared in backends.json; remove it from that file instead", name))
+		return
+	}
+	err := s.store.DeleteBackendConfig(r.Context(), name)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "backend not found")
+		return
+	}
+	if err != nil {
+		s.fail(w, "delete backend", err)
+		return
+	}
+	if err := s.reloadBackends(r.Context()); err != nil {
+		s.fail(w, "reload backends", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// fileBackend reports whether a name came from backends.json rather than the
+// database. It is the difference between the two lists, which is cheaper and
+// less brittle than threading the parsed config down here.
+func (s *Server) fileBackend(ctx context.Context, name string) bool {
+	if name == "" {
+		return false
+	}
+	declared, err := s.store.BackendConfigs(ctx)
+	if err != nil {
+		return false
+	}
+	for _, d := range declared {
+		if d.Name == name {
+			return false
+		}
+	}
+	_, live := s.agent.Router().Backend(name)
+	return live
+}
+
 func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 	health, err := s.catalog.BackendHealth(r.Context())
 	if err != nil {
 		s.fail(w, "list backends", err)
 		return
 	}
+	// declared names the backends that came from the database, so the UI can
+	// offer edit and delete on those and leave the file-declared ones alone
+	// rather than presenting controls that would 409.
+	declared, err := s.store.BackendConfigs(r.Context())
+	if err != nil {
+		s.fail(w, "list declared backends", err)
+		return
+	}
+	names := make([]string, 0, len(declared))
+	for _, d := range declared {
+		names = append(names, d.Name)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"backends": health,
 		"default":  s.agent.Router().Default(),
 		"fallback": s.agent.Router().Fallback(),
+		"declared": names,
+		"editable": s.reloadBackends != nil,
 	})
 }
 

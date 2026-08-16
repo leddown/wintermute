@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // ErrNoBackend is returned when a named backend is not configured.
@@ -42,7 +43,15 @@ func (b *Backend) Complete(ctx context.Context, req Request) (*Response, error) 
 // reached automatically only when the local backend has actually failed. A
 // fallback is never silent: Result reports which backend answered and why, so
 // the UI can show that a turn left the network.
+//
+// The backend set is not fixed for the process's lifetime: backends can also
+// be declared in the UI, and Replace swaps the whole set in when one is added
+// or removed. The mutex guards that swap against turns already in flight —
+// every read below takes it, and Backend hands out a *Backend that a caller
+// then uses without the lock, which is safe because a replaced entry is
+// discarded rather than mutated.
 type Router struct {
+	mu       sync.RWMutex
 	backends map[string]*Backend
 	order    []string
 	def      string
@@ -54,57 +63,82 @@ type Router struct {
 // optional backend to retry against when the selected one fails, and may be
 // empty. Both must exist among backends.
 func NewRouter(backends []*Backend, def, fallback string, log *slog.Logger) (*Router, error) {
-	if len(backends) == 0 {
-		return nil, errors.New("router: no backends configured")
+	r := &Router{log: log}
+	if err := r.Replace(backends, def, fallback); err != nil {
+		return nil, err
 	}
-
-	r := &Router{
-		backends: make(map[string]*Backend, len(backends)),
-		log:      log,
-	}
-	for _, b := range backends {
-		if b.Name == "" {
-			return nil, errors.New("router: backend has no name")
-		}
-		if _, dup := r.backends[b.Name]; dup {
-			return nil, fmt.Errorf("router: duplicate backend %q", b.Name)
-		}
-		r.backends[b.Name] = b
-		r.order = append(r.order, b.Name)
-	}
-	sort.Strings(r.order)
-
-	if def == "" {
-		def = r.order[0]
-	}
-	if _, ok := r.backends[def]; !ok {
-		return nil, fmt.Errorf("router: default backend %q: %w", def, ErrNoBackend)
-	}
-	if fallback != "" {
-		if _, ok := r.backends[fallback]; !ok {
-			return nil, fmt.Errorf("router: fallback backend %q: %w", fallback, ErrNoBackend)
-		}
-	}
-	r.def = def
-	r.fallback = fallback
 	return r, nil
 }
 
+// Replace swaps in a new backend set, default and fallback.
+//
+// It validates the whole set before touching anything, so a rejected change
+// leaves the router serving exactly what it served before: adding a backend
+// with a bad name must not be able to take the working ones down with it.
+func (r *Router) Replace(backends []*Backend, def, fallback string) error {
+	if len(backends) == 0 {
+		return errors.New("router: no backends configured")
+	}
+
+	next := make(map[string]*Backend, len(backends))
+	order := make([]string, 0, len(backends))
+	for _, b := range backends {
+		if b.Name == "" {
+			return errors.New("router: backend has no name")
+		}
+		if _, dup := next[b.Name]; dup {
+			return fmt.Errorf("router: duplicate backend %q", b.Name)
+		}
+		next[b.Name] = b
+		order = append(order, b.Name)
+	}
+	sort.Strings(order)
+
+	if def == "" {
+		def = order[0]
+	}
+	if _, ok := next[def]; !ok {
+		return fmt.Errorf("router: default backend %q: %w", def, ErrNoBackend)
+	}
+	if fallback != "" {
+		if _, ok := next[fallback]; !ok {
+			return fmt.Errorf("router: fallback backend %q: %w", fallback, ErrNoBackend)
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.backends, r.order, r.def, r.fallback = next, order, def, fallback
+	return nil
+}
+
 // Default reports the backend used when a session names none.
-func (r *Router) Default() string { return r.def }
+func (r *Router) Default() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.def
+}
 
 // Fallback reports the backend used when the selected one fails, if any.
-func (r *Router) Fallback() string { return r.fallback }
+func (r *Router) Fallback() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.fallback
+}
 
 // Names lists configured backends in a stable order.
 func (r *Router) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	out := make([]string, len(r.order))
 	copy(out, r.order)
 	return out
 }
 
-// Backend looks up one backend by name.
+// Backend looks up one backend by name. An empty name means the default.
 func (r *Router) Backend(name string) (*Backend, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if name == "" {
 		name = r.def
 	}
@@ -143,11 +177,18 @@ func (r *Router) Complete(ctx context.Context, backend string, req Request) (*Re
 	if ctx.Err() != nil {
 		return nil, err
 	}
-	if r.fallback == "" || r.fallback == b.Name {
+	// Resolved through the guarded accessors rather than the fields, so a
+	// Replace running concurrently with this turn cannot be read half-applied.
+	fallback := r.Fallback()
+	if fallback == "" || fallback == b.Name {
 		return nil, err
 	}
-
-	fb := r.backends[r.fallback]
+	fb, ok := r.Backend(fallback)
+	if !ok {
+		// Undeclared between the two lookups. Report the real failure rather
+		// than inventing one about the fallback.
+		return nil, err
+	}
 	r.log.Warn("backend failed, falling back",
 		"from", b.Name, "to", fb.Name, "cloud", fb.Cloud, "error", err)
 

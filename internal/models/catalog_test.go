@@ -28,6 +28,7 @@ func testCatalog(t *testing.T) *Catalog {
 func TestBackendHealthStaleOKReadsUnknown(t *testing.T) {
 	c := testCatalog(t)
 	ctx := context.Background()
+	c.SetBackends([]Backend{{Name: "workshop", Kind: KindOllama, BaseURL: "http://workshop:11434"}})
 
 	old := time.Now().UTC().Add(-time.Hour)
 	if err := c.store.UpsertBackend(ctx, store.BackendRow{
@@ -71,6 +72,7 @@ func TestBackendHealthStaleOKReadsUnknown(t *testing.T) {
 func TestBackendHealthFreshProbeSurvives(t *testing.T) {
 	c := testCatalog(t)
 	ctx := context.Background()
+	c.SetBackends([]Backend{{Name: "workshop", Kind: KindOllama}})
 
 	now := time.Now().UTC()
 	if err := c.store.UpsertBackend(ctx, store.BackendRow{
@@ -91,6 +93,40 @@ func TestBackendHealthFreshProbeSurvives(t *testing.T) {
 	}
 	if rows[0].Status != store.BackendUnreachable {
 		t.Fatalf("fresh probe: want %q, got %q", store.BackendUnreachable, rows[0].Status)
+	}
+}
+
+// The health table is a probe cache that nothing prunes, so a backend that has
+// been undeclared leaves its last verdict behind. Reporting that row would show
+// a removed backend as healthy indefinitely, which is the exact failure the
+// staleness horizon exists to prevent — so it must be dropped, not aged.
+func TestBackendHealthDropsUnconfiguredBackends(t *testing.T) {
+	c := testCatalog(t)
+	ctx := context.Background()
+	c.SetBackends([]Backend{{Name: "kept", Kind: KindOllama}, {Name: "removed", Kind: KindOllama}})
+
+	now := time.Now().UTC()
+	for _, name := range []string{"kept", "removed"} {
+		if err := c.store.UpsertBackend(ctx, store.BackendRow{
+			Name: name, Kind: "ollama", Status: store.BackendOK, ProbedAt: &now,
+		}); err != nil {
+			t.Fatalf("upsert %s: %v", name, err)
+		}
+	}
+
+	// Undeclare one, exactly as deleting it in the UI does.
+	c.SetBackends([]Backend{{Name: "kept", Kind: KindOllama}})
+
+	rows, err := c.BackendHealth(ctx)
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Name != "kept" {
+		names := make([]string, len(rows))
+		for i, r := range rows {
+			names[i] = r.Name
+		}
+		t.Fatalf("health reports %v, want only [kept]", names)
 	}
 }
 

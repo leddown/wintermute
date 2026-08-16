@@ -49,7 +49,26 @@ func NewCatalog(backends []Backend, st *store.Store, hub *Hub, log *slog.Logger)
 }
 
 // Backends returns the configured backends.
-func (c *Catalog) Backends() []Backend { return c.backends }
+func (c *Catalog) Backends() []Backend {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.backends
+}
+
+// SetBackends replaces the set this catalog probes and reports on, so a
+// backend declared in the UI is probed and listed like any other. The stored
+// health rows of a backend that has gone away are left behind deliberately:
+// they are the record of a probe that did happen, and BackendHealth already
+// ages a stale verdict out to "unknown".
+func (c *Catalog) SetBackends(backends []Backend) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.backends = backends
+	// The host profile records whether inference runs locally, which is a
+	// property of the backend set that just changed. Drop it so the next read
+	// re-derives it instead of answering from a cache about the old set.
+	c.hardware = nil
+}
 
 // Hub exposes the Hugging Face client for discovery endpoints.
 func (c *Catalog) Hub() *Hub { return c.hub }
@@ -126,7 +145,8 @@ func isLoopbackURL(raw string) bool {
 // the others are still updated. A local inference server that is not running
 // is an ordinary state to be displayed, not an error.
 func (c *Catalog) Refresh(ctx context.Context) error {
-	for _, b := range c.backends {
+	// Snapshot: a sweep is long, and SetBackends may swap the set underneath it.
+	for _, b := range c.Backends() {
 		row := store.BackendRow{
 			Name:    b.Name,
 			Kind:    string(b.Kind),
@@ -234,7 +254,7 @@ func (c *Catalog) Models(ctx context.Context, contextTokens int) ([]Model, error
 	hw := c.Hardware(ctx)
 
 	cloud := map[string]bool{}
-	for _, b := range c.backends {
+	for _, b := range c.Backends() {
 		cloud[b.Name] = b.Cloud
 	}
 
@@ -286,11 +306,30 @@ func (c *Catalog) Models(ctx context.Context, contextTokens int) ([]Model, error
 // would answer now, and a host can be switched off between sweeps. Saying
 // unknown is the honest reading, and it is the difference between the UI
 // admitting it has lost touch and it claiming a dead machine is healthy.
+// A backend that is no longer configured is dropped rather than reported. The
+// health table is a probe cache keyed by name and nothing prunes it, so a
+// backend removed from backends.json or undeclared in the UI would otherwise
+// keep its last verdict on the page forever — and an "ok" frozen at the moment
+// something was deleted is precisely the dead-machine-looks-healthy reading
+// this function exists to avoid.
 func (c *Catalog) BackendHealth(ctx context.Context) ([]store.BackendRow, error) {
 	rows, err := c.store.Backends(ctx)
 	if err != nil {
 		return nil, err
 	}
+
+	configured := make(map[string]bool)
+	for _, b := range c.Backends() {
+		configured[b.Name] = true
+	}
+	live := rows[:0]
+	for _, row := range rows {
+		if configured[row.Name] {
+			live = append(live, row)
+		}
+	}
+	rows = live
+
 	c.mu.Lock()
 	staleAfter := c.staleAfter
 	c.mu.Unlock()
@@ -318,7 +357,7 @@ func (c *Catalog) Recommend(ctx context.Context, req PlanRequest) (*Plan, error)
 	}
 	if req.RequireLocal {
 		cloud := map[string]bool{}
-		for _, b := range c.backends {
+		for _, b := range c.Backends() {
 			cloud[b.Name] = b.Cloud
 		}
 		filtered := installed[:0]
