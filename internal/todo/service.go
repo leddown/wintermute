@@ -60,7 +60,22 @@ func (s *Service) UpdateList(id int64, l List) (List, error) {
 	return s.repo.UpdateList(id, l)
 }
 
+// DeleteList removes a list and everything on it.
+//
+// The notes inbox is refused. It is the server's own list — the note tools and
+// the Notes view store every note in it and find it by slug — so deleting it
+// destroys all the notes and leaves those paths to silently recreate an empty
+// one, which looks like the notes vanished rather than like something was
+// deleted. The UI hides the control for it as well, but this is the guard that
+// counts: the endpoint is reachable without the UI.
 func (s *Service) DeleteList(id int64) error {
+	list, err := s.repo.GetList(id)
+	if err != nil {
+		return err
+	}
+	if list.Slug != "" {
+		return fmt.Errorf("%q is the notes inbox and cannot be deleted; delete the notes in it instead", list.Title)
+	}
 	return s.repo.DeleteList(id)
 }
 

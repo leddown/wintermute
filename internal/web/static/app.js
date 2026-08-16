@@ -1224,13 +1224,33 @@ async function loadLists() {
   const box = $('lists');
   box.innerHTML = '';
   for (const l of tasks.lists) {
+    // The row opens the list; the × deletes it, the same shape the session
+    // rows use. Deleting was previously only reachable from the pane header
+    // after selecting a list, which is a strange place to look for it when
+    // the lists themselves are right here.
+    const parts = [
+      el('span', { class: 'list-label', text: `${l.title}${l.archived ? ' (archived)' : ''}` }),
+      el('span', { class: 'muted list-count', text: `${l.done_count}/${l.task_count}` }),
+    ];
+    // The notes inbox is the server's own list and the note tools store
+    // everything in it, so it gets no delete control. The server refuses it
+    // too — this only keeps the UI from offering something it would refuse.
+    if (!l.slug) {
+      parts.push(el('button', {
+        class: 'session-del', text: '×', type: 'button',
+        title: `Delete "${l.title}"`,
+        'aria-label': `Delete list ${l.title}`,
+        onclick: (e) => {
+          e.stopPropagation();
+          deleteList(l);
+        },
+      }));
+    }
     box.append(el('li', {
       class: tasks.scope === 'list' && tasks.listId === l.id ? 'active' : '',
       title: l.description || l.title,
       onclick: () => { tasks.scope = 'list'; tasks.listId = l.id; renderTasks().catch(showError); },
-    },
-    el('span', { text: `${l.title}${l.archived ? ' (archived)' : ''}` }),
-    el('span', { class: 'muted', text: `  ${l.done_count}/${l.task_count}` })));
+    }, ...parts));
   }
   for (const li of document.querySelectorAll('#task-views li')) {
     li.classList.toggle('active', tasks.scope === li.dataset.scope);
@@ -1268,16 +1288,33 @@ $('edit-list').addEventListener('click', () => {
   });
 });
 
-$('delete-list').addEventListener('click', () => {
-  const list = tasks.lists.find((l) => l.id === tasks.listId);
+// deleteList backs both the × on a sidebar row and the button in the pane
+// header, so the two cannot drift into confirming differently.
+//
+// The count is named in the prompt rather than left to "and its tasks":
+// deleting a list takes everything on it and there is no undo, so the number
+// is the one fact worth knowing before agreeing.
+function deleteList(list) {
   if (!list) return;
-  confirmDelete(`the list "${list.title}" and its tasks`, async () => {
+  const count = list.task_count || 0;
+  const what = count === 0
+    ? `the empty list "${list.title}"`
+    : `the list "${list.title}" and its ${count} task${count === 1 ? '' : 's'}`;
+  confirmDelete(what, async () => {
     await api(`/api/v1/todo/lists/${list.id}`, { method: 'DELETE' });
-    tasks.scope = 'agenda';
-    tasks.listId = 0;
+    // Only fall back to the agenda when the list being deleted is the one on
+    // screen; deleting some other row should leave the view where it is.
+    if (tasks.scope === 'list' && tasks.listId === list.id) {
+      tasks.scope = 'agenda';
+      tasks.listId = 0;
+    }
     await loadLists();
     await renderTasks();
   });
+}
+
+$('delete-list').addEventListener('click', () => {
+  deleteList(tasks.lists.find((l) => l.id === tasks.listId));
 });
 
 $('quick-add').addEventListener('submit', async (e) => {

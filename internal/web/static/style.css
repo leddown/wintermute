@@ -435,6 +435,15 @@ button:disabled { opacity: .5; cursor: default; }
   font-size: 16px; line-height: 1; color: var(--muted); opacity: .5; cursor: pointer;
 }
 #sessions li:hover .session-del { opacity: 1; }
+
+/* A task list row carries a delete control too, so it needs the same
+   treatment as a session row: the generic .sidebar li rule truncates the row
+   itself, which on a long title would clip the button out of reach rather
+   than the text. */
+#lists li { display: flex; align-items: center; gap: 6px; }
+.list-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.list-count { flex: none; font-size: 11.5px; font-variant-numeric: tabular-nums; }
+#lists li:hover .session-del { opacity: 1; }
 .session-del:hover, .session-del:focus-visible { color: var(--error); opacity: 1; }
 
 .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
