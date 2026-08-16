@@ -1,8 +1,9 @@
-// Chaos theme engine: the Matrix theme plus periodic colour glitches. On a
-// timer it recolours a random sample of the characters currently on screen,
-// clearing the previous sample first so each cycle is a fresh glitch. A view
-// re-render throws the sample away with the rest of the DOM, so app.js also
-// calls repaint() on every view change.
+// Chaos theme engine: the Matrix palette plus periodic colour glitches. The
+// glitches are the whole effect — Chaos does not run the falling-glyph rain,
+// which is the Matrix theme's alone. On a timer it recolours a random sample
+// of the characters currently on screen, clearing the previous sample first so
+// each cycle is a fresh glitch. A view re-render throws the sample away with
+// the rest of the DOM, so app.js also calls repaint() on every view change.
 //
 // Both knobs live in localStorage (the theme choice itself already does) and
 // are edited from the Admin → Appearance tab:

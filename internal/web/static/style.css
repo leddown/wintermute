@@ -94,6 +94,168 @@
   border-color: var(--accent);
 }
 
+/* ---------- 40K ----------
+
+   A gothic-industrial cogitator terminal: bone text and brass rule on a warm
+   near-black, gold for anything the eye is meant to land on, and a blood red
+   that is only ever bad news. The palette is the whole costume — no marks,
+   badges or lettering belonging to anyone else appear anywhere in it, and the
+   fritz overlay below is drawn from scratch out of gradients.
+
+   The warmth is the point: every other theme here is neutral or green, so a
+   screen lit like old brass reads as a different machine entirely. */
+:root[data-theme="40k"] {
+  --bg: #0a0806;
+  --surface: #12100c;
+  --surface-2: #1c1811;
+  --border: #4a3a1c;
+  --text: #e4d3a6;
+  --muted: #a08a5c;
+  --accent: #d8a730;
+  --error: #c1272d;
+  /* A gain is weathered field green rather than the palette's gold, which is
+     already spent on emphasis; a loss stays the same red as an error, because
+     a red number on a P&L has to survive any change of palette. */
+  --gain: #8a9a4a;
+  --loss: #c1272d;
+}
+
+/* Everything on this screen is output from a machine that only has one face. */
+:root[data-theme="40k"] body,
+:root[data-theme="40k"] button,
+:root[data-theme="40k"] input,
+:root[data-theme="40k"] select,
+:root[data-theme="40k"] textarea {
+  font-family: "Courier New", Courier, monospace;
+  letter-spacing: 0.02em;
+}
+
+/* The gold accent is bright enough that the base rule's near-black button text
+   lands correctly on it, so unlike Matrix the filled buttons need no override.
+   The transparent-backed controls do: --muted on this palette is a brass that
+   goes muddy against the near-black. */
+:root[data-theme="40k"] .view-btn {
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 11.5px;
+}
+:root[data-theme="40k"] .view-btn:hover,
+:root[data-theme="40k"] .view-btn.active {
+  color: var(--accent);
+  text-shadow: 0 0 8px rgba(216, 167, 48, 0.45);
+}
+:root[data-theme="40k"] .view-btn.active { border-color: var(--accent); }
+
+/* Section headings read as stamped plate rather than typography. */
+:root[data-theme="40k"] .sidebar-head span,
+:root[data-theme="40k"] .group-head {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+/* The app title carries the gold, so the one warm thing on screen at rest is
+   the name of the machine. */
+:root[data-theme="40k"] .topbar .title strong {
+  color: var(--accent);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* ---------- fritz overlay ----------
+
+   The 40K theme's failing-CRT layer, driven by /fritz.js. Fixed over the whole
+   shell and inert to the pointer, so it can never intercept a click or move
+   anything: every effect here is painted, none of it touches layout.
+
+   --fritz-intensity is set by fritz.js from the saved setting; the fallback
+   keeps the layer sane if the script has not run yet. */
+.fritz {
+  --fritz-intensity: 1;
+  position: fixed; inset: 0; z-index: 40;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+/* Scanlines. Static, cheap, and the single thing most responsible for the
+   palette reading as a screen instead of a colour scheme. */
+.fritz-scan {
+  position: absolute; inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 0px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, calc(0.22 * var(--fritz-intensity))) 3px,
+    rgba(0, 0, 0, calc(0.22 * var(--fritz-intensity))) 3px
+  );
+  background-size: 100% 3px;
+}
+
+/* The unsynced roll bar, drifting down the glass forever. */
+.fritz-roll {
+  position: absolute; left: 0; right: 0;
+  height: 22vh;
+  background: linear-gradient(
+    to bottom,
+    rgba(216, 167, 48, 0) 0%,
+    rgba(216, 167, 48, calc(0.05 * var(--fritz-intensity))) 45%,
+    rgba(255, 226, 160, calc(0.08 * var(--fritz-intensity))) 50%,
+    rgba(216, 167, 48, calc(0.05 * var(--fritz-intensity))) 55%,
+    rgba(216, 167, 48, 0) 100%
+  );
+  animation: fritz-roll 9s linear infinite;
+}
+
+@keyframes fritz-roll {
+  from { transform: translateY(-25vh); }
+  to   { transform: translateY(105vh); }
+}
+
+/* Curved glass: darker at the corners, so the picture sits in a tube. */
+.fritz-vignette {
+  position: absolute; inset: 0;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(0, 0, 0, 0) 55%,
+    rgba(0, 0, 0, calc(0.45 * var(--fritz-intensity))) 100%
+  );
+}
+
+/* A burst: the whole panel lifts for a moment, as a tube does when the supply
+   sags and recovers. */
+.fritz.fritz-flicker {
+  background: rgba(216, 167, 48, calc(0.06 * var(--fritz-intensity)));
+  animation: fritz-flicker 0.16s steps(2, end) 2;
+}
+
+@keyframes fritz-flicker {
+  0%   { opacity: 1; }
+  50%  { opacity: 0.72; }
+  100% { opacity: 1; }
+}
+
+/* One torn band, appended and removed by fritz.js. --shift is how far the
+   colour fringe is thrown, which is what sells a tear over a flash. */
+.fritz-band {
+  position: absolute; left: 0; right: 0;
+  background: linear-gradient(
+    to right,
+    rgba(193, 39, 45, 0.5) 0%,
+    rgba(228, 211, 166, 0.75) 12%,
+    rgba(228, 211, 166, 0.75) 88%,
+    rgba(110, 168, 254, 0.45) 100%
+  );
+  transform: translateX(var(--shift, 0));
+  mix-blend-mode: screen;
+}
+
+/* Asked for less motion: the scanlines and the vignette stay, because neither
+   moves; the roll bar stops and fritz.js skips its bursts entirely. */
+@media (prefers-reduced-motion: reduce) {
+  .fritz-roll { animation: none; opacity: 0.35; }
+  .fritz.fritz-flicker { animation: none; }
+}
+
 /* The falling-glyph backdrop, painted by /matrix-rain.js. Fixed rather than
    scrolled: it is the room the app sits in, not part of the page. */
 .matrix-rain {
@@ -271,6 +433,30 @@ button:disabled { opacity: .5; cursor: default; }
 .msg.tool .bubble { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12.5px; color: var(--muted); }
 .msg.error .bubble { border-color: var(--error); color: var(--error); }
 
+/* The waiting indicator that stands in for the reply while a turn is in
+   flight. It occupies an assistant bubble so the transcript keeps its shape
+   when the real reply replaces it, rather than jumping. */
+.msg.pending .bubble { color: var(--muted); }
+.dots { display: inline-flex; gap: 5px; align-items: center; height: 1em; }
+.dots i {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: currentColor; opacity: 0.25;
+  animation: dot-pulse 1.2s ease-in-out infinite;
+}
+.dots i:nth-child(2) { animation-delay: 0.18s; }
+.dots i:nth-child(3) { animation-delay: 0.36s; }
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 0.25; transform: translateY(0); }
+  40%      { opacity: 1;    transform: translateY(-2px); }
+}
+
+/* Still legible as "working" without the motion: the dots simply sit at a
+   middle opacity instead of animating. */
+@media (prefers-reduced-motion: reduce) {
+  .dots i { animation: none; opacity: 0.6; }
+}
+
 .composer {
   display: flex; gap: 8px; align-items: flex-end;
   padding: 12px 20px 4px;
@@ -401,6 +587,81 @@ dialog h3 { margin: 0; font-size: 15px; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); outline: none; }
 .field textarea { min-height: 80px; resize: vertical; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------- system gauges ----------
+
+   Live CPU/network/disk dials from morpheus, onto this stylesheet's variable
+   names (--surface-2 for its --surface-raised, --muted for its --text-dim).
+
+   morpheus pinned these to the foot of a nav panel that every view shared.
+   Here each view brings its own .sidebar, so instead of a copy per view the
+   widget is one fixed element at the bottom-left, sized to the sidebar it
+   sits over. .sidebar gets matching bottom padding so a long list scrolls
+   clear of it rather than under it. */
+.system-gauges {
+  position: fixed; left: 0; bottom: 0; z-index: 20;
+  box-sizing: border-box;
+  width: 260px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  display: flex; justify-content: space-between; gap: 6px;
+}
+
+.resource-gauge { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+
+.resource-dial {
+  --fill: 0%;
+  position: relative;
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  display: grid; place-items: center;
+  background: conic-gradient(
+    var(--accent) 0 var(--fill),
+    var(--surface-2) var(--fill) 100%
+  );
+  transition: --fill 0.5s ease;
+}
+
+/* The hole that turns a filled disc into a ring. */
+.resource-dial::before {
+  content: "";
+  position: absolute; inset: 5px;
+  border-radius: 50%;
+  background: var(--surface);
+}
+
+.resource-value {
+  position: relative;
+  font-size: 10px; font-weight: 600;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.resource-label { font-size: 9.5px; color: var(--muted); white-space: nowrap; }
+
+/* --fill has to be a registered property or the conic-gradient jumps between
+   values instead of sweeping. */
+@property --fill {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .resource-dial { transition: none; }
+}
+
+/* Room at the foot of every sidebar for the dials to sit over. */
+.sidebar { padding-bottom: 92px; }
+
+/* On a phone the sidebar is off-canvas, so a fixed bottom-left widget would
+   float over the content of whatever view is open. It goes away instead. */
+@media (max-width: 720px) {
+  .system-gauges { display: none; }
+  .sidebar { padding-bottom: 12px; }
+}
 
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);

@@ -9,7 +9,9 @@
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  token: null, sessionId: null, sending: false, view: 'chat',
+  // 'core' is where the app lands: the Core view opens on its Chat pane, which
+  // index.html marks active so the first paint needs no JS.
+  token: null, sessionId: null, sending: false, view: 'core',
   // The agent a new chat is opened against, and the one being edited in the
   // Agents view. Null means the unscoped assistant, which is what every
   // session was before agents existed.
@@ -107,6 +109,7 @@ function start(me) {
   $('gate').hidden = true;
   $('app').hidden = false;
   $('model').textContent = me.default_backend ? `${me.default_backend}` : '';
+  SystemGauges.start();
   loadSessions().catch(showError);
   // The agent list is fetched at boot rather than on first view, because the
   // chat needs it to say which agent a session is talking to — a question gets
@@ -133,10 +136,7 @@ function start(me) {
 // not cost four extra round trips for panes nobody looked at.
 const loaded = new Set();
 const loaders = {
-  agents: () => loadAgents(),
   tasks: () => Promise.all([loadLists(), renderTasks()]),
-  crm: () => renderCRM(),
-  accounting: () => renderAccounting(),
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
   utilities: () => loadUtilities(),
@@ -174,6 +174,141 @@ $('menu').addEventListener('click', () => {
 function closeSidebar() {
   for (const bar of document.querySelectorAll('.sidebar')) bar.classList.remove('open');
 }
+
+/* ---------- core view: the chat and the agents that scope it ---------- */
+//
+// Two groups over two panes, like the Company view, except the swap covers the
+// sidebar as well: neither group has fixed tabs, they have live lists — the
+// sessions and the agents — so each group's list travels with its pane.
+//
+// The chat is not lazy: it loads at boot because it is where the app lands.
+// Only the agent list waits for its first open.
+const core = { pane: 'chat', agentsLoaded: false };
+
+function showCorePane(name) {
+  core.pane = name;
+  for (const li of document.querySelectorAll('.core-tabs li')) {
+    li.classList.toggle('active', li.dataset.pane === name);
+  }
+  for (const node of document.querySelectorAll('.view[data-view="core"] .core-pane')) {
+    node.hidden = node.dataset.pane !== name;
+  }
+  if (name === 'agents' && !core.agentsLoaded) {
+    core.agentsLoaded = true;
+    loadAgents().catch((err) => { core.agentsLoaded = false; showError(err); });
+  }
+}
+
+// Whether the transcript is on screen. showError() writes a failed turn into
+// the transcript rather than a toast, but only when the user can see it —
+// which is now a view *and* a pane, not a view alone.
+function chatVisible() {
+  return state.view === 'core' && core.pane === 'chat';
+}
+
+for (const li of document.querySelectorAll('.core-tabs li')) {
+  li.addEventListener('click', () => {
+    showCorePane(li.dataset.pane);
+    closeSidebar();
+  });
+}
+
+/* ---------- system gauges ---------- */
+//
+// Live CPU / network / disk dials at the bottom-left, brought across from
+// morpheus. The numbers are whole-machine, read from /proc on the server: they
+// cover every process and every user, not just wintermute. That is the point —
+// the question they answer is "is this box busy, and with what", and on a host
+// running a local model that is what you want in front of you while a turn
+// sits there apparently doing nothing.
+//
+// This polls the same /api/v1/utilities/resources the Activity tab uses. The
+// sampler behind it is one shared instance averaging over a five-second
+// window, so a second reader costs a few /proc reads and cannot skew what the
+// Activity tab reports.
+const SystemGauges = (() => {
+  // The server averages each rate over a few seconds anyway, so polling faster
+  // would show the same number more often rather than a more current one.
+  const pollInterval = 3000;
+  let timer = null;
+
+  // Network and disk have no natural ceiling — a gigabit link and a slow USB
+  // disk are orders of magnitude apart — so each ring fills relative to the
+  // highest rate seen since the page loaded. The number in the middle is
+  // always the real measurement; only the ring is relative.
+  const peaks = { net: 1, disk: 1 };
+
+  // Compact enough for a dial centre: megabytes once there are any, kilobytes
+  // below that.
+  function rate(bytesPerSec) {
+    const mb = bytesPerSec / (1024 * 1024);
+    if (mb >= 10) return String(Math.round(mb));
+    if (mb >= 1) return mb.toFixed(1);
+    if (bytesPerSec >= 1024) return `${Math.round(bytesPerSec / 1024)}k`;
+    return '0';
+  }
+
+  const mb = (n) => (n / (1024 * 1024)).toFixed(1);
+
+  function paint(s) {
+    const box = $('system-gauges');
+    if (!box) return;
+    box.hidden = false;
+
+    const net = (s.net_rx_bytes_per_sec || 0) + (s.net_tx_bytes_per_sec || 0);
+    const disk = (s.disk_read_bytes_per_sec || 0) + (s.disk_write_bytes_per_sec || 0);
+    peaks.net = Math.max(peaks.net, net);
+    peaks.disk = Math.max(peaks.disk, disk);
+
+    const dials = {
+      cpu: {
+        fill: Math.min((s.cpu_percent || 0) / 100, 1),
+        value: s.warming ? '–' : `${Math.round(s.cpu_percent || 0)}%`,
+        title: `CPU ${(s.cpu_percent || 0).toFixed(1)}% busy across all cores, all processes`,
+      },
+      net: {
+        fill: net / peaks.net,
+        value: s.warming ? '–' : rate(net),
+        title: `Network ${mb(net)} MB/s — down ${mb(s.net_rx_bytes_per_sec || 0)}, up ${mb(s.net_tx_bytes_per_sec || 0)}`,
+      },
+      disk: {
+        fill: disk / peaks.disk,
+        value: s.warming ? '–' : rate(disk),
+        title: `Disk ${mb(disk)} MB/s — read ${mb(s.disk_read_bytes_per_sec || 0)}, write ${mb(s.disk_write_bytes_per_sec || 0)}`,
+      },
+    };
+
+    for (const [key, d] of Object.entries(dials)) {
+      const gauge = box.querySelector(`[data-gauge="${key}"]`);
+      if (!gauge) continue;
+      gauge.querySelector('.resource-dial').style.setProperty(
+        '--fill', `${(Math.min(Math.max(d.fill, 0), 1) * 100).toFixed(1)}%`);
+      gauge.querySelector('.resource-value').textContent = d.value;
+      gauge.title = s.warming ? 'Measuring…' : d.title;
+    }
+  }
+
+  async function tick() {
+    // A backgrounded tab is not worth polling for, but the timer keeps running
+    // so it resumes the moment the tab comes back.
+    if (document.hidden) return;
+    try {
+      paint(await api('/api/v1/utilities/resources'));
+    } catch {
+      // Leave the last values on screen. These are a diagnostic garnish that
+      // sits over every view; a failure here must not disturb any of them —
+      // and must never reach showError(), which would write it into the chat.
+    }
+  }
+
+  function start() {
+    if (timer) return;
+    tick();
+    timer = setInterval(tick, pollInterval);
+  }
+
+  return { start };
+})();
 
 /* ---------- editor dialog ----------
    One dialog for every record type. Each caller passes a field spec and gets
@@ -455,8 +590,28 @@ function appendMessage(m) {
   box.scrollTop = box.scrollHeight;
 }
 
+// The placeholder that stands in for the reply while the turn is in flight.
+// A turn against a local model can sit for a minute or more, and without this
+// the transcript looks like the message was swallowed: the composer clears,
+// and then nothing happens for long enough to try again.
+//
+// Returned rather than looked up later so the caller removes exactly the node
+// it added, whatever else has arrived in the meantime.
+function appendPending() {
+  const box = $('messages');
+  const empty = box.querySelector('.empty');
+  if (empty) empty.remove();
+  const node = el('div', { class: 'msg assistant pending' },
+    el('div', { class: 'role', text: 'assistant' }),
+    el('div', { class: 'bubble' },
+      el('span', { class: 'dots' }, el('i'), el('i'), el('i'))));
+  box.append(node);
+  box.scrollTop = box.scrollHeight;
+  return node;
+}
+
 function showError(err) {
-  if (state.view === 'chat') appendMessage({ role: 'tool', content: err.message, is_error: true });
+  if (chatVisible()) appendMessage({ role: 'tool', content: err.message, is_error: true });
   else toast(err.message, true);
 }
 
@@ -481,15 +636,23 @@ $('composer').addEventListener('submit', async (e) => {
   $('send').disabled = true;
   input.value = '';
   input.style.height = 'auto';
-  appendMessage({ role: 'user', content: text });
 
+  let pending = null;
   try {
+    // The session has to exist *before* the message is echoed. newSession()
+    // resets the transcript to its empty-state hint, so echoing first meant
+    // the opening question of every conversation was wiped a moment after it
+    // appeared — the reply arrived with nothing above it to answer.
     if (!state.sessionId) await newSession();
+    appendMessage({ role: 'user', content: text });
+    pending = appendPending();
     // client_tools is intentionally empty: a browser executes nothing locally.
     const turn = await api(`/api/v1/sessions/${state.sessionId}/messages`, {
       method: 'POST',
       body: JSON.stringify({ text, client_tools: [] }),
     });
+    pending.remove();
+    pending = null;
     if (turn.reply) appendMessage({ role: 'assistant', content: turn.reply });
     if (turn.status === 'awaiting_client') {
       appendMessage({
@@ -505,6 +668,9 @@ $('composer').addEventListener('submit', async (e) => {
   } catch (err) {
     showError(err);
   } finally {
+    // The indicator has to go whatever happened, including a failure before
+    // the request was ever made — otherwise it spins under a dead turn.
+    if (pending) pending.remove();
     state.sending = false;
     $('send').disabled = false;
     input.focus();
@@ -742,7 +908,7 @@ $('agent-chat').addEventListener('click', async () => {
   const agent = selectedAgent();
   if (!agent) return;
   state.chatAgent = agent.id;
-  switchView('chat');
+  showCorePane('chat');
   await newSession();
   toast(`New chat as ${agent.name}`);
 });
@@ -1269,17 +1435,6 @@ function showImportResult(box, result, message) {
 
 const crm = { tab: 'dashboard', clients: [], engagements: [] };
 
-for (const li of document.querySelectorAll('#crm-nav li')) {
-  li.addEventListener('click', () => {
-    crm.tab = li.dataset.tab;
-    for (const other of document.querySelectorAll('#crm-nav li')) {
-      other.classList.toggle('active', other === li);
-    }
-    renderCRM().catch(showError);
-    closeSidebar();
-  });
-}
-
 $('crm-new').addEventListener('click', () => {
   if (crm.tab === 'clients') editClient(null);
   else if (crm.tab === 'engagements') editEngagement(null);
@@ -1587,6 +1742,43 @@ $('company-clear').addEventListener('click', () => {
   });
 });
 
+/* ---------- company view: profile, CRM and the books ---------- */
+//
+// Three groups of tabs over three panes in one view. The groups share a
+// selection — clicking Invoices has to deselect Clients — but not a pane:
+// each keeps the title, body and New button its renderer already writes to,
+// which is why renderCRM() and renderAccounting() needed no changes at all.
+// Only one pane is ever visible; `[hidden]` is `!important` in style.css, so
+// setting it beats the `display: flex` on .pane.
+
+function showCoPane(name) {
+  for (const pane of document.querySelectorAll('.view[data-view="company"] .pane')) {
+    pane.hidden = pane.dataset.pane !== name;
+  }
+}
+
+// A group renders when its tab is clicked rather than at view open: landing on
+// the profile should not also fetch the whole ledger.
+for (const li of document.querySelectorAll('.co-tabs li')) {
+  li.addEventListener('click', () => {
+    for (const other of document.querySelectorAll('.co-tabs li')) {
+      other.classList.toggle('active', other === li);
+    }
+    const pane = li.dataset.pane;
+    showCoPane(pane);
+    if (pane === 'crm') {
+      crm.tab = li.dataset.tab;
+      renderCRM().catch(showError);
+    } else if (pane === 'acct') {
+      acct.tab = li.dataset.tab;
+      renderAccounting().catch(showError);
+    } else {
+      loadCompany().catch(showError);
+    }
+    closeSidebar();
+  });
+}
+
 /* ---------- boot ---------- */
 
 const saved = localStorage.getItem('wintermute_token');
@@ -1610,17 +1802,6 @@ const cents = (n) => ((Number(n) || 0) / 100).toLocaleString(undefined, {
 const qty = (n) => ((Number(n) || 0) / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 });
 
 const acct = { tab: 'overview', currency: '', accounts: [], vatRates: [] };
-
-for (const li of document.querySelectorAll('#acct-nav li')) {
-  li.addEventListener('click', () => {
-    acct.tab = li.dataset.tab;
-    for (const other of document.querySelectorAll('#acct-nav li')) {
-      other.classList.toggle('active', other === li);
-    }
-    renderAccounting().catch(showError);
-    closeSidebar();
-  });
-}
 
 $('acct-new').addEventListener('click', () => {
   if (acct.tab === 'expenses') editExpense();
@@ -3130,7 +3311,7 @@ function renderAdminAppearance(body) {
 
   body.append(el('div', { class: 'group-head', text: 'Matrix rain' }));
   body.append(el('p', { class: 'muted', text:
-    'The falling glyphs behind the panes, on both the Matrix and Chaos themes. ' +
+    'The falling glyphs behind the panes, on the Matrix theme. ' +
     'They are drawn faint on purpose — they fill the space a page of panels ' +
     'leaves over on a wide monitor without competing with it — but how faint ' +
     'that reads depends entirely on the screen. 100 is the default; below it ' +
@@ -3156,9 +3337,11 @@ function renderAdminAppearance(body) {
 
   body.append(el('div', { class: 'group-head', text: 'Chaos' }));
   body.append(el('p', { class: 'muted', text:
-    'The Chaos theme is the Matrix theme plus periodic colour glitches: on ' +
+    'The Chaos theme is the Matrix palette plus periodic colour glitches: on ' +
     'every tick, and whenever you switch views, a random sample of the ' +
-    'characters on screen turns a random colour, replacing the previous sample.' }));
+    'characters on screen turns a random colour, replacing the previous ' +
+    'sample. It does not run the falling glyphs — the glitches are the whole ' +
+    'effect.' }));
 
   const chaosCfg = WintermuteChaos.config();
   const interval = el('input', { type: 'number', min: '1', max: '3600' });
@@ -3178,6 +3361,49 @@ function renderAdminAppearance(body) {
     toast('Chaos settings saved');
   });
   body.append(chaosForm);
+
+  body.append(el('div', { class: 'group-head', text: '40K fritz' }));
+  body.append(el('p', { class: 'muted', text:
+    'The 40K theme runs a failing-CRT overlay: scanlines and a vignette that ' +
+    'never move, a roll bar drifting down the glass, and a burst every few ' +
+    'seconds where the picture tears. The interval is the average wait — each ' +
+    'gap is randomised around it, because a fault on a fixed beat stops ' +
+    'reading as a fault. Intensity scales the whole layer: 0 leaves the ' +
+    'scanlines and nothing else. The overlay never takes a click, and asking ' +
+    'your system for reduced motion stops the roll and the bursts.' }));
+
+  const fritzCfg = WintermuteFritz.config();
+  const fritzInterval = el('input', {
+    type: 'number',
+    min: String(WintermuteFritz.MIN_INTERVAL),
+    max: String(WintermuteFritz.MAX_INTERVAL),
+  });
+  fritzInterval.value = String(fritzCfg.intervalSeconds);
+  const fritzIntensity = el('input', {
+    type: 'number',
+    min: String(WintermuteFritz.MIN_INTENSITY),
+    max: String(WintermuteFritz.MAX_INTENSITY),
+  });
+  fritzIntensity.value = String(fritzCfg.intensity);
+  const fritzForm = el('form', { class: 'row-form' },
+    el('span', { class: 'muted', text: 'Seconds between bursts' }), fritzInterval,
+    el('span', { class: 'muted', text: 'Intensity %' }), fritzIntensity,
+    el('button', { type: 'submit', text: 'Save' }),
+    // A knob whose effect is a brief flicker every several seconds is hard to
+    // tune by waiting for one, so the pane can fire one on demand.
+    el('button', { type: 'button', class: 'ghost-btn', text: 'Test burst',
+      onclick: () => WintermuteFritz.burst() }));
+  fritzForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    WintermuteFritz.setConfig({
+      intervalSeconds: fritzInterval.value, intensity: fritzIntensity.value,
+    });
+    const saved = WintermuteFritz.config();
+    fritzInterval.value = String(saved.intervalSeconds);
+    fritzIntensity.value = String(saved.intensity);
+    toast('Fritz settings saved');
+  });
+  body.append(fritzForm);
 }
 
 /* ---------- utilities ---------- */

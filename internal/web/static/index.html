@@ -10,9 +10,18 @@
   <script src="/theme-init.js"></script>
 </head>
 <body>
-  <!-- Backdrop for the Matrix and Chaos themes. Fixed behind the whole shell,
-       and hidden outright on every other theme; see matrix-rain.js. -->
+  <!-- Backdrop for the Matrix theme. Fixed behind the whole shell, and hidden
+       outright on every other theme; see matrix-rain.js. -->
   <canvas id="matrix-rain" class="matrix-rain" aria-hidden="true" hidden></canvas>
+
+  <!-- CRT overlay for the 40K theme: scanlines, a roll bar, and the tear
+       bands fritz.js appends during a burst. Sits over the shell rather than
+       behind it, and never takes a pointer event. -->
+  <div id="fritz" class="fritz" aria-hidden="true" hidden>
+    <div class="fritz-scan"></div>
+    <div class="fritz-roll"></div>
+    <div class="fritz-vignette"></div>
+  </div>
 
   <div id="gate" class="gate">
     <form id="gate-form" class="gate-card">
@@ -37,11 +46,8 @@
         <span id="model" class="muted"></span>
       </div>
       <nav id="views" class="views">
-        <button class="view-btn active" data-view="chat">Chat</button>
-        <button class="view-btn" data-view="agents">Agents</button>
+        <button class="view-btn active" data-view="core">Core</button>
         <button class="view-btn" data-view="tasks">Tasks</button>
-        <button class="view-btn" data-view="crm">CRM</button>
-        <button class="view-btn" data-view="accounting">Accounts</button>
         <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="utilities">Utilities</button>
@@ -51,17 +57,37 @@
     </header>
 
     <div class="body">
-      <!-- Chat -->
-      <section class="view active" data-view="chat">
-        <aside id="sidebar" class="sidebar">
-          <div class="sidebar-head">
-            <span class="muted">Sessions</span>
-            <button id="new-session" class="link-btn">New</button>
+      <!-- Core: the chat and the agents that scope it. Same pane-swap shape as
+           the Company view, except each group's *sidebar* content swaps too —
+           these two have live lists (sessions, agents) rather than fixed tabs. -->
+      <section class="view active" data-view="core">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Core</span></div>
+          <ul id="core-nav" class="core-tabs">
+            <li data-pane="chat" class="active">Chat</li>
+            <li data-pane="agents">Agents</li>
+          </ul>
+
+          <div class="core-pane" data-pane="chat">
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Sessions</span>
+              <button id="new-session" class="link-btn">New</button>
+            </div>
+            <ul id="sessions"></ul>
           </div>
-          <ul id="sessions"></ul>
+
+          <div class="core-pane" data-pane="agents" hidden>
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Agents</span>
+              <button id="new-agent" class="link-btn">New</button>
+            </div>
+            <ul id="agent-list"></ul>
+            <p class="hint muted">An agent is a named set of documents and sources.
+              A conversation started against one can read those and nothing else.</p>
+          </div>
         </aside>
 
-        <main class="chat">
+        <main class="chat core-pane" data-pane="chat">
           <div id="messages" class="messages">
             <div class="empty muted">Ask about your media library, your tasks, or anything else.</div>
           </div>
@@ -72,21 +98,8 @@
           <div id="chat-agent" class="chat-agent"></div>
           <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
         </main>
-      </section>
 
-      <!-- Agents -->
-      <section class="view" data-view="agents">
-        <aside class="sidebar">
-          <div class="sidebar-head">
-            <span class="muted">Agents</span>
-            <button id="new-agent" class="link-btn">New</button>
-          </div>
-          <ul id="agent-list"></ul>
-          <p class="hint muted">An agent is a named set of documents and sources.
-            A conversation started against one can read those and nothing else.</p>
-        </aside>
-
-        <main class="pane">
+        <main class="pane core-pane" data-pane="agents" hidden>
           <div class="pane-head">
             <h2 id="agent-title">Agents</h2>
             <div class="row-actions">
@@ -168,55 +181,6 @@
         </main>
       </section>
 
-      <!-- CRM -->
-      <section class="view" data-view="crm">
-        <aside class="sidebar">
-          <div class="sidebar-head"><span class="muted">CRM</span></div>
-          <ul id="crm-nav">
-            <li data-tab="dashboard" class="active">Dashboard</li>
-            <li data-tab="clients">Clients</li>
-            <li data-tab="engagements">Engagements</li>
-            <li data-tab="time">Time</li>
-            <li data-tab="billing">Billing</li>
-          </ul>
-        </aside>
-        <main class="pane">
-          <div class="pane-head">
-            <h2 id="crm-title">Dashboard</h2>
-            <div class="pane-actions">
-              <button id="crm-new" class="ghost-btn" hidden>New</button>
-            </div>
-          </div>
-          <div id="crm-body" class="pane-body"></div>
-        </main>
-      </section>
-
-      <!-- Accounting -->
-      <section class="view" data-view="accounting">
-        <aside class="sidebar">
-          <div class="sidebar-head"><span class="muted">Accounting</span></div>
-          <ul id="acct-nav">
-            <li data-tab="overview" class="active">Overview</li>
-            <li data-tab="unbilled">Ready to bill</li>
-            <li data-tab="invoices">Invoices</li>
-            <li data-tab="payments">Payments</li>
-            <li data-tab="funding">Owner funding</li>
-            <li data-tab="expenses">Expenses</li>
-            <li data-tab="reports">Reports</li>
-            <li data-tab="accounts">Chart of accounts</li>
-          </ul>
-        </aside>
-        <main class="pane">
-          <div class="pane-head">
-            <h2 id="acct-title">Overview</h2>
-            <div class="pane-actions">
-              <button id="acct-new" class="ghost-btn" hidden>New</button>
-            </div>
-          </div>
-          <div id="acct-body" class="pane-body"></div>
-        </main>
-      </section>
-
       <!-- Admin -->
       <section class="view" data-view="admin">
         <aside class="sidebar">
@@ -279,9 +243,44 @@
         </main>
       </section>
 
-      <!-- Company -->
+      <!-- Company: the profile, the CRM and the books are one view with three
+           groups of tabs. Each group keeps its own pane rather than sharing a
+           body, so the renderers and their ~20 call sites stay as they were —
+           only one pane is ever shown, which `[hidden]` enforces. -->
       <section class="view" data-view="company">
-        <main class="pane wide">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Company</span></div>
+          <ul id="co-nav" class="co-tabs">
+            <li data-pane="company" data-tab="profile" class="active">Profile</li>
+          </ul>
+
+          <div class="sidebar-head" style="margin-top:16px;">
+            <span class="muted">CRM</span>
+          </div>
+          <ul id="crm-nav" class="co-tabs">
+            <li data-pane="crm" data-tab="dashboard">Dashboard</li>
+            <li data-pane="crm" data-tab="clients">Clients</li>
+            <li data-pane="crm" data-tab="engagements">Engagements</li>
+            <li data-pane="crm" data-tab="time">Time</li>
+            <li data-pane="crm" data-tab="billing">Billing</li>
+          </ul>
+
+          <div class="sidebar-head" style="margin-top:16px;">
+            <span class="muted">Accounting</span>
+          </div>
+          <ul id="acct-nav" class="co-tabs">
+            <li data-pane="acct" data-tab="overview">Overview</li>
+            <li data-pane="acct" data-tab="unbilled">Ready to bill</li>
+            <li data-pane="acct" data-tab="invoices">Invoices</li>
+            <li data-pane="acct" data-tab="payments">Payments</li>
+            <li data-pane="acct" data-tab="funding">Owner funding</li>
+            <li data-pane="acct" data-tab="expenses">Expenses</li>
+            <li data-pane="acct" data-tab="reports">Reports</li>
+            <li data-pane="acct" data-tab="accounts">Chart of accounts</li>
+          </ul>
+        </aside>
+
+        <main class="pane wide" data-pane="company">
           <div class="pane-head">
             <h2>Company profile</h2>
             <div class="pane-actions">
@@ -291,8 +290,47 @@
           </div>
           <div id="company-body" class="pane-body"></div>
         </main>
+
+        <main class="pane" data-pane="crm" hidden>
+          <div class="pane-head">
+            <h2 id="crm-title">Dashboard</h2>
+            <div class="pane-actions">
+              <button id="crm-new" class="ghost-btn" hidden>New</button>
+            </div>
+          </div>
+          <div id="crm-body" class="pane-body"></div>
+        </main>
+
+        <main class="pane" data-pane="acct" hidden>
+          <div class="pane-head">
+            <h2 id="acct-title">Overview</h2>
+            <div class="pane-actions">
+              <button id="acct-new" class="ghost-btn" hidden>New</button>
+            </div>
+          </div>
+          <div id="acct-body" class="pane-body"></div>
+        </main>
       </section>
     </div>
+
+    <!-- Live CPU / network / disk dials, brought across from morpheus. One
+         element for the whole app rather than a copy per view: it is pinned to
+         the bottom-left of the window, which is where every view's sidebar
+         already ends. Inside #app, so the gate never shows it. -->
+    <aside id="system-gauges" class="system-gauges" aria-label="Server activity" hidden>
+      <div class="resource-gauge" data-gauge="cpu">
+        <div class="resource-dial"><span class="resource-value">–</span></div>
+        <div class="resource-label">CPU</div>
+      </div>
+      <div class="resource-gauge" data-gauge="net">
+        <div class="resource-dial"><span class="resource-value">–</span></div>
+        <div class="resource-label">Net MB/s</div>
+      </div>
+      <div class="resource-gauge" data-gauge="disk">
+        <div class="resource-dial"><span class="resource-value">–</span></div>
+        <div class="resource-label">Disk MB/s</div>
+      </div>
+    </aside>
   </div>
 
   <!-- One dialog serves every editor; the fields are built per record type. -->
@@ -310,10 +348,11 @@
 
   <div id="toast" class="toast" hidden></div>
 
-  <!-- The theme trio loads before app.js: theme.js applies the saved choice on
-       evaluation and needs the rain and chaos engines to already exist. -->
+  <!-- The effect engines load before app.js: theme.js applies the saved choice
+       on evaluation and needs the rain, chaos and fritz engines to exist. -->
   <script src="/chaos.js"></script>
   <script src="/matrix-rain.js"></script>
+  <script src="/fritz.js"></script>
   <script src="/theme.js"></script>
   <script src="/app.js"></script>
 </body>

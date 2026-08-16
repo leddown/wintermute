@@ -1,4 +1,4 @@
-// Falling-glyph backdrop for the Matrix and Chaos themes.
+// Falling-glyph backdrop for the Matrix theme.
 //
 // It exists for a layout reason, not only a decorative one. An admin pane or
 // a canary table is a finite amount of content, so on a 21:9 or 32:9 display
