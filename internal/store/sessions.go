@@ -82,6 +82,30 @@ func (s *Store) SetSessionModel(ctx context.Context, id, backend, model string) 
 	return nil
 }
 
+// DeleteSession removes a conversation and, through ON DELETE CASCADE, its
+// messages and audit rows — the same reach as utilities.PruneSessions, which
+// is the existing way conversations leave the database.
+//
+// The delete is scoped to the owning client and reports ErrNotFound when it
+// matches nothing, so one client cannot discover, let alone delete, another's
+// session. Scoping it in the statement rather than checking first also means
+// there is no window between the check and the delete.
+func (s *Store) DeleteSession(ctx context.Context, id string, clientID int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM sessions WHERE id = ? AND client_id = ?`, id, clientID)
+	if err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Session fetches a session scoped to its owning client. Callers pass the
 // authenticated client ID; a session belonging to another client reports
 // ErrNotFound rather than a permission error, so the API leaks nothing about

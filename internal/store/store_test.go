@@ -134,6 +134,66 @@ func TestSessionsAreScopedToTheirClient(t *testing.T) {
 	}
 }
 
+// Deleting a session is destructive and client-scoped, so both halves are
+// worth pinning: another client's delete must not reach it, and the owner's
+// must take the transcript and the audit rows with it rather than orphaning
+// them. The cascade only fires because store.Open sets foreign_keys(ON) — if
+// that pragma is ever dropped, this test is what notices.
+func TestDeleteSessionIsScopedAndCascades(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	owner, _, err := st.CreateClient(ctx, "owner", KindHarness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := st.CreateClient(ctx, "other", KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(ctx, owner.ID, "doomed", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.AppendMessages(ctx, sess.ID, llm.UserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordTool(ctx, AuditEntry{
+		SessionID: sess.ID, CallID: "1", ToolName: "rename_file",
+		Side: tool.SideClient, Risk: tool.RiskWrite, Decision: DecisionApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.DeleteSession(ctx, sess.ID, other.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-client delete = %v, want ErrNotFound", err)
+	}
+	if _, err := st.Session(ctx, sess.ID, owner.ID); err != nil {
+		t.Fatalf("session gone after a refused cross-client delete: %v", err)
+	}
+
+	if err := st.DeleteSession(ctx, sess.ID, owner.ID); err != nil {
+		t.Fatalf("owner cannot delete own session: %v", err)
+	}
+	if _, err := st.Session(ctx, sess.ID, owner.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("read after delete = %v, want ErrNotFound", err)
+	}
+	if err := st.DeleteSession(ctx, sess.ID, owner.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("second delete = %v, want ErrNotFound", err)
+	}
+
+	for _, table := range []string{"messages", "tool_audit"} {
+		var n int
+		if err := st.DB().QueryRowContext(ctx,
+			`SELECT count(*) FROM `+table+` WHERE session_id = ?`, sess.ID).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		if n != 0 {
+			t.Errorf("%s left %d orphaned rows, want 0", table, n)
+		}
+	}
+}
+
 func TestTranscriptRoundTrip(t *testing.T) {
 	st := newTestStore(t)
 	ctx := context.Background()

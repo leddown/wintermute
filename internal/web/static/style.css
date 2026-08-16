@@ -64,9 +64,11 @@
 :root[data-theme="matrix"] .ghost-btn,
 :root[data-theme="matrix"] .icon-btn,
 :root[data-theme="matrix"] .link-btn,
+:root[data-theme="matrix"] .session-del,
 :root[data-theme="chaos"] .ghost-btn,
 :root[data-theme="chaos"] .icon-btn,
-:root[data-theme="chaos"] .link-btn {
+:root[data-theme="chaos"] .link-btn,
+:root[data-theme="chaos"] .session-del {
   color: var(--text);
 }
 
@@ -234,6 +236,22 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .sidebar li:hover { background: var(--surface-2); color: var(--text); }
 .sidebar li.active { background: var(--surface-2); color: var(--text); }
+
+/* A session row carries a delete control, so it becomes a flex line and the
+   truncation moves to the label. The generic rule above truncates the row
+   itself, which on a long title would clip the button out of reach rather
+   than the text. Scoped to #sessions: every other sidebar list is plain. */
+#sessions li { display: flex; align-items: center; gap: 6px; }
+.session-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Dimmed rather than hidden-until-hover: a control that only exists on hover
+   cannot be found on a touch screen, and one that is invisible but still
+   tappable is worse than either. */
+.session-del {
+  flex: none; background: none; border: none; padding: 0 2px;
+  font-size: 16px; line-height: 1; color: var(--muted); opacity: .5; cursor: pointer;
+}
+#sessions li:hover .session-del { opacity: 1; }
+.session-del:hover, .session-del:focus-visible { color: var(--error); opacity: 1; }
 
 .chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 .messages { flex: 1; overflow-y: auto; padding: 20px; display: grid; gap: 16px; align-content: start; }

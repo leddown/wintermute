@@ -100,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	authed("POST /api/v1/sessions/{id}/messages", s.handlePostMessage)
 	authed("POST /api/v1/sessions/{id}/tool_results", s.handleToolResults)
 	authed("GET /api/v1/sessions/{id}/audit", s.handleAudit)
+	authed("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 	authed("PATCH /api/v1/sessions/{id}/model", s.handleSetSessionModel)
 
 	// Model awareness: hardware, backends, catalog, discovery and planning.
@@ -251,6 +252,24 @@ func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
 		sessions = []store.Session{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sessions": sessions})
+}
+
+// handleDeleteSession discards a conversation, taking its messages and audit
+// rows with it. This is a user action only — it is never offered to the model
+// as a tool, for the same reason the utilities purges are not: the assistant
+// has no business deciding that a record of what it did should stop existing.
+func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
+	c := clientFrom(r.Context())
+	err := s.store.DeleteSession(r.Context(), r.PathValue("id"), c.ID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "session not found")
+		return
+	}
+	if err != nil {
+		s.fail(w, "delete session", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {

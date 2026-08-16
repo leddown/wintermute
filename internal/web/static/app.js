@@ -276,14 +276,42 @@ async function loadSessions() {
   list.innerHTML = '';
   for (const s of sessions) {
     const label = s.agent_id ? `${s.title || 'Untitled'} · ${s.agent_id}` : (s.title || 'Untitled');
+    // The row opens the session; the × deletes it. stopPropagation is what
+    // keeps the delete from also opening the conversation it just removed.
+    const del = el('button', {
+      class: 'session-del', text: '×', type: 'button',
+      title: `Delete "${s.title || 'Untitled'}"`,
+      'aria-label': `Delete ${s.title || 'Untitled'}`,
+      onclick: (e) => {
+        e.stopPropagation();
+        deleteSession(s);
+      },
+    });
     const li = el('li', {
-      text: label,
       title: label,
       class: s.id === state.sessionId ? 'active' : '',
       onclick: () => openSession(s.id).catch(showError),
-    });
+    }, el('span', { class: 'session-label', text: label }), del);
     list.append(li);
   }
+}
+
+// Discarding a conversation takes its messages and its audit rows with it, so
+// the prompt says so rather than asking about "a session" — the tool calls it
+// recorded are the part someone might actually want back, and they are the
+// part a title does not hint at.
+function deleteSession(s) {
+  const name = s.title ? `"${s.title}"` : 'this untitled conversation';
+  confirmDelete(`${name} and its transcript and tool audit trail`, async () => {
+    await api(`/api/v1/sessions/${s.id}`, { method: 'DELETE' });
+    // Deleting the open conversation leaves the pane showing a transcript that
+    // no longer exists, so clear it and fall back to the empty state.
+    if (state.sessionId === s.id) {
+      state.sessionId = null;
+      $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
+    }
+    await loadSessions();
+  });
 }
 
 async function newSession() {
@@ -3011,8 +3039,29 @@ function testAlertButton() {
 
 function renderAdminAppearance(body) {
   body.append(el('p', { class: 'muted', text:
-    'The theme is switched with the button in the top bar, which cycles Dark → ' +
-    'Matrix → Chaos. These settings are stored in this browser only.' }));
+    'These settings are stored in this browser only — the theme is a property ' +
+    'of the screen you are reading from, not of the server.' }));
+
+  body.append(el('div', { class: 'group-head', text: 'Theme' }));
+  // A select rather than the cycle button this replaced: in the top bar the
+  // control had to be one small target and the label doubled as the readout,
+  // but a settings pane has room to show all three and jump straight to one.
+  const theme = el('select', {
+    id: 'theme-select',
+    onchange: (e) => {
+      WintermuteTheme.set(e.target.value);
+      // Chaos samples the DOM it glitches, and the pane it was told about is
+      // the one being looked at right now.
+      WintermuteChaos.repaint();
+      toast(`Theme: ${WintermuteTheme.LABELS[WintermuteTheme.current()]}`);
+    },
+  }, WintermuteTheme.THEMES.map((name) => {
+    const opt = el('option', { value: name, text: WintermuteTheme.LABELS[name] });
+    if (name === WintermuteTheme.current()) opt.selected = true;
+    return opt;
+  }));
+  body.append(el('form', { class: 'row-form' },
+    el('span', { class: 'muted', text: 'Theme' }), theme));
 
   body.append(el('div', { class: 'group-head', text: 'Matrix rain' }));
   body.append(el('p', { class: 'muted', text:
