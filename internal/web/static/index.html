@@ -45,6 +45,7 @@
         <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="twire">twire</button>
         <button class="view-btn" data-view="company">Company</button>
+        <button class="view-btn" data-view="utilities">Utilities</button>
         <button class="view-btn" data-view="admin">Admin</button>
       </nav>
       <button id="theme-toggle-btn" class="link-btn">Theme: Dark</button>
@@ -265,6 +266,33 @@
             </div>
           </div>
           <div id="admin-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- Utilities: housekeeping, moved across from morpheus. -->
+      <section class="view" data-view="utilities">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Utilities</span></div>
+          <ul id="util-nav">
+            <li data-tab="diagnostics" class="active">Diagnostics</li>
+            <li data-tab="activity">Activity</li>
+            <li data-tab="usage">API usage</li>
+            <li data-tab="backup">Backup</li>
+            <li data-tab="maintenance">Maintenance</li>
+          </ul>
+          <p class="hint muted">Backups, database diagnostics and the two
+            operations that delete or rewrite data. None of these are offered to
+            the assistant as tools.</p>
+        </aside>
+
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="util-title">Diagnostics</h2>
+            <div class="pane-actions">
+              <button id="util-refresh" class="ghost-btn">Refresh</button>
+            </div>
+          </div>
+          <div id="util-body" class="pane-body"></div>
         </main>
       </section>
 

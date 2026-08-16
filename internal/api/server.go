@@ -17,6 +17,7 @@ import (
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
 	"wintermute/internal/twire"
+	"wintermute/internal/utilities"
 	"wintermute/internal/web"
 )
 
@@ -40,8 +41,11 @@ type Server struct {
 	// twire is the canary tripwire. Nil leaves its routes unregistered, the
 	// same way an absent CRM does.
 	twire *twire.Service
-	info  ServerInfo
-	log   *slog.Logger
+	// utilities is the housekeeping surface: backups, diagnostics, vacuum and
+	// pruning. Nil likewise leaves its routes off.
+	utilities *utilities.Service
+	info      ServerInfo
+	log       *slog.Logger
 }
 
 // New builds a Server. A zero Workspace disables those routes rather than
@@ -69,6 +73,12 @@ func (s *Server) WithKnowledge(svc *knowledge.Service, grcAvailable, webAvailabl
 // registered and the UI's twire view reports the module as unavailable.
 func (s *Server) WithTwire(svc *twire.Service) *Server {
 	s.twire = svc
+	return s
+}
+
+// WithUtilities attaches the housekeeping operations.
+func (s *Server) WithUtilities(svc *utilities.Service) *Server {
+	s.utilities = svc
 	return s
 }
 
@@ -122,6 +132,9 @@ func (s *Server) Handler() http.Handler {
 
 	// The canary tripwire — see twire.go.
 	s.registerTwireRoutes(authed)
+
+	// Backups, diagnostics and maintenance — see utilities.go.
+	s.registerUtilitiesRoutes(authed)
 
 	mux.Handle("/", web.Handler())
 

@@ -126,6 +126,7 @@ const loaders = {
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
   twire: () => loadTwire(),
+  utilities: () => loadUtilities(),
   admin: () => renderAdmin(),
 };
 
@@ -138,6 +139,9 @@ function switchView(name) {
     section.classList.toggle('active', section.dataset.view === name);
   }
   closeSidebar();
+  // The activity gauges poll on a timer. Leaving the view has to stop it, or
+  // the server keeps being asked for /proc readings nobody is looking at.
+  if (name !== 'utilities') stopActivityPolling();
   if (!loaded.has(name) && loaders[name]) {
     loaded.add(name);
     loaders[name]().catch((err) => { loaded.delete(name); showError(err); });
@@ -2976,4 +2980,375 @@ function renderAdminAppearance(body) {
     toast('Chaos settings saved');
   });
   body.append(chaosForm);
+}
+
+/* ---------- utilities ---------- */
+//
+// Housekeeping, moved across from morpheus: what the database looks like, what
+// the machine is doing right now, what the model calls have cost, and the three
+// operations an operator runs by hand — back up, vacuum, prune.
+//
+// The last two are destructive and are treated as such: prune asks for
+// confirmation naming the table and the window, and neither is exposed to the
+// assistant as a tool.
+
+const util = { tab: 'diagnostics' };
+
+// bytes() already exists for the admin view. fmtBytes here is its two-decimal
+// sibling for the larger figures this page deals in.
+function fmtBytes(n) {
+  const b = Number(n) || 0;
+  if (b < 1024) return `${b} B`;
+  if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+  if (b < 1024 * 1024 * 1024) return `${(b / 1024 / 1024).toFixed(1)} MB`;
+  return `${(b / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function fmtRate(n) {
+  return `${fmtBytes(n)}/s`;
+}
+
+function fmtUptime(seconds) {
+  const s = Math.floor(Number(seconds) || 0);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${s % 60}s`;
+}
+
+const num = (n) => (Number(n) || 0).toLocaleString();
+
+// meter draws a proportion as a bar. Used for disk capacity and for CPU, which
+// are the two figures on this page where "how close to full" reads faster than
+// the number itself.
+function meter(fraction) {
+  const pct = Math.max(0, Math.min(100, Math.round(fraction * 100)));
+  const fill = el('div', { class: 'meter-fill' });
+  fill.style.width = `${pct}%`;
+  // Green until it matters, amber when it is worth noticing, red when it is a
+  // problem. The thresholds are morpheus's.
+  fill.dataset.level = pct > 90 ? 'high' : pct > 70 ? 'mid' : 'low';
+  return el('div', { class: 'meter' }, fill);
+}
+
+function kv(label, value) {
+  return el('div', { class: 'kv' },
+    el('span', { class: 'muted', text: label }),
+    value && value.nodeType ? value : el('span', { text: String(value ?? '—') }));
+}
+
+async function loadUtilities() {
+  for (const li of document.querySelectorAll('#util-nav li')) {
+    li.addEventListener('click', () => {
+      for (const other of document.querySelectorAll('#util-nav li')) {
+        other.classList.toggle('active', other === li);
+      }
+      util.tab = li.dataset.tab;
+      renderUtilities().catch(showError);
+    });
+  }
+  $('util-refresh').addEventListener('click', () => renderUtilities().catch(showError));
+  await renderUtilities();
+}
+
+async function renderUtilities() {
+  // Any tab change leaves the activity tab, so the poller stops here rather
+  // than in each branch below.
+  stopActivityPolling();
+
+  const body = $('util-body');
+  body.textContent = '';
+  $('util-title').textContent = {
+    diagnostics: 'Diagnostics', activity: 'Activity', usage: 'API usage',
+    backup: 'Backup', maintenance: 'Maintenance',
+  }[util.tab];
+
+  if (util.tab === 'diagnostics') return renderDiagnostics(body);
+  if (util.tab === 'activity') return renderActivity(body);
+  if (util.tab === 'usage') return renderUtilAPIUsage(body);
+  if (util.tab === 'backup') return renderBackup(body);
+  return renderMaintenance(body);
+}
+
+/* ---------- diagnostics ---------- */
+
+async function renderDiagnostics(body) {
+  const info = await api('/api/v1/utilities/system-info');
+
+  body.append(el('div', { class: 'stats' },
+    stat(fmtUptime(info.uptime_seconds), 'Uptime'),
+    stat(fmtBytes(info.database_size_bytes), 'Database'),
+    stat(fmtBytes(info.wal_size_bytes), 'WAL'),
+    stat(info.go_version, 'Go')));
+
+  body.append(el('div', { class: 'group-head', text: 'Storage' }));
+  body.append(kv('Database file', el('code', { text: info.database_path || '—' })));
+
+  const disk = info.disk || {};
+  if (disk.total_bytes) {
+    body.append(kv(`Disk (${disk.path})`,
+      el('span', { text: `${fmtBytes(disk.used_bytes)} of ${fmtBytes(disk.total_bytes)} used, ${fmtBytes(disk.free_bytes)} free` })));
+    body.append(meter(disk.used_bytes / disk.total_bytes));
+  }
+  // The logical size is pages in use; the file on disk only shrinks on VACUUM,
+  // so the two diverge after a prune. Saying which one this is avoids the
+  // "I deleted everything and nothing got smaller" question.
+  body.append(el('p', { class: 'hint muted', text:
+    'Database size is pages in use, not the size of the file. Deleting rows frees ' +
+    'pages inside the file; the file itself only shrinks when you run a vacuum.' }));
+
+  const tables = info.tables || [];
+  if (!tables.length) return;
+  body.append(el('div', { class: 'group-head', text: 'Tables' }));
+  body.append(table(
+    ['Table', 'Rows', 'Size'],
+    tables.map((t) => [t.name, num(t.row_count), fmtBytes(t.size_bytes)]),
+    [false, true, true]));
+  body.append(el('p', { class: 'hint muted', text:
+    "Each table's size includes its indexes." }));
+}
+
+/* ---------- activity ---------- */
+
+let activityTimer = null;
+
+function stopActivityPolling() {
+  if (activityTimer) clearInterval(activityTimer);
+  activityTimer = null;
+}
+
+// renderActivity shows live CPU, network and disk rates.
+//
+// The panel is built once and then updated in place on each poll, rather than
+// re-rendered: replacing the DOM twice a second fights with text selection and
+// makes the numbers flicker.
+async function renderActivity(body) {
+  body.append(el('p', { class: 'muted', text:
+    'What the machine is doing right now, averaged over the last few seconds. ' +
+    'Rates are read from /proc and cost nothing to sample; this panel polls ' +
+    'only while it is on screen.' }));
+
+  const cpu = el('span', { text: '—' });
+  const cpuMeter = el('div', { class: 'meter' }, el('div', { class: 'meter-fill' }));
+  const netRx = el('span', { text: '—' });
+  const netTx = el('span', { text: '—' });
+  const diskRead = el('span', { text: '—' });
+  const diskWrite = el('span', { text: '—' });
+  const state = el('span', { class: 'muted', text: 'starting…' });
+
+  body.append(el('div', { class: 'group-head', text: 'CPU' }));
+  body.append(kv('Busy', cpu), cpuMeter);
+  body.append(el('div', { class: 'group-head', text: 'Network' }));
+  body.append(kv('Received', netRx), kv('Transmitted', netTx));
+  body.append(el('div', { class: 'group-head', text: 'Disk' }));
+  body.append(kv('Read', diskRead), kv('Written', diskWrite));
+  body.append(el('div', { class: 'hint' }, state));
+
+  async function poll() {
+    let s;
+    try {
+      s = await api('/api/v1/utilities/resources');
+    } catch (err) {
+      stopActivityPolling();
+      state.textContent = `stopped: ${err.message}`;
+      return;
+    }
+    if (s.warming) {
+      // The first reading has no predecessor to measure against, so it reports
+      // nothing rather than a zero that looks like an idle machine.
+      state.textContent = 'warming up — the first reading has nothing to compare against';
+      return;
+    }
+    state.textContent = 'live';
+    cpu.textContent = `${s.cpu_percent.toFixed(1)}%`;
+    cpuMeter.firstChild.style.width = `${Math.min(100, s.cpu_percent)}%`;
+    cpuMeter.firstChild.dataset.level = s.cpu_percent > 90 ? 'high' : s.cpu_percent > 70 ? 'mid' : 'low';
+    netRx.textContent = fmtRate(s.net_rx_bytes_per_sec);
+    netTx.textContent = fmtRate(s.net_tx_bytes_per_sec);
+    diskRead.textContent = fmtRate(s.disk_read_bytes_per_sec);
+    diskWrite.textContent = fmtRate(s.disk_write_bytes_per_sec);
+  }
+
+  await poll();
+  stopActivityPolling();
+  activityTimer = setInterval(() => { poll().catch(() => stopActivityPolling()); }, 2000);
+}
+
+/* ---------- api usage ---------- */
+
+const USAGE_LABELS = { forecast: 'Forecasts', enrichment: 'Deep dives', review: 'Position reviews' };
+
+async function renderUtilAPIUsage(body) {
+  const usage = await api('/api/v1/utilities/api-usage');
+  const sources = usage.sources || [];
+  const total = usage.total || {};
+
+  if (usage.note) {
+    body.append(el('div', { class: 'notice' }, el('span', { text: usage.note })));
+  }
+
+  if (!sources.length) {
+    body.append(el('div', { class: 'empty muted', text:
+      'No model calls recorded yet. Forecasts and position reviews record what ' +
+      'they cost; nothing else on this server does.' }));
+    return;
+  }
+
+  body.append(el('div', { class: 'stats' },
+    stat(num(total.request_count), 'Calls'),
+    stat(num(total.input_tokens), 'Input tokens'),
+    stat(num(total.output_tokens), 'Output tokens'),
+    stat(num(total.today_request_count), 'Calls today')));
+
+  body.append(table(
+    ['Kind', 'Calls', 'Input', 'Output', 'Calls today'],
+    sources.map((s) => [
+      USAGE_LABELS[s.name] || s.name,
+      num(s.request_count), num(s.input_tokens), num(s.output_tokens),
+      num(s.today_request_count),
+    ]),
+    [false, true, true, true, true]));
+
+  body.append(el('div', { class: 'group-head', text: 'Today' }));
+  body.append(kv('Tokens in / out',
+    `${num(total.today_input_tokens)} / ${num(total.today_output_tokens)}`));
+}
+
+/* ---------- backup ---------- */
+
+function renderBackup(body) {
+  body.append(el('p', { class: 'muted', text:
+    'Writes a consistent copy of the database into a timestamped directory ' +
+    'under the path you give. The copy is taken with SQLite’s VACUUM INTO, ' +
+    'so it is safe to run against the live server — unlike copying the file, ' +
+    'which can catch a write in progress.' }));
+  body.append(el('p', { class: 'hint muted', text:
+    'The path is on the server, not on this machine, and the server writes ' +
+    'wherever its own user can write.' }));
+
+  const dest = el('input', { placeholder: '/var/backups/wintermute', autocomplete: 'off' });
+  const submit = el('button', { type: 'submit', text: 'Back up now' });
+  const form = el('form', { class: 'row-form' }, dest, submit);
+  const result = el('div', { class: 'pane-body' });
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    if (!dest.value.trim()) {
+      showError(new Error('Destination directory is required.'));
+      return;
+    }
+    submit.disabled = true;
+    submit.textContent = 'Backing up…';
+    result.textContent = '';
+    try {
+      const res = await api('/api/v1/utilities/backup', {
+        method: 'POST',
+        body: JSON.stringify({ destination: dest.value.trim() }),
+      });
+      toast('Backup written');
+      result.append(el('div', { class: 'group-head', text: 'Written to' }));
+      result.append(el('code', { text: res.destination }));
+      result.append(table(['File', 'Size'],
+        (res.files || []).map((f) => [f.name, fmtBytes(f.size_bytes)]),
+        [false, true]));
+    } catch (err) {
+      showError(err);
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Back up now';
+    }
+  });
+
+  body.append(form, result);
+}
+
+/* ---------- maintenance ---------- */
+
+const PRUNE_TARGETS = [
+  { value: 'sessions', label: 'Conversations (and their messages and audit rows)' },
+  { value: 'tool_audit', label: 'Tool audit rows only (keeps the conversations)' },
+  { value: 'fintech_ai_usage', label: 'Recorded model-call costs' },
+];
+
+function renderMaintenance(body) {
+  /* ---- vacuum ---- */
+  body.append(el('div', { class: 'group-head', text: 'Vacuum' }));
+  body.append(el('p', { class: 'muted', text:
+    'Rebuilds the database file, returning space freed by deleted rows to the ' +
+    'filesystem, and refreshes the query planner’s statistics. The database ' +
+    'is locked for the duration, so a large one is best done when nothing else ' +
+    'is using it.' }));
+
+  const vacuumBtn = el('button', { text: 'Run vacuum' });
+  const vacuumResult = el('div', { class: 'hint muted' });
+  vacuumBtn.addEventListener('click', async () => {
+    vacuumBtn.disabled = true;
+    vacuumBtn.textContent = 'Running…';
+    vacuumResult.textContent = '';
+    try {
+      const res = await api('/api/v1/utilities/vacuum', { method: 'POST' });
+      vacuumResult.textContent = res.reclaimed_bytes > 0
+        ? `Done in ${res.duration_ms} ms — reclaimed ${fmtBytes(res.reclaimed_bytes)} ` +
+          `(${fmtBytes(res.before_bytes)} → ${fmtBytes(res.after_bytes)}).`
+        : `Done in ${res.duration_ms} ms — nothing to reclaim, the file was already compact.`;
+      toast('Vacuum complete');
+    } catch (err) {
+      showError(err);
+    } finally {
+      vacuumBtn.disabled = false;
+      vacuumBtn.textContent = 'Run vacuum';
+    }
+  });
+  body.append(el('div', { class: 'row-form' }, vacuumBtn), vacuumResult);
+
+  /* ---- prune ---- */
+  body.append(el('div', { class: 'group-head', text: 'Prune' }));
+  body.append(el('p', { class: 'muted', text:
+    'Permanently deletes rows older than the given age. Pruning conversations ' +
+    'takes their messages and tool audit rows with them.' }));
+
+  const target = el('select', {}, PRUNE_TARGETS.map((t) =>
+    el('option', { value: t.value, text: t.label })));
+  const days = el('input', { type: 'number', min: '1', value: '90' });
+  const pruneBtn = el('button', { type: 'submit', text: 'Prune' });
+  const pruneForm = el('form', { class: 'row-form' },
+    target, el('span', { class: 'muted', text: 'older than' }), days,
+    el('span', { class: 'muted', text: 'days' }), pruneBtn);
+  const pruneResult = el('div', { class: 'hint muted' });
+
+  pruneForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const n = parseInt(days.value, 10);
+    if (!Number.isInteger(n) || n < 1) {
+      showError(new Error('Days must be at least 1.'));
+      return;
+    }
+    const label = PRUNE_TARGETS.find((t) => t.value === target.value).label;
+    // Named in full, because this is the one control on the page that destroys
+    // data with no copy anywhere and no undo.
+    if (!confirm(`Permanently delete "${label}" older than ${n} days?\n\nThis cannot be undone.`)) return;
+
+    pruneBtn.disabled = true;
+    pruneBtn.textContent = 'Pruning…';
+    pruneResult.textContent = '';
+    try {
+      const res = await api('/api/v1/utilities/prune', {
+        method: 'POST',
+        body: JSON.stringify({ target: target.value, older_than_days: n }),
+      });
+      const rows = Number(res.deleted_rows) || 0;
+      pruneResult.textContent =
+        `Deleted ${num(rows)} row${rows === 1 ? '' : 's'} from ${res.target} older than ${res.older_than_days} days. ` +
+        'Run a vacuum to return the space to the filesystem.';
+      toast(`Pruned ${num(rows)} row${rows === 1 ? '' : 's'}`);
+    } catch (err) {
+      showError(err);
+    } finally {
+      pruneBtn.disabled = false;
+      pruneBtn.textContent = 'Prune';
+    }
+  });
+  body.append(pruneForm, pruneResult);
 }

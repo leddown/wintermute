@@ -30,6 +30,7 @@ import (
 	"wintermute/internal/todo"
 	"wintermute/internal/tool"
 	"wintermute/internal/twire"
+	"wintermute/internal/utilities"
 	"wintermute/internal/websearch"
 )
 
@@ -208,9 +209,15 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		info.PoolBackends = cfg.Pool.Backends
 	}
 
+	// Housekeeping: backups, diagnostics, maintenance and pruning. It is given
+	// the database path as well as the handle, because a backup copies that
+	// file and the diagnostics measure the disk holding it.
+	utilitiesService := utilities.NewService(st.DB(), cfg.DatabasePath)
+
 	srv := api.New(ag, st, tools, catalog, workspace, info, log).
 		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil).
-		WithTwire(twireService)
+		WithTwire(twireService).
+		WithUtilities(utilitiesService)
 
 	return &App{
 		cfg:     cfg,

@@ -490,3 +490,55 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
   padding: 8px 10px; width: 7rem;
 }
 .row-form span.muted { align-self: center; font-size: 12px; }
+
+/* ---------- utilities ----------
+
+   The housekeeping view's own pieces. Its tables, stat tiles and row-forms are
+   the ones the rest of the app already has. */
+
+/* A labelled reading: the label on the left, the value hard right. Used down
+   the diagnostics and activity panels, where the eye wants a column of values
+   to scan rather than a column of sentences. */
+.kv {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+.kv:last-of-type { border-bottom: none; }
+.kv code { overflow-wrap: anywhere; }
+
+/* A proportion, for disk capacity and CPU. The colour is set from the data
+   rather than in script, so the thresholds live here with the rest of the
+   palette instead of as hex literals in app.js. */
+.meter {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+  margin: 2px 0 12px;
+}
+.meter-fill {
+  height: 100%;
+  width: 0;
+  border-radius: 999px;
+  background: var(--gain);
+  /* Eased so a CPU gauge polling every two seconds reads as movement rather
+     than as a series of jumps. */
+  transition: width .4s ease;
+}
+.meter-fill[data-level="mid"] { background: #e0a458; }
+.meter-fill[data-level="high"] { background: var(--error); }
+
+/* The utilities panels are prose and readings rather than a wide table, so
+   they get a measure — a disk path set across 2000px of monitor is not easier
+   to read for the extra room. The tables inside are exempt: they have columns
+   that genuinely want the width. */
+.view[data-view="utilities"] .pane-body > p,
+.view[data-view="utilities"] .pane-body > .kv,
+.view[data-view="utilities"] .pane-body > .meter {
+  max-width: 60rem;
+}
