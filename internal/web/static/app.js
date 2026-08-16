@@ -139,7 +139,6 @@ const loaders = {
   accounting: () => renderAccounting(),
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
-  twire: () => loadTwire(),
   utilities: () => loadUtilities(),
   admin: () => renderAdmin(),
 };
@@ -2842,33 +2841,11 @@ function ratingLabel(rating) {
 // hand on the way into an innerHTML template. Here there is no such template to
 // escape it for.
 
-const tw = { tab: 'canaries', status: null, binaryPath: '' };
-
-async function loadTwire() {
-  for (const li of document.querySelectorAll('#tw-nav li')) {
-    li.addEventListener('click', () => {
-      for (const other of document.querySelectorAll('#tw-nav li')) {
-        other.classList.toggle('active', other === li);
-      }
-      tw.tab = li.dataset.tab;
-      renderTwire().catch(showError);
-    });
-  }
-  $('tw-refresh').addEventListener('click', () => renderTwire().catch(showError));
-  await renderTwire();
-}
-
-async function renderTwire() {
-  const body = $('tw-body');
-  body.textContent = '';
-  $('tw-title').textContent = {
-    canaries: 'Canaries', events: 'Connection attempts', alerts: 'Email alerts',
-  }[tw.tab];
-
-  if (tw.tab === 'canaries') return renderCanaries(body);
-  if (tw.tab === 'events') return renderTwireEvents(body);
-  return renderTwireAlerts(body);
-}
+// The tripwire is a group of tabs inside the Utilities view rather than a view
+// of its own, so it has no loader and no tab state — renderUtilities() routes
+// to the three renderers below. What survives here is the state a tab carries
+// between renders: the binary path the privilege notice quotes back.
+const tw = { status: null, binaryPath: '' };
 
 async function renderCanaries(body) {
   const status = await api('/api/v1/twire/status');
@@ -2928,7 +2905,7 @@ function canaryActions(c) {
     const action = c.enabled ? 'disable' : 'enable';
     try {
       await api(`/api/v1/twire/canaries/${encodeURIComponent(c.key)}/${action}`, { method: 'POST' });
-      await renderTwire();
+      await renderUtilities();
     } catch (err) {
       toggle.disabled = false;
       showError(err);
@@ -2944,7 +2921,7 @@ function canaryActions(c) {
       if (!confirm(`Delete the custom canary on port ${c.port}? Recorded events are kept.`)) return;
       try {
         await api(`/api/v1/twire/canaries/${encodeURIComponent(c.key)}`, { method: 'DELETE' });
-        await renderTwire();
+        await renderUtilities();
       } catch (err) {
         showError(err);
       }
@@ -3003,7 +2980,7 @@ function addCanaryForm() {
       });
       toast(`Added a canary on port ${n}`);
       name.value = port.value = description.value = banner.value = '';
-      await renderTwire();
+      await renderUtilities();
     } catch (err) {
       showError(err);
     }
@@ -3092,7 +3069,7 @@ async function renderTwireAlerts(body) {
     try {
       await api('/api/v1/twire/alert-config', { method: 'PUT', body: JSON.stringify(payload) });
       toast('Alert settings saved');
-      await renderTwire();
+      await renderUtilities();
     } catch (err) {
       showError(err);
     }
@@ -3260,10 +3237,30 @@ function kv(label, value) {
     value && value.nodeType ? value : el('span', { text: String(value ?? '—') }));
 }
 
+// Both sidebar groups are `.util-tabs`, so one selector binds them and one
+// pass clears `active` across the pair — a tripwire tab deselects the
+// housekeeping tab and vice versa, because they share the pane.
+const UTIL_TITLES = {
+  diagnostics: 'Diagnostics', activity: 'Activity', usage: 'API usage',
+  backup: 'Backup', maintenance: 'Maintenance',
+  canaries: 'Canaries', events: 'Connection attempts', alerts: 'Email alerts',
+};
+
+// The sidebar hint follows the group in view: the housekeeping note is wrong
+// for a canary page, and the canary note is what makes the tripwire tabs
+// legible to someone who has never opened them.
+const UTIL_HINTS = {
+  utilities: 'Backups, database diagnostics and the two operations that ' +
+    'delete or rewrite data. None of these are offered to the assistant as tools.',
+  twire: 'Canaries impersonate common services on their usual ports. Nothing ' +
+    'on a home network should connect to them, so any hit is a strong sign of ' +
+    'scanning or probing.',
+};
+
 async function loadUtilities() {
-  for (const li of document.querySelectorAll('#util-nav li')) {
+  for (const li of document.querySelectorAll('.util-tabs li')) {
     li.addEventListener('click', () => {
-      for (const other of document.querySelectorAll('#util-nav li')) {
+      for (const other of document.querySelectorAll('.util-tabs li')) {
         other.classList.toggle('active', other === li);
       }
       util.tab = li.dataset.tab;
@@ -3281,11 +3278,16 @@ async function renderUtilities() {
 
   const body = $('util-body');
   body.textContent = '';
-  $('util-title').textContent = {
-    diagnostics: 'Diagnostics', activity: 'Activity', usage: 'API usage',
-    backup: 'Backup', maintenance: 'Maintenance',
-  }[util.tab];
+  $('util-title').textContent = UTIL_TITLES[util.tab];
 
+  if (util.tab === 'canaries' || util.tab === 'events' || util.tab === 'alerts') {
+    $('util-hint').textContent = UTIL_HINTS.twire;
+    if (util.tab === 'canaries') return renderCanaries(body);
+    if (util.tab === 'events') return renderTwireEvents(body);
+    return renderTwireAlerts(body);
+  }
+
+  $('util-hint').textContent = UTIL_HINTS.utilities;
   if (util.tab === 'diagnostics') return renderDiagnostics(body);
   if (util.tab === 'activity') return renderActivity(body);
   if (util.tab === 'usage') return renderUtilAPIUsage(body);

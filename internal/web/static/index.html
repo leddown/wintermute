@@ -43,7 +43,6 @@
         <button class="view-btn" data-view="crm">CRM</button>
         <button class="view-btn" data-view="accounting">Accounts</button>
         <button class="view-btn" data-view="portfolio">Portfolio</button>
-        <button class="view-btn" data-view="twire">twire</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="utilities">Utilities</button>
         <button class="view-btn" data-view="admin">Admin</button>
@@ -169,31 +168,6 @@
         </main>
       </section>
 
-      <!-- twire: the canary tripwire moved across from morpheus. -->
-      <section class="view" data-view="twire">
-        <aside class="sidebar">
-          <div class="sidebar-head"><span class="muted">twire</span></div>
-          <ul id="tw-nav">
-            <li data-tab="canaries" class="active">Canaries</li>
-            <li data-tab="events">Connection attempts</li>
-            <li data-tab="alerts">Email alerts</li>
-          </ul>
-          <p class="hint muted">Canaries impersonate common services on their
-            usual ports. Nothing on a home network should connect to them, so
-            any hit is a strong sign of scanning or probing.</p>
-        </aside>
-
-        <main class="pane">
-          <div class="pane-head">
-            <h2 id="tw-title">Canaries</h2>
-            <div class="pane-actions">
-              <button id="tw-refresh" class="ghost-btn">Refresh</button>
-            </div>
-          </div>
-          <div id="tw-body" class="pane-body"></div>
-        </main>
-      </section>
-
       <!-- CRM -->
       <section class="view" data-view="crm">
         <aside class="sidebar">
@@ -268,20 +242,30 @@
         </main>
       </section>
 
-      <!-- Utilities: housekeeping, moved across from morpheus. -->
+      <!-- Utilities: housekeeping, moved across from morpheus. The tripwire is
+           the second group in the same sidebar — one pane, two sets of tabs,
+           tracked by a single `util.tab`. -->
       <section class="view" data-view="utilities">
         <aside class="sidebar">
           <div class="sidebar-head"><span class="muted">Utilities</span></div>
-          <ul id="util-nav">
+          <ul id="util-nav" class="util-tabs">
             <li data-tab="diagnostics" class="active">Diagnostics</li>
             <li data-tab="activity">Activity</li>
             <li data-tab="usage">API usage</li>
             <li data-tab="backup">Backup</li>
             <li data-tab="maintenance">Maintenance</li>
           </ul>
-          <p class="hint muted">Backups, database diagnostics and the two
-            operations that delete or rewrite data. None of these are offered to
-            the assistant as tools.</p>
+          <div class="sidebar-head" style="margin-top:16px;">
+            <span class="muted">Tripwire</span>
+          </div>
+          <ul id="tw-nav" class="util-tabs">
+            <li data-tab="canaries">Canaries</li>
+            <li data-tab="events">Connection attempts</li>
+            <li data-tab="alerts">Email alerts</li>
+          </ul>
+          <p id="util-hint" class="hint muted">Backups, database diagnostics and
+            the two operations that delete or rewrite data. None of these are
+            offered to the assistant as tools.</p>
         </aside>
 
         <main class="pane">
