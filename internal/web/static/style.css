@@ -436,7 +436,10 @@ button:disabled { opacity: .5; cursor: default; }
 /* The waiting indicator that stands in for the reply while a turn is in
    flight. It occupies an assistant bubble so the transcript keeps its shape
    when the real reply replaces it, rather than jumping. */
-.msg.pending .bubble { color: var(--muted); }
+.msg.pending .bubble { color: var(--muted); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* Elapsed time and what the turn is doing. Tabular figures so a ticking
+   second does not shuffle the text beside it. */
+.pending-status { font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .dots { display: inline-flex; gap: 5px; align-items: center; height: 1em; }
 .dots i {
   width: 6px; height: 6px; border-radius: 50%;
@@ -587,6 +590,70 @@ dialog h3 { margin: 0; font-size: 15px; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: var(--accent); outline: none; }
 .field textarea { min-height: 80px; resize: vertical; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* ---------- chat dock ----------
+
+   Core → Chat slid out over whatever view is open. Below the fritz overlay
+   (z-index 40) on purpose, so the 40K theme's scanlines run across it like
+   everything else, and below the toast so a message still lands on top. */
+.dock-toggle {
+  position: fixed; right: 0; top: 50%; transform: translateY(-50%);
+  z-index: 30;
+  display: flex; align-items: center; gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border); border-right: none;
+  border-radius: var(--radius) 0 0 var(--radius);
+  background: var(--surface-2); color: var(--text);
+  font-size: 12px; cursor: pointer;
+}
+.dock-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.dock-toggle-label { writing-mode: vertical-rl; letter-spacing: 0.08em; }
+/* Open, the handle would sit under the panel; it is the one control the dock
+   already carries its own version of. */
+.dock-toggle[aria-expanded="true"] { display: none; }
+
+/* Starts below the topbar rather than at the ceiling: the point of the dock is
+   to ask something *while* working in another view, which means the view
+   switcher and Sign out have to stay reachable with it open. 53px is the
+   topbar height the off-canvas sidebar already keys off. */
+.dock {
+  position: fixed; top: 53px; right: 0; bottom: 0;
+  z-index: 30;
+  width: min(460px, 100%);
+  display: flex; flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -18px 0 40px rgba(0, 0, 0, 0.45);
+  transform: translateX(100%);
+  transition: transform 0.18s ease;
+}
+.dock.open { transform: none; }
+
+.dock-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.dock-head strong { font-size: 13px; }
+/* The agent name takes the slack so Close stays pinned right. */
+.dock-head #dock-agent { flex: 1; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* #chat is moved in here whole, and it is `flex: 1` already — the slot just
+   has to be a column for it to fill. */
+.dock-slot { flex: 1; display: flex; min-height: 0; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dock { transition: none; }
+}
+
+/* At the width where the topbar wraps and the sidebar goes off-canvas, the
+   dock takes the whole screen: a 460px panel over a 600px window is just a
+   worse version of the view it covers, and the wrapped topbar is no longer
+   53px tall for the offset above to be right. Close is in the dock head, so
+   nothing is unreachable. */
+@media (max-width: 720px) {
+  .dock { top: 0; width: 100%; border-left: none; }
+}
 
 /* ---------- system gauges ----------
 

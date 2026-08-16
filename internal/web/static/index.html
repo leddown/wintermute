@@ -87,7 +87,11 @@
           </div>
         </aside>
 
-        <main class="chat core-pane" data-pane="chat">
+        <!-- This element is moved bodily into the chat dock when the dock is
+             opened, and put back when it closes. Moving it rather than
+             building a second transcript is what keeps one composer, one
+             handler and one scroll position — see openDock() in app.js. -->
+        <main id="chat" class="chat core-pane" data-pane="chat">
           <div id="messages" class="messages">
             <div class="empty muted">Ask about your media library, your tasks, or anything else.</div>
           </div>
@@ -97,6 +101,18 @@
           </form>
           <div id="chat-agent" class="chat-agent"></div>
           <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
+        </main>
+
+        <!-- Stands in for the chat while the dock has it. Deliberately carries
+             no data-pane: showCorePane() drives the rest of the group by that
+             attribute, and this one depends on the dock as well as the tab. -->
+        <main id="chat-away" class="pane" hidden>
+          <div class="pane-body">
+            <div class="empty muted">
+              <p>This conversation is open in the side panel.</p>
+              <button id="chat-return" class="ghost-btn">Bring it back here</button>
+            </div>
+          </div>
         </main>
 
         <main class="pane core-pane" data-pane="agents" hidden>
@@ -312,6 +328,24 @@
         </main>
       </section>
     </div>
+
+    <!-- Chat dock: Core → Chat, slid out over whatever view is open, so a
+         question can be asked without navigating away from the thing that
+         prompted it. The transcript is not duplicated here — the #chat element
+         is moved into #dock-slot and back. -->
+    <button id="dock-toggle" class="dock-toggle" aria-controls="dock"
+            aria-expanded="false" title="Ask Wintermute (Esc closes)">
+      <span aria-hidden="true">✦</span><span class="dock-toggle-label">Chat</span>
+    </button>
+
+    <aside id="dock" class="dock" aria-label="Chat" hidden>
+      <div class="dock-head">
+        <strong>Chat</strong>
+        <span id="dock-agent" class="muted"></span>
+        <button id="dock-close" class="link-btn" aria-label="Close chat panel">Close</button>
+      </div>
+      <div id="dock-slot" class="dock-slot"></div>
+    </aside>
 
     <!-- Live CPU / network / disk dials, brought across from morpheus. One
          element for the whole app rather than a copy per view: it is pinned to

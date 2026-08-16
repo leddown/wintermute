@@ -152,6 +152,11 @@ function switchView(name) {
     section.classList.toggle('active', section.dataset.view === name);
   }
   closeSidebar();
+  // Navigating to the chat's own pane is a request to see the conversation
+  // full size, so the dock hands it back — the same rule showCorePane()
+  // applies when the tab is clicked directly.
+  if (name === 'core' && core.pane === 'chat' && dock.open) closeDock();
+  $('chat-away').hidden = !(dock.open && name === 'core' && core.pane === 'chat');
   // The activity gauges poll on a timer. Leaving the view has to stop it, or
   // the server keeps being asked for /proc readings nobody is looking at.
   if (name !== 'utilities') stopActivityPolling();
@@ -193,6 +198,11 @@ function showCorePane(name) {
   for (const node of document.querySelectorAll('.view[data-view="core"] .core-pane')) {
     node.hidden = node.dataset.pane !== name;
   }
+  // Arriving at the chat tab while the dock holds the transcript is a request
+  // to look at the conversation, and the pane it belongs in is now on screen —
+  // so the dock hands it back rather than leaving the tab showing a stand-in.
+  if (name === 'chat' && dock.open) closeDock();
+  $('chat-away').hidden = !(name === 'chat' && dock.open);
   if (name === 'agents' && !core.agentsLoaded) {
     core.agentsLoaded = true;
     loadAgents().catch((err) => { core.agentsLoaded = false; showError(err); });
@@ -200,11 +210,80 @@ function showCorePane(name) {
 }
 
 // Whether the transcript is on screen. showError() writes a failed turn into
-// the transcript rather than a toast, but only when the user can see it —
-// which is now a view *and* a pane, not a view alone.
+// the transcript rather than a toast, but only when the user can see it — and
+// in the dock it is visible over every view, not just Core.
 function chatVisible() {
-  return state.view === 'core' && core.pane === 'chat';
+  return dock.open || (state.view === 'core' && core.pane === 'chat');
 }
+
+/* ---------- chat dock ---------- */
+//
+// Core → Chat, slid out from the right over whatever view is open, so a
+// question can be asked without navigating away from the thing that prompted
+// it.
+//
+// The transcript is not duplicated. #chat is *moved* into the dock and moved
+// back on close, which is what keeps one composer, one submit handler, one
+// scroll position and one set of listeners — a second copy would mean either
+// duplicate ids or rewriting every $('messages') in the file. Listeners are
+// bound to the elements themselves, so they survive the move untouched.
+//
+// Because the element can only be in one place, the dock and the Core chat
+// pane are mutually exclusive: while the dock has it, that pane shows
+// #chat-away in its place.
+const dock = { open: false, home: null, next: null };
+
+function openDock() {
+  if (dock.open) return;
+  const chat = $('chat');
+  // Remember exactly where it came from, so closing puts it back in order
+  // rather than appending it after the agents pane.
+  dock.home = chat.parentElement;
+  dock.next = chat.nextElementSibling;
+  dock.open = true;
+
+  chat.hidden = false;
+  $('dock-slot').append(chat);
+  $('dock').hidden = false;
+  // One frame between unhiding and the class, or the panel is already at its
+  // final position when the transition is applied and nothing slides.
+  requestAnimationFrame(() => $('dock').classList.add('open'));
+  $('dock-toggle').setAttribute('aria-expanded', 'true');
+  $('chat-away').hidden = !(state.view === 'core' && core.pane === 'chat');
+  // The composer strip travels with #chat, so it needs no re-render; the dock
+  // head says which agent is answering, which the strip alone would not make
+  // obvious once it is floating over an unrelated view.
+  const agent = (state.agents || []).find((a) => a.id === state.chatAgent);
+  $('dock-agent').textContent = agent ? agent.name : '';
+  $('input').focus();
+}
+
+function closeDock() {
+  if (!dock.open) return;
+  dock.open = false;
+  const chat = $('chat');
+  dock.home.insertBefore(chat, dock.next);
+  // Back in the pane group, visibility is the tab's business again.
+  chat.hidden = core.pane !== 'chat';
+  $('dock').classList.remove('open');
+  $('dock-toggle').setAttribute('aria-expanded', 'false');
+  $('chat-away').hidden = true;
+  // Hidden only after the slide finishes, or it vanishes instead of leaving.
+  setTimeout(() => { if (!dock.open) $('dock').hidden = true; }, 200);
+}
+
+function toggleDock() {
+  if (dock.open) closeDock();
+  else openDock();
+}
+
+$('dock-toggle').addEventListener('click', toggleDock);
+$('dock-close').addEventListener('click', closeDock);
+$('chat-return').addEventListener('click', closeDock);
+document.addEventListener('keydown', (e) => {
+  // Esc closes the dock, but not while a dialog is doing its own Esc handling.
+  if (e.key === 'Escape' && dock.open && !document.querySelector('dialog[open]')) closeDock();
+});
 
 for (const li of document.querySelectorAll('.core-tabs li')) {
   li.addEventListener('click', () => {
@@ -604,10 +683,104 @@ function appendPending() {
   const node = el('div', { class: 'msg assistant pending' },
     el('div', { class: 'role', text: 'assistant' }),
     el('div', { class: 'bubble' },
-      el('span', { class: 'dots' }, el('i'), el('i'), el('i'))));
+      el('span', { class: 'dots' }, el('i'), el('i'), el('i')),
+      el('span', { class: 'pending-status' })));
   box.append(node);
   box.scrollTop = box.scrollHeight;
   return node;
+}
+
+/* ---------- turn progress ---------- */
+//
+// A POST to /messages does not return until the whole turn is finished, and a
+// turn can run the model several times over with tool calls in between. From
+// the browser that is one long silence, and three dots cannot tell "thinking
+// hard" apart from "the backend died ten seconds ago".
+//
+// There is nothing to invent here, because the server already writes as it
+// goes: the agent loop appends each assistant message and each tool result to
+// SQLite before the next iteration (it has to — the transcript is replayed
+// from the database every time round). So GET /messages *during* a turn
+// returns the work so far, and polling it is a real progress feed rather than
+// a guess.
+//
+// The poll doubles as the liveness check the numbers alone would not give: if
+// it comes back, the server is answering, and if it stops the status says so
+// instead of leaving a frozen count that looks the same as a hang.
+
+const TURN_TICK_MS = 1000;   // how often the elapsed figure moves
+const TURN_POLL_MS = 4000;   // how often the transcript is re-read
+// How long without a new message before the status stops implying progress.
+// Comfortably longer than a fast tool call, short enough to notice a stall.
+const TURN_QUIET_MS = 20000;
+
+function elapsedLabel(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
+}
+
+// The turn in progress is everything after the last user message, so the step
+// count is exact without having to record a baseline before sending.
+function describeTurn(messages) {
+  let i = messages.length - 1;
+  while (i >= 0 && messages[i].role !== 'user') i--;
+  const turn = messages.slice(i + 1);
+  const steps = turn.filter((m) => m.role === 'assistant').length;
+  const last = turn[turn.length - 1];
+
+  if (!last) return 'sent — waiting for the model';
+  if (last.role === 'assistant' && last.tool_calls && last.tool_calls.length) {
+    return `step ${steps} · running ${last.tool_calls.map((c) => c.name).join(', ')}`;
+  }
+  if (last.role === 'tool') return `step ${steps} · tool returned, back to the model`;
+  return `step ${steps} · writing the reply`;
+}
+
+// watchTurn drives the status line under the dots until the caller stops it.
+// Returns the stop function; calling it twice is harmless.
+function watchTurn(node, sessionId) {
+  const label = node.querySelector('.pending-status');
+  const started = Date.now();
+  let changedAt = Date.now();
+  let seen = -1;
+  let note = 'sent — waiting for the model';
+  let warn = '';
+
+  function paint() {
+    const quiet = Date.now() - changedAt;
+    const stalled = quiet > TURN_QUIET_MS && !warn
+      ? ` · quiet for ${elapsedLabel(quiet)}`
+      : '';
+    label.textContent = `${elapsedLabel(Date.now() - started)} · ${note}${warn}${stalled}`;
+  }
+
+  async function poll() {
+    try {
+      const { messages } = await api(`/api/v1/sessions/${sessionId}/messages`);
+      const list = messages || [];
+      if (list.length !== seen) {
+        seen = list.length;
+        changedAt = Date.now();
+      }
+      note = describeTurn(list);
+      warn = '';
+    } catch {
+      // Only the progress read failed — the turn request itself is still open,
+      // so this is a warning rather than a reason to give up on the turn.
+      warn = ' · server not answering, still retrying';
+    }
+    paint();
+  }
+
+  paint();
+  const tick = setInterval(paint, TURN_TICK_MS);
+  const timer = setInterval(() => { poll(); }, TURN_POLL_MS);
+  // One read straight away, so the first status is real rather than a guess
+  // that sits there for four seconds.
+  poll();
+
+  return () => { clearInterval(tick); clearInterval(timer); };
 }
 
 function showError(err) {
@@ -638,6 +811,7 @@ $('composer').addEventListener('submit', async (e) => {
   input.style.height = 'auto';
 
   let pending = null;
+  let stopWatch = null;
   try {
     // The session has to exist *before* the message is echoed. newSession()
     // resets the transcript to its empty-state hint, so echoing first meant
@@ -646,11 +820,14 @@ $('composer').addEventListener('submit', async (e) => {
     if (!state.sessionId) await newSession();
     appendMessage({ role: 'user', content: text });
     pending = appendPending();
+    stopWatch = watchTurn(pending, state.sessionId);
     // client_tools is intentionally empty: a browser executes nothing locally.
     const turn = await api(`/api/v1/sessions/${state.sessionId}/messages`, {
       method: 'POST',
       body: JSON.stringify({ text, client_tools: [] }),
     });
+    stopWatch();
+    stopWatch = null;
     pending.remove();
     pending = null;
     if (turn.reply) appendMessage({ role: 'assistant', content: turn.reply });
@@ -668,8 +845,10 @@ $('composer').addEventListener('submit', async (e) => {
   } catch (err) {
     showError(err);
   } finally {
-    // The indicator has to go whatever happened, including a failure before
-    // the request was ever made — otherwise it spins under a dead turn.
+    // Both have to go whatever happened, including a failure before the
+    // request was ever made — otherwise the indicator spins under a dead turn
+    // and the poller keeps asking about a session nobody is waiting on.
+    if (stopWatch) stopWatch();
     if (pending) pending.remove();
     state.sending = false;
     $('send').disabled = false;
