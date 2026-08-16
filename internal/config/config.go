@@ -111,6 +111,29 @@ type Config struct {
 	FintechScanInterval   time.Duration
 	FintechReviewInterval time.Duration
 
+	// Secret is WINTERMUTE_SECRET, the key material for the one thing this
+	// server stores that has to be both kept safe and read back again: the SMTP
+	// App Password behind twire's email alerts. See internal/twire/crypto.go
+	// for why that one credential earns a key when the fintech keys above are
+	// simply never stored.
+	//
+	// It is optional, and all of twire works without it — canaries listen, hits
+	// are recorded, and alerting can be configured from the SMTP_* variables
+	// below instead. Unset, only saving a password through the UI is refused,
+	// rather than the password being written somewhere unprotected.
+	Secret string
+
+	// twire's email-alert defaults, sent via Google SMTP (the host and port are
+	// hard-coded, so only credentials and recipients are needed). All optional:
+	// these seed the alert configuration at startup, and a configuration saved
+	// in the UI overrides them from then on. SMTP_PASSWORD must be a Google App
+	// Password — Google rejects account passwords here.
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string
+	// TwireAlertTo is a comma-separated recipient list.
+	TwireAlertTo string
+
 	// BackendProbeInterval is how often every backend is re-probed for health.
 	// Probing costs one cheap inventory request per backend, and without it a
 	// backend's recorded status is frozen at the last manual refresh — a host
@@ -196,7 +219,16 @@ func Load() (*Config, error) {
 		FintechForecastBackend: strings.TrimSpace(os.Getenv("FINTECH_FORECAST_BACKEND")),
 		FintechScanInterval:    fintechScan,
 		FintechReviewInterval:  fintechReview,
-		BackendProbeInterval:   probeInterval,
+
+		Secret:       strings.TrimSpace(os.Getenv("WINTERMUTE_SECRET")),
+		SMTPUsername: strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
+		// Not trimmed: an App Password is a credential, and silently altering
+		// one is how a login fails for a reason nobody can see.
+		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
+		SMTPFrom:     strings.TrimSpace(os.Getenv("SMTP_FROM")),
+		TwireAlertTo: strings.TrimSpace(os.Getenv("TWIRE_ALERT_TO")),
+
+		BackendProbeInterval: probeInterval,
 	}
 
 	if cfg.DefaultBackend == "" {

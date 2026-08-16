@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"wintermute/internal/accounting"
@@ -28,6 +29,7 @@ import (
 	"wintermute/internal/store"
 	"wintermute/internal/todo"
 	"wintermute/internal/tool"
+	"wintermute/internal/twire"
 	"wintermute/internal/websearch"
 )
 
@@ -41,6 +43,9 @@ type App struct {
 	// fintech is held so Run can start its background passes alongside the
 	// server, and stop them with it.
 	fintech *fintech.Service
+	// twire is held for the same reason: its canary listeners are opened by
+	// Run and closed when the context is cancelled.
+	twire *twire.Service
 }
 
 // buildRouter turns the configured backends into live providers.
@@ -158,6 +163,15 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("register fintech tools: %w", err)
 	}
 
+	// The canary tripwire, moved here from morpheus. Read-only for the
+	// assistant: it can report what tripped, and cannot open a listening socket
+	// or touch the SMTP credential.
+	twireService := buildTwire(cfg, st, log)
+	if err := twire.Register(tools, twireService); err != nil {
+		st.Close()
+		return nil, fmt.Errorf("register twire tools: %w", err)
+	}
+
 	// Agent profiles: the document libraries, and the external sources a
 	// profile may consult. The scoper is what makes a profile mean something —
 	// without it every session sees every tool, which is what this replaced.
@@ -195,7 +209,8 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	}
 
 	srv := api.New(ag, st, tools, catalog, workspace, info, log).
-		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil)
+		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil).
+		WithTwire(twireService)
 
 	return &App{
 		cfg:     cfg,
@@ -203,6 +218,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		store:   st,
 		catalog: catalog,
 		fintech: fintechService,
+		twire:   twireService,
 		http: &http.Server{
 			Addr:    cfg.Addr,
 			Handler: srv.Handler(),
@@ -264,6 +280,47 @@ func buildFintech(cfg *config.Config, st *store.Store, router *llm.Router, log *
 	return svc
 }
 
+// buildTwire wires the canary tripwire.
+//
+// It is built unconditionally, like the fintech service and for the same
+// reason: with nothing configured it is a module with every canary switched
+// off, which is exactly its default state anyway. Nothing listens until an
+// operator enables a canary, and no mail is sent until alerting is configured.
+//
+// The environment-derived alert settings here are only a seed. Once a
+// configuration is saved through the UI it overrides them, so a deployment can
+// start from SMTP_* variables and be edited afterwards without a restart.
+func buildTwire(cfg *config.Config, st *store.Store, log *slog.Logger) *twire.Service {
+	var recipients []string
+	for _, r := range strings.Split(cfg.TwireAlertTo, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			recipients = append(recipients, r)
+		}
+	}
+	envDefaults := twire.AlertConfig{
+		// Alerting starts on only when it could actually deliver. An enabled
+		// flag with nowhere to send to is a setting that reports itself as
+		// working and does nothing.
+		Enabled:      cfg.SMTPFrom != "" && len(recipients) > 0,
+		SMTPUsername: cfg.SMTPUsername,
+		SMTPPassword: cfg.SMTPPassword,
+		From:         cfg.SMTPFrom,
+		Recipients:   recipients,
+	}
+
+	svc := twire.NewService(twire.NewRepository(st.DB()), []byte(cfg.Secret), envDefaults, log)
+	// Said at startup rather than discovered when a save is refused: the fix is
+	// an environment variable and a restart, which is not something to find out
+	// about halfway through typing a credential into a form.
+	if !svc.SecretConfigured() {
+		log.Warn("twire: WINTERMUTE_SECRET is not set; canaries work, but an SMTP password cannot be saved in the UI",
+			"hint", "set WINTERMUTE_SECRET, or configure alerts with SMTP_USERNAME/SMTP_PASSWORD/SMTP_FROM/TWIRE_ALERT_TO")
+	}
+	log.Info("twire configured",
+		"alerts_from_env", envDefaults.Enabled, "secret", svc.SecretConfigured())
+	return svc
+}
+
 // metadataProviders registers whichever metadata sources have credentials.
 func metadataProviders(cfg *config.Config, log *slog.Logger) *lookup.Registry {
 	reg := lookup.NewRegistry()
@@ -315,6 +372,13 @@ func (a *App) Run(ctx context.Context) error {
 	if a.fintech != nil && a.cfg.FintechReviewInterval > 0 {
 		go fintech.NewReviewScheduler(a.fintech, a.cfg.FintechReviewInterval).Run(ctx)
 	}
+
+	// Open the listeners for any canary enabled before the last restart. Every
+	// canary defaults to disabled, so on a fresh install this does nothing. A
+	// port that cannot be bound is recorded as that canary's status rather than
+	// failing startup — the usual cause is a real service already on the port,
+	// which is a configuration mistake, not a reason for the server not to run.
+	a.twire.Start(ctx)
 
 	errCh := make(chan error, 1)
 	go func() {

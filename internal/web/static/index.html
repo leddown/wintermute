@@ -6,8 +6,14 @@
   <meta name="color-scheme" content="dark">
   <title>Wintermute</title>
   <link rel="stylesheet" href="/style.css">
+  <!-- Runs ahead of first paint, so a saved Matrix theme does not flash dark. -->
+  <script src="/theme-init.js"></script>
 </head>
 <body>
+  <!-- Backdrop for the Matrix and Chaos themes. Fixed behind the whole shell,
+       and hidden outright on every other theme; see matrix-rain.js. -->
+  <canvas id="matrix-rain" class="matrix-rain" aria-hidden="true" hidden></canvas>
+
   <div id="gate" class="gate">
     <form id="gate-form" class="gate-card">
       <h1>Wintermute</h1>
@@ -37,9 +43,11 @@
         <button class="view-btn" data-view="crm">CRM</button>
         <button class="view-btn" data-view="accounting">Accounts</button>
         <button class="view-btn" data-view="portfolio">Portfolio</button>
+        <button class="view-btn" data-view="twire">twire</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="admin">Admin</button>
       </nav>
+      <button id="theme-toggle-btn" class="link-btn">Theme: Dark</button>
       <button id="logout" class="link-btn">Sign out</button>
     </header>
 
@@ -105,6 +113,8 @@
           <ul id="task-views">
             <li data-scope="agenda">Agenda</li>
             <li data-scope="all">All open tasks</li>
+            <li data-scope="notes">Notes</li>
+            <li data-scope="calendar">Calendar</li>
           </ul>
           <label class="check muted">
             <input id="show-archived" type="checkbox"> Show archived lists
@@ -156,6 +166,31 @@
             </div>
           </div>
           <div id="pf-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- twire: the canary tripwire moved across from morpheus. -->
+      <section class="view" data-view="twire">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">twire</span></div>
+          <ul id="tw-nav">
+            <li data-tab="canaries" class="active">Canaries</li>
+            <li data-tab="events">Connection attempts</li>
+            <li data-tab="alerts">Email alerts</li>
+          </ul>
+          <p class="hint muted">Canaries impersonate common services on their
+            usual ports. Nothing on a home network should connect to them, so
+            any hit is a strong sign of scanning or probing.</p>
+        </aside>
+
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="tw-title">Canaries</h2>
+            <div class="pane-actions">
+              <button id="tw-refresh" class="ghost-btn">Refresh</button>
+            </div>
+          </div>
+          <div id="tw-body" class="pane-body"></div>
         </main>
       </section>
 
@@ -219,6 +254,7 @@
             <li data-tab="hardware">Hardware</li>
             <li data-tab="tools">Tools</li>
             <li data-tab="clients">Clients</li>
+            <li data-tab="appearance">Appearance</li>
           </ul>
         </aside>
         <main class="pane">
@@ -263,6 +299,11 @@
 
   <div id="toast" class="toast" hidden></div>
 
+  <!-- The theme trio loads before app.js: theme.js applies the saved choice on
+       evaluation and needs the rain and chaos engines to already exist. -->
+  <script src="/chaos.js"></script>
+  <script src="/matrix-rain.js"></script>
+  <script src="/theme.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

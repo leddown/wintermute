@@ -22,6 +22,7 @@ var ErrNotFound = errors.New("not found")
 type Repository interface {
 	ListLists(includeArchived bool) ([]List, error)
 	GetList(id int64) (List, error)
+	ListBySlug(slug string) (List, error)
 	CreateList(l List) (List, error)
 	UpdateList(id int64, l List) (List, error)
 	DeleteList(id int64) error
@@ -32,6 +33,11 @@ type Repository interface {
 	UpdateTask(id int64, t Task) (Task, error)
 	DeleteTask(id int64) error
 	NextOrdinal(listID int64) (int, error)
+
+	ListEvents(from, to string) ([]Event, error)
+	GetEvent(id int64) (Event, error)
+	CreateEvent(e Event) (Event, error)
+	DeleteEvent(id int64) error
 }
 
 type SQLiteRepository struct {
@@ -53,15 +59,30 @@ func (r *SQLiteRepository) insert(query string, args ...any) (int64, error) {
 
 // ---- Lists ----
 
+// listSelect is shared by the three list reads. The counts are a correlated
+// subquery rather than a second round trip: the index shows progress per list,
+// and doing it per row turned one page load into N+1 queries.
+const listSelect = `
+	SELECT l.id, l.title, l.description, l.archived, l.slug, l.created_at, l.updated_at,
+	       (SELECT COUNT(*) FROM todo_tasks t WHERE t.list_id = l.id),
+	       (SELECT COUNT(*) FROM todo_tasks t WHERE t.list_id = l.id AND t.status = 'done')
+	FROM todo_lists l`
+
+// scanList reads one row of listSelect. rows is either *sql.Rows or *sql.Row.
+func scanList(row interface{ Scan(...any) error }) (List, error) {
+	var l List
+	var archived int
+	err := row.Scan(&l.ID, &l.Title, &l.Description, &archived, &l.Slug,
+		&l.CreatedAt, &l.UpdatedAt, &l.TaskCount, &l.DoneCount)
+	if err != nil {
+		return List{}, err
+	}
+	l.Archived = archived != 0
+	return l, nil
+}
+
 func (r *SQLiteRepository) ListLists(includeArchived bool) ([]List, error) {
-	// The counts are a correlated subquery rather than a second round trip: the
-	// index shows progress per list, and doing it per row turned one page load
-	// into N+1 queries.
-	query := `
-		SELECT l.id, l.title, l.description, l.archived, l.created_at, l.updated_at,
-		       (SELECT COUNT(*) FROM todo_tasks t WHERE t.list_id = l.id),
-		       (SELECT COUNT(*) FROM todo_tasks t WHERE t.list_id = l.id AND t.status = 'done')
-		FROM todo_lists l`
+	query := listSelect
 	if !includeArchived {
 		query += ` WHERE l.archived = 0`
 	}
@@ -75,43 +96,48 @@ func (r *SQLiteRepository) ListLists(includeArchived bool) ([]List, error) {
 
 	out := make([]List, 0)
 	for rows.Next() {
-		var l List
-		var archived int
-		if err := rows.Scan(&l.ID, &l.Title, &l.Description, &archived,
-			&l.CreatedAt, &l.UpdatedAt, &l.TaskCount, &l.DoneCount); err != nil {
+		l, err := scanList(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scanning todo list: %w", err)
 		}
-		l.Archived = archived != 0
 		out = append(out, l)
 	}
 	return out, rows.Err()
 }
 
 func (r *SQLiteRepository) GetList(id int64) (List, error) {
-	var l List
-	var archived int
-	err := r.db.QueryRow(`
-		SELECT l.id, l.title, l.description, l.archived, l.created_at, l.updated_at,
-		       (SELECT COUNT(*) FROM todo_tasks t WHERE t.list_id = l.id),
-		       (SELECT COUNT(*) FROM todo_tasks t WHERE t.list_id = l.id AND t.status = 'done')
-		FROM todo_lists l WHERE l.id = ?`, id).
-		Scan(&l.ID, &l.Title, &l.Description, &archived,
-			&l.CreatedAt, &l.UpdatedAt, &l.TaskCount, &l.DoneCount)
+	l, err := scanList(r.db.QueryRow(listSelect+` WHERE l.id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return List{}, ErrNotFound
 	}
 	if err != nil {
 		return List{}, fmt.Errorf("loading todo list: %w", err)
 	}
-	l.Archived = archived != 0
+	return l, nil
+}
+
+// ListBySlug finds one of the lists the server keeps for itself — today only
+// the notes inbox. An empty slug matches nothing on purpose: every list a
+// person made carries one, and this must not return an arbitrary one of them.
+func (r *SQLiteRepository) ListBySlug(slug string) (List, error) {
+	if slug == "" {
+		return List{}, ErrNotFound
+	}
+	l, err := scanList(r.db.QueryRow(listSelect+` WHERE l.slug = ?`, slug))
+	if errors.Is(err, sql.ErrNoRows) {
+		return List{}, ErrNotFound
+	}
+	if err != nil {
+		return List{}, fmt.Errorf("loading todo list by slug: %w", err)
+	}
 	return l, nil
 }
 
 func (r *SQLiteRepository) CreateList(l List) (List, error) {
 	id, err := r.insert(`
-		INSERT INTO todo_lists (title, description, archived, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)`,
-		l.Title, l.Description, boolToInt(l.Archived), l.CreatedAt, l.UpdatedAt)
+		INSERT INTO todo_lists (title, description, archived, slug, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)`,
+		l.Title, l.Description, boolToInt(l.Archived), l.Slug, l.CreatedAt, l.UpdatedAt)
 	if err != nil {
 		return List{}, fmt.Errorf("creating todo list: %w", err)
 	}
@@ -290,6 +316,103 @@ func (r *SQLiteRepository) NextOrdinal(listID int64) (int, error) {
 		return 0, fmt.Errorf("finding next ordinal: %w", err)
 	}
 	return int(next.Int64) + 1, nil
+}
+
+// ---- Events ----
+
+const eventSelect = `
+	SELECT id, title, description, start_at, end_at, all_day, created_at, updated_at
+	FROM todo_events`
+
+func scanEvent(row interface{ Scan(...any) error }) (Event, error) {
+	var e Event
+	var allDay int
+	err := row.Scan(&e.ID, &e.Title, &e.Description, &e.StartAt, &e.EndAt, &allDay,
+		&e.CreatedAt, &e.UpdatedAt)
+	if err != nil {
+		return Event{}, err
+	}
+	e.AllDay = allDay != 0
+	e.Date = day(e.StartAt)
+	return e, nil
+}
+
+// ListEvents returns the events starting in the half-open window [from, to),
+// as "YYYY-MM-DD" bounds. Empty bounds are unbounded on that side.
+//
+// The comparison is against the stored text, which is why ParseMoment
+// normalises timestamps to UTC: an all-day "2026-07-20" and a timed
+// "2026-07-20T09:00:00Z" both fall inside a July window under the same string
+// comparison, because RFC3339 leads with the date.
+func (r *SQLiteRepository) ListEvents(from, to string) ([]Event, error) {
+	var (
+		clauses []string
+		args    []any
+	)
+	if from != "" {
+		clauses = append(clauses, "start_at >= ?")
+		args = append(args, from)
+	}
+	if to != "" {
+		clauses = append(clauses, "start_at < ?")
+		args = append(args, to)
+	}
+	query := eventSelect
+	if len(clauses) > 0 {
+		// #nosec G202 -- the fragments are constants defined above; the bounds
+		// reach the query only through the ? placeholders.
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += ` ORDER BY start_at, id`
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing events: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]Event, 0)
+	for rows.Next() {
+		e, err := scanEvent(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scanning event: %w", err)
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (r *SQLiteRepository) GetEvent(id int64) (Event, error) {
+	e, err := scanEvent(r.db.QueryRow(eventSelect+` WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Event{}, ErrNotFound
+	}
+	if err != nil {
+		return Event{}, fmt.Errorf("loading event: %w", err)
+	}
+	return e, nil
+}
+
+func (r *SQLiteRepository) CreateEvent(e Event) (Event, error) {
+	id, err := r.insert(`
+		INSERT INTO todo_events (title, description, start_at, end_at, all_day, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		e.Title, e.Description, e.StartAt, e.EndAt, boolToInt(e.AllDay), e.CreatedAt, e.UpdatedAt)
+	if err != nil {
+		return Event{}, fmt.Errorf("creating event: %w", err)
+	}
+	return r.GetEvent(id)
+}
+
+func (r *SQLiteRepository) DeleteEvent(id int64) error {
+	res, err := r.db.Exec(`DELETE FROM todo_events WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("deleting event: %w", err)
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // boolToInt stores flags as INTEGER, matching the rest of the schema.

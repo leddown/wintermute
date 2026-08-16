@@ -125,6 +125,7 @@ const loaders = {
   accounting: () => renderAccounting(),
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
+  twire: () => loadTwire(),
   admin: () => renderAdmin(),
 };
 
@@ -141,6 +142,9 @@ function switchView(name) {
     loaded.add(name);
     loaders[name]().catch((err) => { loaded.delete(name); showError(err); });
   }
+  // A render replaces the DOM the chaos theme had glitched, so re-sample. This
+  // is a no-op on every other theme.
+  WintermuteChaos.repaint();
 }
 
 for (const btn of document.querySelectorAll('.view-btn')) {
@@ -726,6 +730,15 @@ async function renderTasks() {
   $('edit-list').hidden = tasks.scope !== 'list';
   $('delete-list').hidden = tasks.scope !== 'list';
 
+  // Notes and the calendar build their own controls into the pane rather than
+  // borrowing the task quick-add: a note takes a date but no priority, and the
+  // calendar takes a month.
+  if (tasks.scope === 'notes' || tasks.scope === 'calendar') {
+    await (tasks.scope === 'notes' ? renderNotes(body) : renderCalendar(body));
+    await loadLists();
+    return;
+  }
+
   if (tasks.scope === 'agenda') {
     $('tasks-title').textContent = 'Agenda';
     const agenda = await api('/api/v1/todo/agenda');
@@ -825,6 +838,316 @@ function editTask(t) {
     await renderTasks();
     toast('Task saved.');
   });
+}
+
+/* ---------- notes ---------- */
+
+// Notes came across from morpheus with the calendar below. On the server they
+// are tasks on one reserved list; here they are read as a stream rather than a
+// checklist — newest at the top, and the date shown as where the note lands on
+// the calendar rather than as a deadline that can be overdue.
+
+// A note too long for a task title keeps its whole text in the notes field.
+// See noteFields in internal/todo/service.go for why it is not truncated.
+const noteText = (n) => (n.notes ? n.notes : n.title);
+
+async function renderNotes(body) {
+  $('tasks-title').textContent = 'Notes';
+  const { notes } = await api('/api/v1/todo/notes');
+
+  body.innerHTML = '';
+  body.append(noteAddForm(), importBox({
+    path: '/api/v1/todo/notes/import',
+    columns: [
+      ['body', 'required — the note text'],
+      ['event_date', 'optional — YYYY-MM-DD, to put the note on the calendar'],
+    ],
+    example: 'body,event_date\nBuy milk,\nDentist appointment,2026-07-14',
+  }));
+
+  if (!notes.length) {
+    body.append(el('div', { class: 'empty muted', text: 'No notes yet.' }));
+    return;
+  }
+  for (const n of notes) body.append(noteRow(n));
+}
+
+function noteAddForm() {
+  const text = el('input', { type: 'text', placeholder: 'Write a note…' });
+  const date = el('input', { type: 'date', title: 'Optional: put this note on the calendar' });
+
+  const add = async () => {
+    if (!text.value.trim()) return;
+    try {
+      await api('/api/v1/todo/notes', {
+        method: 'POST',
+        body: JSON.stringify({ body: text.value.trim(), event_date: date.value }),
+      });
+      text.value = '';
+      date.value = '';
+      await renderTasks();
+    } catch (err) {
+      showError(err);
+    }
+  };
+  text.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); add(); }
+  });
+
+  return el('div', { class: 'row-form' }, text, date, el('button', { text: 'Add', onclick: add }));
+}
+
+function noteRow(n) {
+  const done = n.status === 'done';
+
+  const check = el('input', { type: 'checkbox' });
+  check.checked = done;
+  check.addEventListener('change', async () => {
+    check.disabled = true;
+    try {
+      await api(`/api/v1/todo/notes/${n.id}/status`, {
+        method: 'POST',
+        body: JSON.stringify({ status: check.checked ? 'done' : 'todo' }),
+      });
+      await renderTasks();
+    } catch (err) {
+      check.checked = done;
+      showError(err);
+    } finally {
+      check.disabled = false;
+    }
+  });
+
+  const meta = [new Date(n.created_at).toLocaleString()];
+  if (n.due_date) meta.push(`📅 ${n.due_date}`);
+
+  return el('div', { class: `task${done ? ' done' : ''}` },
+    check,
+    el('div', { class: 'body' },
+      el('div', { class: 't', text: noteText(n) }),
+      el('div', { class: 'meta', text: meta.join(' · ') })),
+    el('div', { class: 'row-actions' },
+      el('button', {
+        class: 'ghost-btn danger', text: '✕',
+        onclick: () => confirmDelete('this note', async () => {
+          await api(`/api/v1/todo/notes/${n.id}`, { method: 'DELETE' });
+          await renderTasks();
+        }),
+      })));
+}
+
+/* ---------- calendar ---------- */
+
+// A month grid over everything dated: events, and the tasks and notes due in
+// the month. Only events are editable here — a cell is not the place to change
+// what a task says, and both have a view that is.
+
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+// month is the first day of the month on screen, kept across re-renders so
+// adding an event does not jump the view back to today.
+const calendar = { month: null };
+
+const pad2 = (n) => String(n).padStart(2, '0');
+const dayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+
+function firstOfThisMonth() {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth(), 1);
+}
+
+async function renderCalendar(body) {
+  if (!calendar.month) calendar.month = firstOfThisMonth();
+  const first = calendar.month;
+  const next = new Date(first.getFullYear(), first.getMonth() + 1, 1);
+
+  $('tasks-title').textContent = first.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
+
+  // The window is asked for as from/to rather than as a month because the
+  // server's month and the browser's could disagree by a day either side.
+  const cal = await api(`/api/v1/todo/calendar?from=${dayKey(first)}&to=${dayKey(next)}`);
+
+  body.innerHTML = '';
+  body.append(
+    calendarToolbar(),
+    eventAddForm(),
+    importBox({
+      path: '/api/v1/todo/events/import',
+      columns: [
+        ['title', 'required — what the event is'],
+        ['start', 'required — YYYY-MM-DD for all day, or an RFC3339 timestamp'],
+        ['end', 'optional — same formats as start'],
+        ['description', 'optional — free text'],
+        ['all_day', 'optional — true/false'],
+      ],
+      example: 'title,start,end,description,all_day\n'
+        + 'Team offsite,2026-07-20,,Annual planning,true\n'
+        + 'Standup,2026-07-21T09:00:00Z,2026-07-21T09:15:00Z,,false',
+    }),
+    calendarGrid(cal, first),
+  );
+}
+
+function calendarToolbar() {
+  const go = (first) => { calendar.month = first; renderTasks().catch(showError); };
+  const shift = (months) => go(new Date(calendar.month.getFullYear(), calendar.month.getMonth() + months, 1));
+
+  return el('div', { class: 'cal-toolbar' },
+    el('button', { class: 'ghost-btn', 'aria-label': 'Previous month', text: '‹', onclick: () => shift(-1) }),
+    el('button', { class: 'ghost-btn', text: 'Today', onclick: () => go(firstOfThisMonth()) }),
+    el('button', { class: 'ghost-btn', 'aria-label': 'Next month', text: '›', onclick: () => shift(1) }));
+}
+
+function eventAddForm() {
+  const title = el('input', { type: 'text', placeholder: 'Event title' });
+  const date = el('input', { type: 'date' });
+  const desc = el('input', { type: 'text', placeholder: 'Description (optional)' });
+
+  const save = async () => {
+    if (!title.value.trim() || !date.value) {
+      toast('An event needs a title and a date.', true);
+      return;
+    }
+    try {
+      // Created all-day: a grid groups by day, and an event stored at a time
+      // would drift across the boundary for a reader in another timezone.
+      // Timed events go through the assistant or the import.
+      await api('/api/v1/todo/events', {
+        method: 'POST',
+        body: JSON.stringify({
+          title: title.value.trim(),
+          description: desc.value.trim(),
+          start_at: date.value,
+          all_day: true,
+        }),
+      });
+      title.value = '';
+      desc.value = '';
+      await renderTasks();
+    } catch (err) {
+      showError(err);
+    }
+  };
+
+  return el('div', { class: 'row-form' }, title, date, desc,
+    el('button', { text: 'Add event', onclick: save }));
+}
+
+function calendarGrid(cal, first) {
+  const grid = el('div', { class: 'cal-grid' });
+  for (const w of WEEKDAYS) grid.append(el('div', { class: 'cal-weekday', text: w }));
+
+  // Lead with blanks so the 1st lands under its weekday. Not class "empty":
+  // that one is the app's empty-state message, and it carries a 15vh top
+  // margin that would push the first week down the page.
+  for (let i = 0; i < first.getDay(); i += 1) grid.append(el('div', { class: 'cal-cell blank' }));
+
+  const days = new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+  for (let d = 1; d <= days; d += 1) {
+    const key = dayKey(new Date(first.getFullYear(), first.getMonth(), d));
+    const cell = el('div', { class: `cal-cell${key === cal.today ? ' today' : ''}` },
+      el('div', { class: 'cal-daynum', text: String(d) }));
+    for (const e of (cal.events || {})[key] || []) cell.append(calEvent(e));
+    for (const t of (cal.days || {})[key] || []) cell.append(calDue(t));
+    grid.append(cell);
+  }
+  return grid;
+}
+
+function calEvent(e) {
+  // A timed event shows its clock time; an all-day one has none to show.
+  const label = e.all_day ? e.title : `${e.start_at.slice(11, 16)} ${e.title}`;
+  return el('div', { class: 'cal-item event', title: e.description || e.title },
+    el('span', { class: 'cal-item-label', text: label }),
+    el('button', {
+      class: 'cal-item-del', 'aria-label': 'Delete event', text: '✕',
+      onclick: () => confirmDelete(`the event "${e.title}"`, async () => {
+        await api(`/api/v1/todo/events/${e.id}`, { method: 'DELETE' });
+        await renderTasks();
+      }),
+    }));
+}
+
+// A task or note falling on this day. Read-only: notes are managed in the
+// Notes view and tasks on their list, which is where their other fields are.
+function calDue(t) {
+  const isNote = t.list_title === 'Notes';
+  return el('div', {
+    class: `cal-item due${t.status === 'done' ? ' done' : ''}`,
+    title: isNote ? 'Note — manage it in the Notes view' : `Task on ${t.list_title}`,
+  }, el('span', { class: 'cal-item-label', text: `${isNote ? '📝' : '☑'} ${t.title}` }));
+}
+
+/* ---------- spreadsheet import ---------- */
+
+// Shared by notes and events. The result outlives the re-render that follows a
+// successful import: the whole pane is rebuilt to show the new rows, and a
+// summary saying two of forty failed is the part worth keeping on screen.
+const lastImport = { path: null, result: null, message: null };
+
+function importBox({ path, columns, example }) {
+  const file = el('input', { type: 'file', accept: '.csv,.xlsx,.xls' });
+  const result = el('div', { class: 'import-result' });
+  if (lastImport.path === path) showImportResult(result, lastImport.result, lastImport.message);
+
+  const run = el('button', {
+    class: 'ghost-btn', text: 'Import',
+    onclick: async () => {
+      if (!file.files || !file.files[0]) {
+        showImportResult(result, null, 'Choose a file to import first.');
+        return;
+      }
+      const form = new FormData();
+      form.append('file', file.files[0]);
+      run.disabled = true;
+      showImportResult(result, null, 'Importing…');
+      try {
+        // Not api(): a multipart body must not carry a JSON content type, and
+        // the browser has to set its own boundary.
+        const res = await fetch(path, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${state.token}` },
+          body: form,
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(payload.error || `${res.status} ${res.statusText}`);
+        Object.assign(lastImport, { path, result: payload, message: null });
+        await renderTasks();
+      } catch (err) {
+        Object.assign(lastImport, { path, result: null, message: err.message });
+        showImportResult(result, null, err.message);
+      } finally {
+        run.disabled = false;
+      }
+    },
+  });
+
+  return el('details', { class: 'import-box', open: lastImport.path === path },
+    el('summary', { text: 'Import from CSV / Excel' }),
+    el('p', { class: 'muted', text: 'The first row must name the columns. Order does not matter and unrecognised columns are ignored.' }),
+    el('ul', { class: 'import-help' },
+      columns.map(([name, what]) => el('li', {}, el('code', { text: name }), el('span', { class: 'muted', text: ` ${what}` })))),
+    el('pre', { class: 'import-example', text: example }),
+    el('div', { class: 'row-form' }, file, run),
+    result);
+}
+
+// Row errors come from the server, so every one of them is set as text.
+function showImportResult(box, result, message) {
+  box.innerHTML = '';
+  if (message) {
+    box.append(el('p', { text: message }));
+    return;
+  }
+  if (!result) return;
+
+  box.append(el('p', {
+    text: `Imported ${result.imported} of ${result.total_rows} row(s).`
+      + (result.failed ? ` ${result.failed} failed.` : ''),
+  }));
+  if (result.errors && result.errors.length) {
+    box.append(el('ul', { class: 'import-errors' },
+      result.errors.map((e) => el('li', { text: `Row ${e.row}: ${e.message}` }))));
+  }
 }
 
 /* ================= CRM ================= */
@@ -1686,6 +2009,7 @@ async function renderAdmin() {
   const titles = {
     status: 'Status', config: 'Configuration', backends: 'Backends',
     hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
+    appearance: 'Appearance',
   };
   $('admin-title').textContent = titles[admin.tab];
   body.innerHTML = '';
@@ -1695,6 +2019,9 @@ async function renderAdmin() {
   if (admin.tab === 'backends') return renderAdminBackends(body);
   if (admin.tab === 'hardware') return renderAdminHardware(body);
   if (admin.tab === 'tools') return renderAdminTools(body);
+  // Purely local, unlike every other tab here: it reads and writes
+  // localStorage and asks the server nothing.
+  if (admin.tab === 'appearance') return renderAdminAppearance(body);
   return renderAdminClients(body);
 }
 
@@ -2296,4 +2623,357 @@ function ratingLabel(rating) {
   return {
     max_sell: 'Sell hard', sell: 'Sell', hold: 'Hold', buy: 'Buy', max_buy: 'Buy hard',
   }[rating] || rating;
+}
+
+/* ---------- twire ---------- */
+//
+// The canary tripwire that moved across from morpheus: fake services on
+// well-known ports, a log of everything that connected to one, and the email
+// alerting that fires when something does.
+//
+// Everything here is built with el(), which means textContent, which matters
+// more in this view than anywhere else in the app. A canary records the first
+// bytes any caller sends and shows them back as the data preview — that string
+// is chosen by whoever is probing the network, and morpheus had to escape it by
+// hand on the way into an innerHTML template. Here there is no such template to
+// escape it for.
+
+const tw = { tab: 'canaries', status: null, binaryPath: '' };
+
+async function loadTwire() {
+  for (const li of document.querySelectorAll('#tw-nav li')) {
+    li.addEventListener('click', () => {
+      for (const other of document.querySelectorAll('#tw-nav li')) {
+        other.classList.toggle('active', other === li);
+      }
+      tw.tab = li.dataset.tab;
+      renderTwire().catch(showError);
+    });
+  }
+  $('tw-refresh').addEventListener('click', () => renderTwire().catch(showError));
+  await renderTwire();
+}
+
+async function renderTwire() {
+  const body = $('tw-body');
+  body.textContent = '';
+  $('tw-title').textContent = {
+    canaries: 'Canaries', events: 'Connection attempts', alerts: 'Email alerts',
+  }[tw.tab];
+
+  if (tw.tab === 'canaries') return renderCanaries(body);
+  if (tw.tab === 'events') return renderTwireEvents(body);
+  return renderTwireAlerts(body);
+}
+
+async function renderCanaries(body) {
+  const status = await api('/api/v1/twire/status');
+  const canaries = status.canaries || [];
+  tw.binaryPath = status.binary_path || '';
+
+  body.append(el('p', { class: 'muted', text:
+    'All canaries are off by default. A port that fails to bind is shown as ' +
+    "that canary's status rather than stopping the server." }));
+
+  // Ports below 1024 are root's on Linux, and a canary that silently never
+  // listened is worse than one that says why. The fix is a capability on the
+  // binary, so the exact command is offered rather than described.
+  if (canaries.some((c) => c.privilege_required)) {
+    body.append(privilegeNotice());
+  }
+
+  body.append(table(
+    ['Service', 'Port', 'Description', 'Status', 'Hits', ''],
+    canaries.map((c) => [
+      c.custom ? `${c.name} (custom)` : c.name,
+      c.port,
+      c.description,
+      canaryStatusCell(c),
+      c.hit_count,
+      canaryActions(c),
+    ]),
+    [false, true, false, false, true, false]));
+
+  body.append(el('h3', { text: 'Add a custom canary' }));
+  body.append(el('p', { class: 'muted', text:
+    'Listen on a port the built-in catalog does not cover. The new canary ' +
+    'starts disabled — enable it above once added.' }));
+  body.append(addCanaryForm());
+}
+
+// canaryStatusCell says what a canary is actually doing, which is not the same
+// question as whether it is switched on: an enabled canary whose port was taken
+// is the case worth seeing.
+function canaryStatusCell(c) {
+  if (!c.enabled) return el('span', { class: 'muted', text: 'disabled' });
+  if (c.listening) return el('span', { text: 'listening' });
+  if (c.privilege_required) {
+    return el('span', { class: 'error', text: 'needs elevated privilege' });
+  }
+  return el('span', { class: 'error', text: `bind error: ${c.last_error || 'unknown'}` });
+}
+
+function canaryActions(c) {
+  const wrap = el('span', { class: 'row-actions' });
+  const toggle = el('button', {
+    class: 'ghost-btn',
+    text: c.enabled ? 'Disable' : 'Enable',
+  });
+  toggle.addEventListener('click', async () => {
+    toggle.disabled = true;
+    const action = c.enabled ? 'disable' : 'enable';
+    try {
+      await api(`/api/v1/twire/canaries/${encodeURIComponent(c.key)}/${action}`, { method: 'POST' });
+      await renderTwire();
+    } catch (err) {
+      toggle.disabled = false;
+      showError(err);
+    }
+  });
+  wrap.append(toggle);
+
+  // Only operator-defined canaries can be removed; the built-in catalog is
+  // fixed, and a built-in one you are done with is simply disabled.
+  if (c.custom) {
+    const remove = el('button', { class: 'ghost-btn danger', text: 'Delete' });
+    remove.addEventListener('click', async () => {
+      if (!confirm(`Delete the custom canary on port ${c.port}? Recorded events are kept.`)) return;
+      try {
+        await api(`/api/v1/twire/canaries/${encodeURIComponent(c.key)}`, { method: 'DELETE' });
+        await renderTwire();
+      } catch (err) {
+        showError(err);
+      }
+    });
+    wrap.append(remove);
+  }
+  return wrap;
+}
+
+function privilegeNotice() {
+  const cmd = `sudo setcap cap_net_bind_service=+ep ${tw.binaryPath || '/path/to/wintermuted'}`;
+  const code = el('code', { text: cmd });
+  const copy = el('button', { class: 'ghost-btn', text: 'Copy' });
+  copy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      copy.textContent = 'Copied';
+      setTimeout(() => { copy.textContent = 'Copy'; }, 1200);
+    } catch {
+      /* The command is selectable; a blocked clipboard is not worth an error. */
+    }
+  });
+  return el('div', { class: 'notice' },
+    el('strong', { text: 'Elevated privilege required' }),
+    el('span', { text:
+      ' — one or more canaries listen on ports below 1024, which Linux reserves ' +
+      'for root. Grant the binary the cap_net_bind_service capability and ' +
+      'restart the server:' }),
+    el('div', { class: 'notice-cmd' }, code, copy));
+}
+
+function addCanaryForm() {
+  const name = el('input', { placeholder: 'Service name', autocomplete: 'off' });
+  const port = el('input', { placeholder: 'Port', autocomplete: 'off' });
+  const description = el('input', { placeholder: 'Description (optional)', autocomplete: 'off' });
+  const banner = el('input', { placeholder: 'Banner sent on connect (optional)', autocomplete: 'off' });
+  const form = el('form', { class: 'row-form' }, name, port, description, banner,
+    el('button', { type: 'submit', text: 'Add canary' }));
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const n = parseInt(port.value, 10);
+    if (!Number.isInteger(n) || n < 1 || n > 65535) {
+      showError(new Error('Port must be a number between 1 and 65535.'));
+      return;
+    }
+    try {
+      await api('/api/v1/twire/canaries', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: name.value.trim(),
+          port: n,
+          description: description.value.trim(),
+          banner: banner.value,
+        }),
+      });
+      toast(`Added a canary on port ${n}`);
+      name.value = port.value = description.value = banner.value = '';
+      await renderTwire();
+    } catch (err) {
+      showError(err);
+    }
+  });
+  return form;
+}
+
+async function renderTwireEvents(body) {
+  const { events } = await api('/api/v1/twire/events?limit=100');
+  if (!events || !events.length) {
+    body.append(el('div', { class: 'empty muted', text:
+      'No connection attempts recorded yet. That is the expected state — an ' +
+      'entry here means something reached a port nothing should be using.' }));
+    return;
+  }
+  body.append(table(
+    ['When', 'Canary', 'Port', 'Source', 'Data preview'],
+    events.map((e) => [
+      new Date(e.occurred_at).toLocaleString(),
+      e.service_name,
+      e.port,
+      `${e.remote_ip}:${e.remote_port}`,
+      // Already flattened to printable ASCII by the server, and rendered as
+      // text here regardless.
+      el('code', { text: e.data_preview || '—' }),
+    ]),
+    [false, false, true, false, false]));
+}
+
+async function renderTwireAlerts(body) {
+  const cfg = await api('/api/v1/twire/alert-config');
+
+  body.append(el('p', { class: 'muted', text:
+    'Alerts are sent through Google SMTP (smtp.gmail.com:587), so the password ' +
+    'must be a Google App Password — Google rejects account passwords here. ' +
+    'Repeat hits from one source are rate-limited to one email every five minutes.' }));
+
+  if (!cfg.secret_configured) {
+    body.append(el('div', { class: 'notice' },
+      el('strong', { text: 'WINTERMUTE_SECRET is not set' }),
+      el('span', { text:
+        ' — the App Password cannot be stored, because there is no key to ' +
+        'encrypt it with. Everything else on this form saves. Set ' +
+        'WINTERMUTE_SECRET and restart, or configure alerting entirely from ' +
+        'the SMTP_USERNAME, SMTP_PASSWORD, SMTP_FROM and TWIRE_ALERT_TO ' +
+        'environment variables instead.' })));
+  }
+
+  const enabled = el('input', { type: 'checkbox' });
+  enabled.checked = Boolean(cfg.enabled);
+  const username = el('input', { placeholder: 'SMTP username', autocomplete: 'off' });
+  username.value = cfg.smtp_username || '';
+  const password = el('input', {
+    type: 'password',
+    autocomplete: 'new-password',
+    // The password is never sent back to the browser, so the field starts
+    // empty and an empty field means "keep what is stored" rather than "clear
+    // it" — otherwise editing a recipient would silently drop the credential.
+    placeholder: cfg.password_set ? 'App Password (stored — leave blank to keep)' : 'App Password',
+  });
+  const from = el('input', { placeholder: 'From address', autocomplete: 'off' });
+  from.value = cfg.from || '';
+  const recipients = el('input', { placeholder: 'Recipients, comma-separated', autocomplete: 'off' });
+  recipients.value = (cfg.recipients || []).join(', ');
+
+  const form = el('form', { class: 'tw-form' },
+    el('label', { class: 'check' }, enabled, el('span', { text: ' Send an email when a canary is tripped' })),
+    el('label', {}, el('span', { class: 'muted', text: 'SMTP username' }), username),
+    el('label', {}, el('span', { class: 'muted', text: 'App Password' }), password),
+    el('label', {}, el('span', { class: 'muted', text: 'From' }), from),
+    el('label', {}, el('span', { class: 'muted', text: 'Recipients' }), recipients),
+    el('div', { class: 'row-actions' },
+      el('button', { type: 'submit', text: 'Save' }),
+      testAlertButton()));
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const payload = {
+      enabled: enabled.checked,
+      smtp_username: username.value.trim(),
+      from: from.value.trim(),
+      recipients: recipients.value.split(',').map((r) => r.trim()).filter(Boolean),
+    };
+    // Null rather than "" so the server keeps the stored password.
+    if (password.value) payload.smtp_password = password.value;
+    try {
+      await api('/api/v1/twire/alert-config', { method: 'PUT', body: JSON.stringify(payload) });
+      toast('Alert settings saved');
+      await renderTwire();
+    } catch (err) {
+      showError(err);
+    }
+  });
+  body.append(form);
+}
+
+function testAlertButton() {
+  const b = el('button', { type: 'button', class: 'ghost-btn', text: 'Send a test email' });
+  b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      // Against the saved configuration, not the unsaved form: a test that
+      // passed on fields nobody committed would prove nothing about what the
+      // server will do at three in the morning.
+      await api('/api/v1/twire/alert-config/test', { method: 'POST' });
+      toast('Test email sent');
+    } catch (err) {
+      showError(err);
+    } finally {
+      b.disabled = false;
+    }
+  });
+  return b;
+}
+
+/* ---------- appearance ---------- */
+//
+// The theme's two sets of knobs, which live in this browser's localStorage
+// rather than on the server — see theme.js. The theme itself is switched from
+// the button in the top bar; this is where its weights are set.
+
+function renderAdminAppearance(body) {
+  body.append(el('p', { class: 'muted', text:
+    'The theme is switched with the button in the top bar, which cycles Dark → ' +
+    'Matrix → Chaos. These settings are stored in this browser only.' }));
+
+  body.append(el('div', { class: 'group-head', text: 'Matrix rain' }));
+  body.append(el('p', { class: 'muted', text:
+    'The falling glyphs behind the panes, on both the Matrix and Chaos themes. ' +
+    'They are drawn faint on purpose — they fill the space a page of panels ' +
+    'leaves over on a wide monitor without competing with it — but how faint ' +
+    'that reads depends entirely on the screen. 100 is the default; below it ' +
+    'the rain recedes towards invisible, and at the top of the range the ' +
+    'glyphs are close to fully opaque.' }));
+
+  const brightness = el('input', {
+    type: 'number',
+    min: String(WintermuteRain.MIN_BRIGHTNESS),
+    max: String(WintermuteRain.MAX_BRIGHTNESS),
+  });
+  brightness.value = String(WintermuteRain.config().brightness);
+  const rainForm = el('form', { class: 'row-form' },
+    el('span', { class: 'muted', text: 'Glyph brightness %' }), brightness,
+    el('button', { type: 'submit', text: 'Save' }));
+  rainForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    WintermuteRain.setConfig({ brightness: brightness.value });
+    brightness.value = String(WintermuteRain.config().brightness);
+    toast('Glyph brightness saved');
+  });
+  body.append(rainForm);
+
+  body.append(el('div', { class: 'group-head', text: 'Chaos' }));
+  body.append(el('p', { class: 'muted', text:
+    'The Chaos theme is the Matrix theme plus periodic colour glitches: on ' +
+    'every tick, and whenever you switch views, a random sample of the ' +
+    'characters on screen turns a random colour, replacing the previous sample.' }));
+
+  const chaosCfg = WintermuteChaos.config();
+  const interval = el('input', { type: 'number', min: '1', max: '3600' });
+  interval.value = String(chaosCfg.intervalSeconds);
+  const density = el('input', { type: 'number', min: '0', max: String(WintermuteChaos.DENSITY_BASE) });
+  density.value = String(chaosCfg.density);
+  const chaosForm = el('form', { class: 'row-form' },
+    el('span', { class: 'muted', text: 'Seconds between glitches' }), interval,
+    el('span', { class: 'muted', text: `Characters per ${WintermuteChaos.DENSITY_BASE}` }), density,
+    el('button', { type: 'submit', text: 'Save' }));
+  chaosForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    WintermuteChaos.setConfig({ intervalSeconds: interval.value, density: density.value });
+    const saved = WintermuteChaos.config();
+    interval.value = String(saved.intervalSeconds);
+    density.value = String(saved.density);
+    toast('Chaos settings saved');
+  });
+  body.append(chaosForm);
 }

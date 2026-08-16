@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"wintermute/internal/company"
 	"wintermute/internal/crm"
 	"wintermute/internal/fintech"
+	"wintermute/internal/tabular"
 	"wintermute/internal/todo"
 )
 
@@ -77,6 +79,21 @@ func (s *Server) registerWorkspaceRoutes(authed func(string, http.HandlerFunc)) 
 
 		authed("GET /api/v1/todo/agenda", s.handleTodoAgenda)
 		authed("GET /api/v1/todo/calendar", s.handleTodoCalendar)
+
+		// Notes are tasks on one reserved list, so these routes buy the
+		// vocabulary and the newest-first ordering rather than a second store
+		// — see internal/todo/service.go. Editing a note's text goes through
+		// PUT /todo/tasks/{id} like any other task's.
+		authed("GET /api/v1/todo/notes", s.handleListNotes)
+		authed("POST /api/v1/todo/notes", s.handleCreateNote)
+		authed("POST /api/v1/todo/notes/import", s.handleImportNotes)
+		authed("POST /api/v1/todo/notes/{id}/status", s.handleSetNoteStatus)
+		authed("DELETE /api/v1/todo/notes/{id}", s.handleDeleteNote)
+
+		authed("GET /api/v1/todo/events", s.handleListEvents)
+		authed("POST /api/v1/todo/events", s.handleCreateEvent)
+		authed("POST /api/v1/todo/events/import", s.handleImportEvents)
+		authed("DELETE /api/v1/todo/events/{id}", s.handleDeleteEvent)
 	}
 	s.registerAccountingRoutes(authed)
 	s.registerFintechRoutes(authed)
@@ -487,13 +504,185 @@ func (s *Server) handleTodoAgenda(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, agenda)
 }
 
+// handleTodoCalendar serves either a whole month (?month=YYYY-MM, the default)
+// or an explicit half-open window (?from=&to=, both YYYY-MM-DD). The window
+// form is what morpheus's calendar feed took, and the month grid in the UI
+// needs it: a grid shows the days either side of the month boundary, and
+// fetching them as a second month would double the request for six cells.
 func (s *Server) handleTodoCalendar(w http.ResponseWriter, r *http.Request) {
-	month, err := s.workspace.Todo.Calendar(r.URL.Query().Get("month"))
+	q := r.URL.Query()
+	from, to := q.Get("from"), q.Get("to")
+
+	var (
+		cal todo.CalendarMonth
+		err error
+	)
+	switch {
+	case from != "" || to != "":
+		if from == "" || to == "" {
+			writeError(w, http.StatusBadRequest, "give both from and to, or neither")
+			return
+		}
+		cal, err = s.workspace.Todo.CalendarBetween(from, to)
+	default:
+		cal, err = s.workspace.Todo.Calendar(q.Get("month"))
+	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, month)
+	writeJSON(w, http.StatusOK, cal)
+}
+
+// ---- notes ----
+
+func (s *Server) handleListNotes(w http.ResponseWriter, r *http.Request) {
+	notes, err := s.workspace.Todo.ListNotes()
+	if err != nil {
+		s.fail(w, "list notes", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"notes": notes, "today": s.workspace.Todo.Today()})
+}
+
+func (s *Server) handleCreateNote(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Body      string `json:"body"`
+		EventDate string `json:"event_date"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	created, err := s.workspace.Todo.CreateNote(req.Body, req.EventDate)
+	if err != nil {
+		s.todoError(w, "create note", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) handleSetNoteStatus(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Status string `json:"status"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	updated, err := s.workspace.Todo.SetNoteStatus(id, strings.TrimSpace(req.Status))
+	if err != nil {
+		s.todoError(w, "set note status", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleDeleteNote(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.workspace.Todo.DeleteNote(id); err != nil {
+		s.todoError(w, "delete note", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleImportNotes(w http.ResponseWriter, r *http.Request) {
+	rows, ok := uploadedRows(w, r)
+	if !ok {
+		return
+	}
+	result, err := s.workspace.Todo.ImportNotes(rows)
+	if err != nil {
+		s.todoError(w, "import notes", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// ---- events ----
+
+func (s *Server) handleListEvents(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	events, err := s.workspace.Todo.ListEvents(q.Get("from"), q.Get("to"))
+	if err != nil {
+		s.fail(w, "list events", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+func (s *Server) handleCreateEvent(w http.ResponseWriter, r *http.Request) {
+	var in todo.Event
+	if !decode(w, r, &in) {
+		return
+	}
+	created, err := s.workspace.Todo.CreateEvent(in)
+	if err != nil {
+		s.todoError(w, "create event", err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	if err := s.workspace.Todo.DeleteEvent(id); err != nil {
+		s.todoError(w, "delete event", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleImportEvents(w http.ResponseWriter, r *http.Request) {
+	rows, ok := uploadedRows(w, r)
+	if !ok {
+		return
+	}
+	result, err := s.workspace.Todo.ImportEvents(rows)
+	if err != nil {
+		s.todoError(w, "import events", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// maxImportUpload bounds a spreadsheet upload. A file of notes or events is
+// small; something this size is a mistake, and it is rejected before anything
+// reads it rather than after.
+const maxImportUpload = 20 << 20
+
+// uploadedRows reads the "file" field of a multipart upload and parses it as a
+// spreadsheet. It reports its own errors, so a false return means the response
+// is already written.
+func uploadedRows(w http.ResponseWriter, r *http.Request) ([][]string, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxImportUpload)
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "expected a multipart upload with a file field")
+		return nil, false
+	}
+	defer file.Close()
+
+	content, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "could not read the uploaded file")
+		return nil, false
+	}
+	rows, err := tabular.Parse(header.Filename, content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return nil, false
+	}
+	return rows, true
 }
 
 // ---- shared ----

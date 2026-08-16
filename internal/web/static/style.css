@@ -15,6 +15,99 @@
   --radius: 10px;
 }
 
+/* ---------- Themes ----------
+
+   Brought across from morpheus, onto this stylesheet's variable names rather
+   than its own: morpheus had --surface-alt/--text-dim/--danger where this has
+   --surface-2/--muted/--error, and translating the palette once here is what
+   keeps every rule below theme-agnostic. Only the variables are redefined; no
+   component knows which theme is on.
+
+   Chaos is Matrix plus the per-character colour glitches driven by /chaos.js,
+   so it reuses the whole Matrix palette. */
+:root[data-theme="matrix"],
+:root[data-theme="chaos"] {
+  --bg: #000000;
+  --surface: #001a00;
+  --surface-2: #002b00;
+  --border: #00611a;
+  --text: #00ff41;
+  --muted: #00a82c;
+  --accent: #00ff41;
+  --error: #ff3b3b;
+  /* Gain keeps the phosphor green; a loss stays red, because a red number is
+     the one thing on a P&L that has to survive a change of palette. */
+  --gain: #00ff41;
+  --loss: #ff3b3b;
+}
+
+:root[data-theme="matrix"] body,
+:root[data-theme="matrix"] button,
+:root[data-theme="matrix"] input,
+:root[data-theme="matrix"] select,
+:root[data-theme="matrix"] textarea,
+:root[data-theme="chaos"] body,
+:root[data-theme="chaos"] button,
+:root[data-theme="chaos"] input,
+:root[data-theme="chaos"] select,
+:root[data-theme="chaos"] textarea {
+  font-family: "Courier New", Courier, monospace;
+}
+
+/* The accent is the button fill, and its text colour is hard-coded to the dark
+   palette's near-black further down. On black that is invisible, so the buttons
+   get the background back as their foreground. */
+:root[data-theme="matrix"] button,
+:root[data-theme="chaos"] button {
+  color: #000000;
+}
+:root[data-theme="matrix"] .ghost-btn,
+:root[data-theme="matrix"] .icon-btn,
+:root[data-theme="chaos"] .ghost-btn,
+:root[data-theme="chaos"] .icon-btn {
+  color: var(--text);
+}
+
+/* The falling-glyph backdrop, painted by /matrix-rain.js. Fixed rather than
+   scrolled: it is the room the app sits in, not part of the page. */
+.matrix-rain {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  /* Low enough that a pane's text always wins, high enough that the empty half
+     of a 32:9 display is doing something.
+
+     This is the starting value only: the Glyph brightness setting scales it,
+     and matrix-rain.js sets it inline from BASE_OPACITY the moment the rain
+     starts. Change it there, not here. */
+  opacity: 0.18;
+}
+
+/* The shell rides above the rain.
+
+   In morpheus the panes were opaque cards, so the glyphs only ever showed in
+   the space left over around them. This layout is a single full-height pane, so
+   an opaque background here would hide the rain completely and the theme would
+   have nothing to show. It is left transparent instead: the glyphs run behind
+   the content as well as beside it, faint enough at the default 0.18 to read
+   over, and the Glyph brightness setting in Admin → Appearance is there for
+   screens where that judgement comes out differently. */
+:root[data-theme="matrix"] .app,
+:root[data-theme="chaos"] .app,
+:root[data-theme="matrix"] .gate,
+:root[data-theme="chaos"] .gate {
+  position: relative;
+  z-index: 1;
+}
+
+:root[data-theme="matrix"] .topbar,
+:root[data-theme="chaos"] .topbar,
+:root[data-theme="matrix"] .sidebar,
+:root[data-theme="chaos"] .sidebar {
+  background: var(--surface);
+}
+
 * { box-sizing: border-box; }
 
 /* The hidden attribute only works through a user-agent rule, and any author
@@ -220,7 +313,10 @@ tbody tr:hover { background: var(--surface); }
 .task { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-bottom: 1px solid var(--border); }
 .task:last-child { border-bottom: none; }
 .task input[type=checkbox] { margin-top: 3px; accent-color: var(--accent); }
-.task .body { flex: 1; min-width: 0; }
+/* display is restated because the app shell's own layout row uses the same
+   class name — `.body { display: flex }` above — and a row's title and meta
+   line were being laid out side by side by it. */
+.task .body { flex: 1; min-width: 0; display: block; }
 .task .t { overflow-wrap: anywhere; }
 .task.done .t { text-decoration: line-through; color: var(--muted); }
 .task .meta { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
@@ -290,3 +386,107 @@ ul.plain li {
   padding: 8px 0; border-top: 1px solid var(--border);
 }
 pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inherit; }
+
+/* Calendar and the spreadsheet imports, moved across from morpheus with the
+   notes and events they show. */
+.cal-toolbar { display: flex; gap: 6px; align-items: center; margin-bottom: 10px; }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; margin-top: 14px; }
+.cal-weekday {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--muted); padding: 2px 4px;
+}
+.cal-cell {
+  min-height: 92px; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 4px; display: flex; flex-direction: column; gap: 3px;
+}
+.cal-cell.blank { background: none; border-color: transparent; }
+.cal-cell.today { border-color: var(--accent); }
+.cal-daynum { font-size: 11px; color: var(--muted); }
+.cal-item {
+  display: flex; align-items: flex-start; gap: 4px; font-size: 11.5px; line-height: 1.35;
+  border-radius: 5px; padding: 2px 4px; overflow-wrap: anywhere;
+}
+.cal-item.event { background: var(--surface-2); }
+.cal-item.due { color: var(--muted); }
+.cal-item.done .cal-item-label { text-decoration: line-through; }
+.cal-item-label { flex: 1; min-width: 0; }
+.cal-item-del {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  padding: 0 2px; font-size: 11px; line-height: 1.35;
+}
+.cal-item-del:hover { color: var(--error); }
+
+.import-box {
+  margin: 12px 0 4px; border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px;
+}
+.import-box summary { cursor: pointer; font-size: 13px; }
+.import-box > :not(summary) { margin-top: 8px; }
+.import-box p { margin: 8px 0 0; font-size: 12px; }
+.import-help { margin: 0; padding-left: 18px; font-size: 12px; }
+.import-example {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 11.5px; overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.import-result { font-size: 12px; }
+.import-errors { margin: 6px 0 0; padding-left: 18px; color: var(--error); font-size: 11.5px; }
+
+@media (max-width: 720px) {
+  /* Seven columns stay — a calendar that reflows to one is a list — but the
+     cells give up their height, and the day number carries the reading. */
+  .cal-cell { min-height: 56px; padding: 2px; }
+  .cal-item { font-size: 10.5px; }
+}
+
+/* ---------- twire ----------
+
+   The canary tripwire's own pieces. Everything else in the view is the tables,
+   row-forms and panes the rest of the app already has. */
+
+/* A standing condition the operator has to act on, rather than the outcome of
+   something they just did: a canary that cannot bind a privileged port, or a
+   missing WINTERMUTE_SECRET. Neither is an error in the request sense — a toast
+   would be gone before it was read, and both persist until something changes on
+   the host. */
+.notice {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+  font-size: 13px;
+}
+.notice-cmd {
+  display: flex; align-items: center; gap: 8px;
+  margin-top: 10px;
+  /* The command is the point of the notice, so it gets to overflow rather than
+     wrap: a setcap line broken across lines is one that gets copied wrong. */
+  overflow-x: auto;
+}
+.notice-cmd code {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 6px 10px; white-space: nowrap;
+}
+.notice-cmd button { flex: none; }
+
+/* The alert-configuration form. A column of labelled fields rather than the
+   single-line .row-form the tables use — five inputs on one row is a form
+   nobody can read, and this one holds a credential. */
+.tw-form { display: grid; gap: 12px; padding: 16px 20px; max-width: 34rem; }
+.tw-form label { display: grid; gap: 4px; }
+.tw-form label.check { display: flex; align-items: center; gap: 8px; }
+.tw-form input[type=text], .tw-form input[type=password], .tw-form input:not([type]) {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 9px 11px;
+}
+.tw-form input:focus { border-color: var(--accent); outline: none; }
+
+/* The Appearance tab's knobs are numbers, which .row-form does not cover — it
+   was written for the text and date inputs the ledgers use. */
+.row-form input[type=number] {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; width: 7rem;
+}
+.row-form span.muted { align-self: center; font-size: 12px; }

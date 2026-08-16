@@ -16,6 +16,7 @@ import (
 	"wintermute/internal/models"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
+	"wintermute/internal/twire"
 	"wintermute/internal/web"
 )
 
@@ -36,8 +37,11 @@ type Server struct {
 	// rather than leaving an agent quietly toothless.
 	grcConfigured bool
 	webConfigured bool
-	info          ServerInfo
-	log           *slog.Logger
+	// twire is the canary tripwire. Nil leaves its routes unregistered, the
+	// same way an absent CRM does.
+	twire *twire.Service
+	info  ServerInfo
+	log   *slog.Logger
 }
 
 // New builds a Server. A zero Workspace disables those routes rather than
@@ -58,6 +62,13 @@ func (s *Server) WithKnowledge(svc *knowledge.Service, grcAvailable, webAvailabl
 	s.knowledge = svc
 	s.grcConfigured = grcAvailable
 	s.webConfigured = webAvailable
+	return s
+}
+
+// WithTwire attaches the canary tripwire. Without it the twire routes are not
+// registered and the UI's twire view reports the module as unavailable.
+func (s *Server) WithTwire(svc *twire.Service) *Server {
+	s.twire = svc
 	return s
 }
 
@@ -108,6 +119,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Agent profiles and their document libraries — see agents.go.
 	s.registerAgentRoutes(authed)
+
+	// The canary tripwire — see twire.go.
+	s.registerTwireRoutes(authed)
 
 	mux.Handle("/", web.Handler())
 
