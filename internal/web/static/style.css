@@ -791,6 +791,20 @@ dialog h3 { margin: 0; font-size: 15px; }
   .sidebar { padding-bottom: 12px; }
 }
 
+/* A 1280x800 laptop or kiosk display is wide enough to keep the full desktop
+   layout, but not tall enough to fit both the gauges and a long sidebar list
+   (Company's three nav groups run to 14 rows) above them. The gauges are
+   `position: fixed`, so they never move with the sidebar's own scroll — once
+   a list is taller than the space left after the reserved 92px, its last
+   rows sit permanently behind the opaque panel with no scroll position that
+   uncovers them. Same trade as the phone breakpoint above: drop the gauges
+   rather than let them block content the sidebar can no longer scroll clear
+   of. */
+@media (max-height: 820px) {
+  .system-gauges { display: none; }
+  .sidebar { padding-bottom: 12px; }
+}
+
 .toast {
   position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
   background: var(--surface-2); border: 1px solid var(--border);
