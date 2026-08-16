@@ -14,6 +14,11 @@ const state = {
   // Agents view. Null means the unscoped assistant, which is what every
   // session was before agents existed.
   chatAgent: null, agents: [], agentAvailable: {}, selectedAgent: null,
+  // The backend a chat runs on. Null means the server default — the same
+  // "empty is default" the session row and the API already use, so nothing
+  // has to invent a name for it. `backends` is the catalogue with health, so
+  // the picker can say which ones are actually answering.
+  chatBackend: null, backends: [], defaultBackend: '',
 };
 
 function api(path, options = {}) {
@@ -106,11 +111,20 @@ function start(me) {
   // The agent list is fetched at boot rather than on first view, because the
   // chat needs it to say which agent a session is talking to — a question gets
   // a different answer depending on which library is behind it.
+  state.defaultBackend = me.default_backend || '';
   api('/api/v1/agents').then((data) => {
     state.agents = data.agents || [];
     state.agentAvailable = data.available || {};
-    renderChatAgentPicker();
+    renderChatControls();
   }).catch(() => { /* agents are optional; the chat works without them */ });
+  // Backends come from the catalogue rather than /me, because /me lists only
+  // their names and the picker is worth much less without the health: the
+  // failure this exists to get out of is a backend that is down, and a menu
+  // that will not say which ones those are just moves the guess.
+  api('/api/v1/backends').then((data) => {
+    state.backends = data.backends || [];
+    renderChatControls();
+  }).catch(() => { /* the chat still works on the server default */ });
 }
 
 /* ---------- view switching ---------- */
@@ -250,6 +264,11 @@ function agentOfSession(id) {
   return found ? (found.agent_id || null) : null;
 }
 
+function backendOfSession(id) {
+  const found = sessionIndex.find((s) => s.id === id);
+  return found ? (found.backend || null) : null;
+}
+
 async function loadSessions() {
   const { sessions } = await api('/api/v1/sessions');
   sessionIndex = sessions || [];
@@ -270,10 +289,18 @@ async function loadSessions() {
 async function newSession() {
   const sess = await api('/api/v1/sessions', {
     method: 'POST',
-    body: JSON.stringify({ title: '', agent: state.chatAgent || '' }),
+    body: JSON.stringify({
+      title: '',
+      agent: state.chatAgent || '',
+      backend: state.chatBackend || '',
+    }),
   });
   state.sessionId = sess.id;
   state.chatAgent = sess.agent_id || null;
+  // An agent can pin its own backend, so the session comes back naming what it
+  // actually got, which is not always what was asked for. Follow the answer.
+  state.chatBackend = sess.backend || null;
+  renderChatControls();
   $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
   await loadSessions();
   return sess.id;
@@ -292,6 +319,8 @@ async function openSession(id) {
   state.sessionId = id;
   const known = (state.agents || []).find((a) => a.id === agentOfSession(id));
   state.chatAgent = known ? known.id : agentOfSession(id);
+  state.chatBackend = backendOfSession(id);
+  renderChatControls();
   const { messages } = await api(`/api/v1/sessions/${id}/messages`);
   $('messages').innerHTML = '';
   for (const m of messages || []) appendMessage(m);
@@ -299,17 +328,28 @@ async function openSession(id) {
   closeSidebar();
 }
 
-// The chat's agent picker. Changing it affects the *next* session rather than
-// the current one: a transcript belongs to the agent it was held with, and
-// re-pointing it halfway would leave the earlier turns unexplainable.
-function renderChatAgentPicker() {
+// The strip under the composer: which agent a new chat opens against, and
+// which backend the chat runs on. Both are rendered together because they
+// share the one holder, and either can be absent — a server with no agents
+// configured still gets the backend picker, and vice versa.
+function renderChatControls() {
   const holder = $('chat-agent');
   if (!holder) return;
-  if (!state.agents.length) {
-    holder.replaceChildren();
-    return;
+  const parts = [];
+  if (state.agents.length) {
+    parts.push(el('span', { class: 'muted', text: 'New chat as' }), chatAgentSelect());
   }
-  const select = el('select', {
+  if (state.backends.length) {
+    parts.push(el('span', { class: 'muted', text: 'Backend' }), chatBackendSelect());
+  }
+  holder.replaceChildren(...parts);
+}
+
+// The agent picker. Changing it affects the *next* session rather than the
+// current one: a transcript belongs to the agent it was held with, and
+// re-pointing it halfway would leave the earlier turns unexplainable.
+function chatAgentSelect() {
+  return el('select', {
     id: 'chat-agent-select',
     title: 'Which agent a new chat is opened against',
     onchange: (e) => { state.chatAgent = e.target.value || null; },
@@ -321,7 +361,51 @@ function renderChatAgentPicker() {
       return opt;
     }),
   ]);
-  holder.replaceChildren(el('span', { class: 'muted', text: 'New chat as' }), select);
+}
+
+// The backend picker. Unlike the agent, this *does* re-point the open session,
+// via PATCH .../model — switching mid-conversation is the point, and is how a
+// turn stuck on a local model gets escalated to a stronger one without losing
+// the transcript. With no session open there is nothing to patch yet, so the
+// choice is just remembered for the next one.
+//
+// Each option carries the backend's health, because a name alone cannot
+// distinguish the backend that is serving from the one refusing connections,
+// and picking the dead one is precisely the mistake this is here to prevent.
+function chatBackendSelect() {
+  const label = (b) => {
+    const model = b.model ? ` · ${b.model}` : '';
+    const status = b.status === 'ok' ? '' : ` (${b.status})`;
+    return `${b.name}${model}${status}`;
+  };
+  const def = state.defaultBackend ? `Server default (${state.defaultBackend})` : 'Server default';
+  return el('select', {
+    id: 'chat-backend-select',
+    title: 'Which backend answers this chat',
+    onchange: (e) => { setChatBackend(e.target.value || null).catch(showError); },
+  }, [
+    el('option', { value: '', text: def }),
+    ...state.backends.map((b) => {
+      const opt = el('option', { value: b.name, text: label(b) });
+      if (b.name === state.chatBackend) opt.selected = true;
+      return opt;
+    }),
+  ]);
+}
+
+async function setChatBackend(name) {
+  state.chatBackend = name;
+  if (!state.sessionId) return;
+  // The model is deliberately left empty: it names a model *within* a backend,
+  // and carrying the old one across would ask the new backend for something it
+  // has probably never heard of. Empty means the backend's own default.
+  await api(`/api/v1/sessions/${state.sessionId}/model`, {
+    method: 'PATCH',
+    body: JSON.stringify({ backend: name || '', model: '' }),
+  });
+  const found = sessionIndex.find((s) => s.id === state.sessionId);
+  if (found) { found.backend = name || ''; found.model = ''; }
+  toast(name ? `This chat now runs on ${name}` : 'This chat now runs on the server default');
 }
 
 $('new-session').addEventListener('click', () => newSession().catch(showError));
