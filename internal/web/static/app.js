@@ -789,9 +789,15 @@ function appendPending() {
 // There is nothing to invent here, because the server already writes as it
 // goes: the agent loop appends each assistant message and each tool result to
 // SQLite before the next iteration (it has to — the transcript is replayed
-// from the database every time round). So GET /messages *during* a turn
-// returns the work so far, and polling it is a real progress feed rather than
-// a guess.
+// from the database every time round). So the work so far is readable *during*
+// a turn, and polling it is a real progress feed rather than a guess.
+//
+// It polls /progress rather than /messages. Reading the transcript to look at
+// the end of it means the server loads every message with its content and its
+// thinking blocks, serialises the lot, and the browser parses it and throws
+// all but the last row away — several times a minute, on an object that grows
+// with the conversation. /progress answers the same question with indexed
+// counts and one row, and stays the same size however long the session runs.
 //
 // The poll doubles as the liveness check the numbers alone would not give: if
 // it comes back, the server is answering, and if it stops the status says so
@@ -809,20 +815,15 @@ function elapsedLabel(ms) {
   return `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, '0')}s`;
 }
 
-// The turn in progress is everything after the last user message, so the step
-// count is exact without having to record a baseline before sending.
-function describeTurn(messages) {
-  let i = messages.length - 1;
-  while (i >= 0 && messages[i].role !== 'user') i--;
-  const turn = messages.slice(i + 1);
-  const steps = turn.filter((m) => m.role === 'assistant').length;
-  const last = turn[turn.length - 1];
-
-  if (!last) return 'sent — waiting for the model';
-  if (last.role === 'assistant' && last.tool_calls && last.tool_calls.length) {
-    return `step ${steps} · running ${last.tool_calls.map((c) => c.name).join(', ')}`;
+// The server counts the steps — everything after the last user message — so
+// this only has to put words to them.
+function describeTurn(p) {
+  const steps = p.steps || 0;
+  if (!p.last_role || p.last_role === 'user') return 'sent — waiting for the model';
+  if (p.last_role === 'assistant' && p.tools && p.tools.length) {
+    return `step ${steps} · running ${p.tools.join(', ')}`;
   }
-  if (last.role === 'tool') return `step ${steps} · tool returned, back to the model`;
+  if (p.last_role === 'tool') return `step ${steps} · tool returned, back to the model`;
   return `step ${steps} · writing the reply`;
 }
 
@@ -846,13 +847,12 @@ function watchTurn(node, sessionId) {
 
   async function poll() {
     try {
-      const { messages } = await api(`/api/v1/sessions/${sessionId}/messages`);
-      const list = messages || [];
-      if (list.length !== seen) {
-        seen = list.length;
+      const progress = await api(`/api/v1/sessions/${sessionId}/progress`);
+      if (progress.count !== seen) {
+        seen = progress.count;
         changedAt = Date.now();
       }
-      note = describeTurn(list);
+      note = describeTurn(progress);
       warn = '';
     } catch {
       // Only the progress read failed — the turn request itself is still open,

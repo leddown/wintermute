@@ -211,6 +211,83 @@ func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...ll
 }
 
 // Messages returns a session's full transcript in order.
+// TurnProgress summarises where a running turn has got to.
+//
+// It exists because the browser polls for progress every few seconds while a
+// turn is in flight, and the obvious way to answer — read the transcript and
+// look at the end of it — is the expensive way. Messages() returns every row
+// with its content, its tool calls and its thinking blocks; on a long session
+// against a reasoning model that is the largest object the server builds, and
+// polling it re-reads, re-parses and re-serialises the whole conversation
+// several times a minute to look at one row. The cost also grows with the
+// conversation, so it is worst exactly when turns are longest.
+//
+// These four numbers are what the status line actually shows. They come from
+// indexed counts and a single-row lookup that never touches content or
+// thinking, so the answer stays the same size whether the session has ten
+// messages or ten thousand.
+type TurnProgress struct {
+	// Count is the whole transcript's length, which the client uses to notice
+	// that something changed since the last poll.
+	Count int `json:"count"`
+	// Steps is how many assistant messages belong to the turn in progress —
+	// everything after the last user message.
+	Steps int `json:"steps"`
+	// LastRole is the role of the newest message: "assistant" mid-tool-call,
+	// "tool" just after one returned, "user" before the model has replied.
+	LastRole string `json:"last_role"`
+	// Tools names the calls the newest assistant message asked for, when it
+	// asked for any.
+	Tools []string `json:"tools,omitempty"`
+}
+
+// TurnProgress reads the summary above for one session.
+func (s *Store) TurnProgress(ctx context.Context, sessionID string) (TurnProgress, error) {
+	var p TurnProgress
+	// The count and the turn boundary come from one pass. MAX over a CASE is
+	// null when the session has no user message yet, which is a new session
+	// rather than an error.
+	var lastUser sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), MAX(CASE WHEN role = 'user' THEN seq END)
+		 FROM messages WHERE session_id = ?`, sessionID).Scan(&p.Count, &lastUser)
+	if err != nil {
+		return p, fmt.Errorf("turn progress: %w", err)
+	}
+	if p.Count == 0 {
+		return p, nil
+	}
+
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM messages
+		 WHERE session_id = ? AND role = 'assistant' AND seq > ?`,
+		sessionID, lastUser.Int64).Scan(&p.Steps); err != nil {
+		return p, fmt.Errorf("turn progress steps: %w", err)
+	}
+
+	// Only the newest row, and only the two columns the status needs — no
+	// content and no thinking.
+	var calls string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT role, tool_calls FROM messages
+		 WHERE session_id = ? ORDER BY seq DESC LIMIT 1`,
+		sessionID).Scan(&p.LastRole, &calls); err != nil {
+		return p, fmt.Errorf("turn progress last message: %w", err)
+	}
+	if calls != "" {
+		var parsed []tool.Call
+		if err := json.Unmarshal([]byte(calls), &parsed); err != nil {
+			// A malformed row should not take the status line down with it;
+			// the roles and counts above are still worth returning.
+			return p, nil
+		}
+		for _, c := range parsed {
+			p.Tools = append(p.Tools, c.Name)
+		}
+	}
+	return p, nil
+}
+
 func (s *Store) Messages(ctx context.Context, sessionID string) ([]llm.Message, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT role, content, tool_calls, tool_call_id, is_error, thinking FROM messages

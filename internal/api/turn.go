@@ -146,6 +146,23 @@ func (s *Server) handleToolResults(w http.ResponseWriter, r *http.Request) {
 	s.writeTurn(w, turn, err)
 }
 
+// handleTurnProgress answers "is it still working, and on what" while a turn
+// is running. The browser polls this every few seconds, so it is deliberately
+// the cheapest read in the API — see store.TurnProgress for why it is not just
+// a call to the messages endpoint.
+func (s *Server) handleTurnProgress(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	progress, err := s.store.TurnProgress(r.Context(), sess.ID)
+	if err != nil {
+		s.fail(w, "turn progress", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, progress)
+}
+
 func (s *Server) writeTurn(w http.ResponseWriter, turn *agent.Turn, err error) {
 	switch {
 	// Both of these carry the failing tool and its error in the wrapped

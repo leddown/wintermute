@@ -111,6 +111,7 @@ func (s *Server) Handler() http.Handler {
 	authed("POST /api/v1/sessions", s.handleCreateSession)
 	authed("GET /api/v1/sessions", s.handleListSessions)
 	authed("GET /api/v1/sessions/{id}/messages", s.handleMessages)
+	authed("GET /api/v1/sessions/{id}/progress", s.handleTurnProgress)
 	authed("POST /api/v1/sessions/{id}/messages", s.handlePostMessage)
 	authed("POST /api/v1/sessions/{id}/tool_results", s.handleToolResults)
 	authed("GET /api/v1/sessions/{id}/audit", s.handleAudit)
