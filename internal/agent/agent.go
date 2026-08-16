@@ -114,6 +114,25 @@ func (a *Agent) Router() *llm.Router { return a.router }
 // ErrTooManyIterations is returned when a turn exceeds the tool-call budget.
 var ErrTooManyIterations = errors.New("tool iteration budget exhausted")
 
+// ErrRepeatedToolFailure is returned when the model retried the same failing
+// call unchanged until it was clearly not going to change its mind.
+var ErrRepeatedToolFailure = errors.New("the same tool call failed repeatedly")
+
+// repeatedToolFailureLimit is how many identical failures end the turn.
+//
+// A capable model reads a tool's error and fixes its arguments. A small local
+// one often cannot: asked for a task "due 18/8/2026" it sends that string, is
+// told the field wants YYYY-MM-DD, and sends it again — the same call, the
+// same error, until the budget runs out. That is twelve model calls to reach a
+// conclusion the second one already supported, which on local hardware is
+// minutes of waiting for an error message that then names neither the tool nor
+// the argument.
+//
+// Three is enough to distinguish a stuck model from one making progress: a
+// genuine retry with different arguments resets the count, because the error
+// text changes with it.
+const repeatedToolFailureLimit = 3
+
 // Advance appends the given messages to the session transcript and runs the
 // loop until the model answers or asks for a client-side tool.
 //
@@ -136,6 +155,12 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 	}
 
 	turn := &Turn{SessionID: sess.ID}
+	// The last tool failure, and how many times running it has repeated
+	// unchanged. Both are reported if the turn ends badly: "budget exhausted"
+	// on its own does not say which call was stuck, which is the only thing
+	// the operator needs to know.
+	var lastFailure string
+	var repeats int
 	for i := 0; i < a.maxIterations; i++ {
 		history, err := a.store.Messages(ctx, sess.ID)
 		if err != nil {
@@ -189,6 +214,25 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 			if err := a.store.AppendMessages(ctx, sess.ID, llm.ToolMessage(res)); err != nil {
 				return nil, err
 			}
+			// A result is still written for a repeated failure before the turn
+			// ends, so the transcript records what was tried and why it was
+			// refused rather than stopping mid-exchange.
+			if res.IsError {
+				if key := call.Name + ": " + res.Content; key == lastFailure {
+					repeats++
+					if repeats >= repeatedToolFailureLimit {
+						a.log.Warn("stopping turn: repeated identical tool failure",
+							"session", sess.ID, "tool", call.Name, "attempts", repeats,
+							"error", res.Content)
+						return nil, fmt.Errorf("%w: %s (tried %d times, unchanged)",
+							ErrRepeatedToolFailure, key, repeats)
+					}
+				} else {
+					lastFailure, repeats = key, 1
+				}
+			} else {
+				lastFailure, repeats = "", 0
+			}
 		}
 
 		if len(clientCalls) > 0 {
@@ -199,6 +243,9 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		}
 	}
 
+	if lastFailure != "" {
+		return nil, fmt.Errorf("%w; the last tool error was %s", ErrTooManyIterations, lastFailure)
+	}
 	return nil, ErrTooManyIterations
 }
 

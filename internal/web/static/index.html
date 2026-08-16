@@ -95,6 +95,10 @@
           <div id="messages" class="messages">
             <div class="empty muted">Ask about your media library, your tasks, or anything else.</div>
           </div>
+          <!-- Precise phrasings for a small backend. Hidden unless the active
+               model is under the size where wording starts to matter; see
+               renderWordCloud() in app.js. -->
+          <div id="word-cloud" class="word-cloud" hidden></div>
           <form id="composer" class="composer">
             <textarea id="input" rows="1" placeholder="Message Wintermute…" autocomplete="off"></textarea>
             <button id="send" type="submit" aria-label="Send">↑</button>

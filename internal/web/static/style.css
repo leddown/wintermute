@@ -469,6 +469,22 @@ button:disabled { opacity: .5; cursor: default; }
 .composer button { width: 42px; height: 42px; padding: 0; border-radius: 50%; }
 .hint { padding: 0 20px 12px; font-size: 11.5px; text-align: center; }
 
+/* Ready-made phrasings for a small backend, above the composer. Wraps rather
+   than scrolls: it is a set of options to scan, and a hidden option is not
+   one. */
+.word-cloud {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  padding: 8px 20px 0;
+}
+.word-cloud-note { width: 100%; font-size: 11.5px; }
+.chip {
+  padding: 4px 10px;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--muted);
+  font-size: 12px; cursor: pointer;
+}
+.chip:hover { color: var(--text); border-color: var(--accent); }
+
 @media (max-width: 720px) {
   .icon-btn { display: block; }
   .sidebar {

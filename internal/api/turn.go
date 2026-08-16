@@ -148,9 +148,16 @@ func (s *Server) handleToolResults(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) writeTurn(w http.ResponseWriter, turn *agent.Turn, err error) {
 	switch {
+	// Both of these carry the failing tool and its error in the wrapped
+	// message. That detail is the whole value of the report — "budget
+	// exhausted" alone sends the reader to the server log to find out that a
+	// date was in the wrong format.
+	case errors.Is(err, agent.ErrRepeatedToolFailure):
+		writeError(w, http.StatusUnprocessableEntity, err.Error())
 	case errors.Is(err, agent.ErrTooManyIterations):
 		writeError(w, http.StatusUnprocessableEntity,
-			"the model exceeded its tool-call budget for this turn; rephrase or narrow the request")
+			"the model exceeded its tool-call budget for this turn; rephrase or narrow the request. "+
+				strings.TrimPrefix(err.Error(), agent.ErrTooManyIterations.Error()))
 	case err != nil:
 		s.fail(w, "advance turn", err)
 	default:

@@ -74,6 +74,19 @@ type Backend struct {
 	APIKey string `json:"-"`
 	Model  string `json:"model,omitempty"`
 	Cloud  bool   `json:"cloud"`
+
+	// Memory is how much memory the loaded model occupies, as the operator
+	// wrote it in backends.json ("7GB", "3500MB"). It is declared rather than
+	// measured: the server talks to an inference server over HTTP and has no
+	// way to ask how much VRAM the weights took, and on a remote host it is
+	// not even the same machine.
+	//
+	// MemoryBytes is that figure parsed. Zero means undeclared, which is
+	// treated as unknown and never as small — a missing number must not make
+	// the UI assume the worst about a backend the operator simply did not
+	// annotate.
+	Memory      string `json:"memory,omitempty"`
+	MemoryBytes int64  `json:"memory_bytes,omitempty"`
 }
 
 // Model is one model as reported by a backend, enriched with whatever the

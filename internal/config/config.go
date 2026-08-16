@@ -59,6 +59,21 @@ type Config struct {
 	// an unset one means the corresponding tools are never offered rather than
 	// offered and failing.
 
+	// AssistantTools names the tool groups the assistant is allowed to use,
+	// from WINTERMUTE_ASSISTANT_TOOLS. This is the assistant's reach into the
+	// rest of the application, and it is an allowlist rather than a blocklist:
+	// a group that is not named here is never registered, so the model is not
+	// told the tool exists and cannot call it.
+	//
+	// It defaults to the tasks module alone. Every other group — the books,
+	// the portfolio, the media lookups — is a deliberate decision to let a
+	// language model act on that data, and defaulting to "all of it" would
+	// make that decision silently on the operator's behalf.
+	//
+	// Known groups are listed in app.go, which is the only place that knows
+	// what each one registers.
+	AssistantTools []string
+
 	// GRCBaseURL and GRCToken point at a GRC application's read-only knowledge
 	// API — its Security NFR catalog, controls, regulations, policies and
 	// risks. The token cannot write; the API it opens has no write path.
@@ -204,6 +219,7 @@ func Load() (*Config, error) {
 		TVDBAPIKey:        os.Getenv("TVDB_API_KEY"),
 		TVDBPin:           os.Getenv("TVDB_PIN"),
 		OMDBAPIKey:        os.Getenv("OMDB_API_KEY"),
+		AssistantTools:    envStringSlice("WINTERMUTE_ASSISTANT_TOOLS", []string{"tasks"}),
 		GRCBaseURL:        strings.TrimSpace(os.Getenv("GRC_URL")),
 		GRCToken:          strings.TrimSpace(os.Getenv("GRC_KNOWLEDGE_TOKEN")),
 		SearxURL:          strings.TrimSpace(os.Getenv("SEARXNG_URL")),
@@ -248,6 +264,23 @@ func envString(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envStringSlice reads a comma-separated list, lowercased and trimmed. An
+// unset variable takes the fallback; an explicitly empty one means an empty
+// list, which is how an operator turns a whole allowlist off.
+func envStringSlice(key string, fallback []string) []string {
+	raw, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		if p := strings.ToLower(strings.TrimSpace(part)); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 func envInt(key string, fallback int) (int, error) {

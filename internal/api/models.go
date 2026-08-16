@@ -172,6 +172,36 @@ func (s *Server) fileBackend(ctx context.Context, name string) bool {
 	return live
 }
 
+// backendView is a health row plus what the configuration says about the
+// backend. Declared memory lives in backends.json and never reaches the
+// database, so it is joined on the way out rather than persisted — which also
+// means changing it is a file edit and a reload, not a migration.
+type backendView struct {
+	store.BackendRow
+	Memory      string `json:"memory,omitempty"`
+	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+}
+
+// withMemory attaches each backend's declared size to its health row. A
+// backend the configuration does not mention — one declared in the database
+// through the admin UI — simply has no memory, which readers must treat as
+// unknown rather than as zero.
+func withMemory(rows []store.BackendRow, configured []models.Backend) []backendView {
+	declared := make(map[string]models.Backend, len(configured))
+	for _, b := range configured {
+		declared[b.Name] = b
+	}
+	out := make([]backendView, 0, len(rows))
+	for _, row := range rows {
+		view := backendView{BackendRow: row}
+		if b, ok := declared[row.Name]; ok {
+			view.Memory, view.MemoryBytes = b.Memory, b.MemoryBytes
+		}
+		out = append(out, view)
+	}
+	return out
+}
+
 func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 	health, err := s.catalog.BackendHealth(r.Context())
 	if err != nil {
@@ -191,7 +221,7 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 		names = append(names, d.Name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"backends": health,
+		"backends": withMemory(health, s.catalog.Backends()),
 		"default":  s.agent.Router().Default(),
 		"fallback": s.agent.Router().Fallback(),
 		"declared": names,

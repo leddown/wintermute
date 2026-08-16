@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"wintermute/internal/llm"
@@ -47,6 +49,47 @@ type PoolEntry struct {
 	MaxInflight int `json:"max_inflight"`
 }
 
+// memoryPattern splits "7GB" / "7.5 GiB" / "3500 MB" into number and unit.
+var memoryPattern = regexp.MustCompile(`^([0-9]*\.?[0-9]+)\s*([a-zA-Z]*)$`)
+
+// memoryUnits are the suffixes accepted, in bytes. Both the decimal (GB) and
+// binary (GiB) spellings are taken at their real values rather than treated as
+// synonyms: an operator who writes GiB means GiB, and the difference over 8
+// units is most of a gigabyte — enough to land on the wrong side of a
+// threshold something else is deciding by.
+var memoryUnits = map[string]int64{
+	"":    1,
+	"b":   1,
+	"kb":  1000,
+	"kib": 1024,
+	"mb":  1000 * 1000,
+	"mib": 1024 * 1024,
+	"gb":  1000 * 1000 * 1000,
+	"gib": 1024 * 1024 * 1024,
+	"tb":  1000 * 1000 * 1000 * 1000,
+	"tib": 1024 * 1024 * 1024 * 1024,
+}
+
+// ParseMemory turns a declared memory size into bytes.
+func ParseMemory(s string) (int64, error) {
+	m := memoryPattern.FindStringSubmatch(strings.TrimSpace(s))
+	if m == nil {
+		return 0, fmt.Errorf("cannot read %q as a size; write it like \"7GB\" or \"3500MB\"", s)
+	}
+	value, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0, fmt.Errorf("cannot read %q as a size: %w", s, err)
+	}
+	unit, ok := memoryUnits[strings.ToLower(m[2])]
+	if !ok {
+		return 0, fmt.Errorf("unknown size unit %q in %q; use B, MB, MiB, GB or GiB", m[2], s)
+	}
+	if value < 0 {
+		return 0, fmt.Errorf("memory cannot be negative: %q", s)
+	}
+	return int64(value * float64(unit)), nil
+}
+
 // BackendedEntry is one declared backend.
 type BackendedEntry struct {
 	Name    string `json:"name"`
@@ -57,6 +100,14 @@ type BackendedEntry struct {
 	// The key itself is deliberately not accepted here, so a config file can
 	// be committed or shared without leaking a credential.
 	APIKeyEnv string `json:"api_key_env"`
+	// Memory is how much memory this model occupies once loaded, written the
+	// way an operator thinks of it: "7GB", "3500MB", "8 GiB". It is optional,
+	// and a backend without it is treated as unknown rather than as small.
+	//
+	// The server cannot measure this. It speaks to an inference server over
+	// HTTP, which does not report what the weights cost, and may not even be
+	// on this machine — so the number is declared here or not known at all.
+	Memory string `json:"memory,omitempty"`
 }
 
 // defaultBackendsJSON is written by -init and used when no file exists: a
@@ -126,6 +177,9 @@ func envBackends() (*BackendsFile, error) {
 		Kind:    kind,
 		BaseURL: os.Getenv("WINTERMUTE_LLM_BASE_URL"),
 		Model:   os.Getenv("WINTERMUTE_LLM_MODEL"),
+		// The file-less setup gets the same knob, so a single local model can
+		// declare its size without having to grow a backends.json to do it.
+		Memory: strings.TrimSpace(os.Getenv("WINTERMUTE_LLM_MEMORY")),
 	}
 	if models.Kind(kind) == models.KindAnthropic {
 		entry.Name = "claude"
@@ -173,6 +227,14 @@ func (f *BackendsFile) resolve() ([]models.Backend, error) {
 			BaseURL: strings.TrimSpace(e.BaseURL),
 			Model:   e.Model,
 			Cloud:   !kind.Local(),
+			Memory:  strings.TrimSpace(e.Memory),
+		}
+		if b.Memory != "" {
+			bytes, err := ParseMemory(b.Memory)
+			if err != nil {
+				return nil, fmt.Errorf("backend %q: memory: %w", e.Name, err)
+			}
+			b.MemoryBytes = bytes
 		}
 		if e.APIKeyEnv != "" {
 			b.APIKey = os.Getenv(e.APIKeyEnv)

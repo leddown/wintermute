@@ -573,6 +573,92 @@ async function openSession(id) {
 // which backend the chat runs on. Both are rendered together because they
 // share the one holder, and either can be absent — a server with no agents
 // configured still gets the backend picker, and vice versa.
+/* ---------- word cloud ---------- */
+//
+// Ready-made phrasings, shown only when the backend answering is a small one.
+//
+// A 7B model does not fail at tasks because it cannot do them; it fails on the
+// wording. Asked for something "due 18/8/2026" it sends that string to a tool
+// that wants YYYY-MM-DD, is told so, tries the same thing again, and burns the
+// turn's tool budget on one date. The tools now normalise what they can, but
+// the cheaper fix is to not make the model guess: these phrase the request the
+// way the tools describe themselves, with a real ISO date already in place.
+//
+// A large model needs none of this and would only be crowded by it, so the
+// strip appears only under smallBackendBytes.
+
+// Under this, a backend is treated as small enough to need help with phrasing.
+// Decimal GB, matching how the sizes are written in backends.json.
+const smallBackendBytes = 8 * 1000 * 1000 * 1000;
+
+// Placeholders are wrapped in guillemets so inserting a phrase can select the
+// first one for typing over. They are not sent to the model as-is: the user
+// either replaces them or edits the line.
+function wordCloudPhrases() {
+  const soon = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
+  return [
+    ['Add task', `Add task «Fix car» to list «Home» due ${soon}`],
+    ['New list', 'Create list «Home» with tasks «Fix car», «Book MOT»'],
+    ['Agenda', 'Show my agenda'],
+    ['Open tasks', 'List tasks with status todo'],
+    ['Tasks on a list', 'List tasks on list «Home»'],
+    ['Complete', 'Mark task #«12» done'],
+    ['Reschedule', `Change the due date of task #«12» to ${soon}`],
+    ['Priority', 'Set task #«12» priority to high'],
+    ['Rename', 'Change the title of task #«12» to «Fix car brakes»'],
+    ['Delete', 'Delete task #«12»'],
+    ['Note', 'Write a note: «ring the garage back»'],
+  ];
+}
+
+// activeBackend is the one this chat will actually run on: the session's
+// choice, or the server default when it has none.
+function activeBackend() {
+  const name = state.chatBackend || state.defaultBackend;
+  return (state.backends || []).find((b) => b.name === name) || null;
+}
+
+function renderWordCloud() {
+  const box = $('word-cloud');
+  if (!box) return;
+  const backend = activeBackend();
+  // Zero or missing means undeclared, which is unknown rather than small — a
+  // backend nobody annotated must not be treated as the worst case.
+  const bytes = backend ? Number(backend.memory_bytes) || 0 : 0;
+  if (bytes <= 0 || bytes >= smallBackendBytes) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+
+  const chips = wordCloudPhrases().map(([label, phrase]) => {
+    const chip = el('button', {
+      type: 'button', class: 'chip', text: label, title: phrase,
+      onclick: () => insertPhrase(phrase),
+    });
+    return chip;
+  });
+  box.replaceChildren(
+    el('span', { class: 'muted word-cloud-note', text:
+      `${backend.name} is ${backend.memory || 'small'} — these phrasings match what the tools expect:` }),
+    ...chips);
+  box.hidden = false;
+}
+
+// insertPhrase puts a phrase in the composer and selects its first
+// placeholder, so the next keystroke replaces it rather than appending to it.
+function insertPhrase(phrase) {
+  const input = $('input');
+  input.value = phrase;
+  input.style.height = 'auto';
+  input.style.height = `${Math.min(input.scrollHeight, 200)}px`;
+  input.focus();
+  const open = phrase.indexOf('«');
+  const close = phrase.indexOf('»');
+  if (open >= 0 && close > open) input.setSelectionRange(open + 1, close);
+  else input.setSelectionRange(phrase.length, phrase.length);
+}
+
 function renderChatControls() {
   const holder = $('chat-agent');
   if (!holder) return;
@@ -584,6 +670,9 @@ function renderChatControls() {
     parts.push(el('span', { class: 'muted', text: 'Backend' }), chatBackendSelect());
   }
   holder.replaceChildren(...parts);
+  // The strip and the cloud answer the same question — which model is this
+  // going to — so they are rebuilt together whenever the backend changes.
+  renderWordCloud();
 }
 
 // The agent picker. Changing it affects the *next* session rather than the

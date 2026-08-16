@@ -197,17 +197,31 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 
 	catalog := models.NewCatalog(backends, st, models.NewHub("", cfg.HuggingFaceToken), log)
 
+	// Which parts of the application the assistant may act on. See
+	// assistantGroups for what each name covers and why this is an allowlist.
+	enabled, err := assistantGroups(cfg.AssistantTools)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	log.Info("assistant tool groups", "enabled", cfg.AssistantTools,
+		"available", knownAssistantGroups)
+
 	tools := tool.NewRegistry()
 	providers := metadataProviders(cfg, log)
-	if err := lookup.Register(tools, providers); err != nil {
-		st.Close()
-		return nil, fmt.Errorf("register lookup tools: %w", err)
+	if enabled["media"] {
+		if err := lookup.Register(tools, providers); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("register lookup tools: %w", err)
+		}
 	}
 	// Model-awareness tools let the assistant answer hardware and model
 	// questions from measurements rather than from its training data.
-	if err := models.Register(tools, catalog); err != nil {
-		st.Close()
-		return nil, fmt.Errorf("register model tools: %w", err)
+	if enabled["models"] {
+		if err := models.Register(tools, catalog); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("register model tools: %w", err)
+		}
 	}
 
 	// Workspace modules: company profile, CRM and tasks. They share the store's
@@ -226,28 +240,36 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	// The task tools go on the same registry the media and model tools use, so
 	// the assistant that already exists gains them. This is what the RCSA app's
 	// separate Assistant page did; it does not need a second agent here.
-	if err := accounting.Register(tools, workspace.Accounting); err != nil {
-		st.Close()
-		return nil, fmt.Errorf("register accounting tools: %w", err)
+	if enabled["accounting"] {
+		if err := accounting.Register(tools, workspace.Accounting); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("register accounting tools: %w", err)
+		}
 	}
-	if err := todo.Register(tools, todoService); err != nil {
-		st.Close()
-		return nil, fmt.Errorf("register task tools: %w", err)
+	if enabled["tasks"] {
+		if err := todo.Register(tools, todoService); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("register task tools: %w", err)
+		}
 	}
 	// The portfolio's tools, so the assistant can answer about holdings and
 	// forecasts rather than about markets in general.
-	if err := fintech.Register(tools, fintechService); err != nil {
-		st.Close()
-		return nil, fmt.Errorf("register fintech tools: %w", err)
+	if enabled["portfolio"] {
+		if err := fintech.Register(tools, fintechService); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("register fintech tools: %w", err)
+		}
 	}
 
 	// The canary tripwire, moved here from morpheus. Read-only for the
 	// assistant: it can report what tripped, and cannot open a listening socket
 	// or touch the SMTP credential.
 	twireService := buildTwire(cfg, st, log)
-	if err := twire.Register(tools, twireService); err != nil {
-		st.Close()
-		return nil, fmt.Errorf("register twire tools: %w", err)
+	if enabled["twire"] {
+		if err := twire.Register(tools, twireService); err != nil {
+			st.Close()
+			return nil, fmt.Errorf("register twire tools: %w", err)
+		}
 	}
 
 	// Agent profiles: the document libraries, and the external sources a
@@ -406,6 +428,48 @@ func buildTwire(cfg *config.Config, st *store.Store, log *slog.Logger) *twire.Se
 	log.Info("twire configured",
 		"alerts_from_env", envDefaults.Enabled, "secret", svc.SecretConfigured())
 	return svc
+}
+
+// knownAssistantGroups is every group WINTERMUTE_ASSISTANT_TOOLS understands,
+// and what each one hands the model:
+//
+//	tasks       lists, tasks, notes and the calendar — the Tasks view
+//	media       the TMDB/TVDB/OMDb title lookups
+//	models      hardware and model-fit questions, answered from measurements
+//	accounting  the books: invoices, payments, expenses, reports
+//	portfolio   holdings, trades, forecasts, the simulated broker
+//	twire       the canary tripwire, read-only
+//
+// Defaults to tasks alone. Server-side tools run inside the agent loop and are
+// recorded as auto-approved — there is no per-call confirmation the way there
+// is for a client action — so which groups are on *is* the approval decision,
+// made once by the operator instead of per turn by the model.
+//
+// The document and web tools a session gets from an agent profile are not
+// listed here: those are attached per session by the agent scoper, and are
+// already a deliberate per-profile choice.
+var knownAssistantGroups = []string{
+	"tasks", "media", "models", "accounting", "portfolio", "twire",
+}
+
+// assistantGroups turns the configured names into a lookup, rejecting any it
+// does not recognise. A typo silently disabling a group would be a bad way to
+// find out that the assistant has no tools.
+func assistantGroups(names []string) (map[string]bool, error) {
+	known := make(map[string]bool, len(knownAssistantGroups))
+	for _, g := range knownAssistantGroups {
+		known[g] = true
+	}
+	enabled := make(map[string]bool, len(names))
+	for _, n := range names {
+		if !known[n] {
+			return nil, fmt.Errorf(
+				"WINTERMUTE_ASSISTANT_TOOLS: unknown group %q; known groups are %s",
+				n, strings.Join(knownAssistantGroups, ", "))
+		}
+		enabled[n] = true
+	}
+	return enabled, nil
 }
 
 // metadataProviders registers whichever metadata sources have credentials.
