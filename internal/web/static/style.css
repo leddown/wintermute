@@ -65,10 +65,12 @@
 :root[data-theme="matrix"] .icon-btn,
 :root[data-theme="matrix"] .link-btn,
 :root[data-theme="matrix"] .session-del,
+:root[data-theme="matrix"] .memory-badge,
 :root[data-theme="chaos"] .ghost-btn,
 :root[data-theme="chaos"] .icon-btn,
 :root[data-theme="chaos"] .link-btn,
-:root[data-theme="chaos"] .session-del {
+:root[data-theme="chaos"] .session-del,
+:root[data-theme="chaos"] .memory-badge {
   color: var(--text);
 }
 
@@ -837,7 +839,14 @@ dialog h3 { margin: 0; font-size: 15px; }
 .memory-badge {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
-  padding: 3px 10px; color: inherit; font: inherit; font-size: 12px; cursor: pointer;
+  padding: 3px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  /* An explicit colour, not `inherit`. The themes that fill buttons with the
+     accent set `button { color: #000 }` so the fill stays readable, and an
+     inherited colour loses to that — which on those themes' black background
+     rendered this badge black on black. The one control whose whole job is to
+     say whether the conversation is being recorded must not be able to go
+     invisible because a theme changed. */
+  color: var(--text);
 }
 .memory-badge:hover { border-color: var(--accent, #6ea8fe); }
 .memory-dot { font-size: 10px; line-height: 1; }
