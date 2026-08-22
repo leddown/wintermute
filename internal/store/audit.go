@@ -44,7 +44,7 @@ func (s *Store) RecordTool(ctx context.Context, e AuditEntry) error {
 		e.Outcome = e.Outcome[:maxOutcome] + "... (truncated)"
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO tool_audit (session_id, call_id, tool_name, side, risk, input, decision, outcome, is_error, created_at)
+		`INSERT INTO muninn (session_id, call_id, tool_name, side, risk, input, decision, outcome, is_error, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.SessionID, e.CallID, e.ToolName, string(e.Side), string(e.Risk),
 		e.Input, e.Decision, e.Outcome, e.IsError, time.Now().UTC())
@@ -61,7 +61,7 @@ func (s *Store) AuditForSession(ctx context.Context, sessionID string, limit int
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, session_id, call_id, tool_name, side, risk, input, decision, outcome, is_error, created_at
-		 FROM tool_audit WHERE session_id = ? ORDER BY id DESC LIMIT ?`, sessionID, limit)
+		 FROM muninn WHERE session_id = ? ORDER BY id DESC LIMIT ?`, sessionID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list audit: %w", err)
 	}

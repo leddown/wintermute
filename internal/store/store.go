@@ -117,7 +117,7 @@ func (s *Store) migrate() error {
 func (s *Store) Counts(ctx context.Context) (map[string]int, error) {
 	out := map[string]int{}
 	var firstErr error
-	for _, table := range []string{"sessions", "messages", "tool_audit", "clients"} {
+	for _, table := range []string{"sessions", "messages", "muninn", "clients"} {
 		var n int
 		// The table name is from this fixed list, never from a request.
 		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n); err != nil {

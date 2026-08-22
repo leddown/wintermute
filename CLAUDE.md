@@ -41,7 +41,7 @@ internal/api/       JSON HTTP handlers + auth middleware
 internal/llm/       Provider interface + Anthropic Messages API implementation
 internal/tool/      shared vocabulary: Definition, Call, Result, Registry
 internal/lookup/    server-side tools: TMDB/TVDB/OMDb metadata lookup
-internal/store/     SQLite: clients, sessions, messages, tool_audit
+internal/store/     SQLite: clients, sessions, messages, muninn (audit)
 internal/client/    harness: config, transport, approval policy, prompting
 internal/client/actions/   tools that run on the user's machine (fs, roots)
 internal/config/    server config from env + .env
@@ -152,7 +152,7 @@ language model. Treat model output as untrusted input.
   a confirmation the user is relying on.
 - **A refusal must still produce a tool result.** If the model isn't told
   an action was declined, it will report success it never achieved.
-- **Everything is audited.** Every proposed call is written to `tool_audit`
+- **Everything is audited.** Every proposed call is written to `muninn`
   with its decision and outcome, whether or not it ran. The transcript is
   not the audit trail — it can be edited or discarded.
 - Sessions are scoped to the authenticated client; always resolve a session

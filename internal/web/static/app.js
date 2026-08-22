@@ -2663,7 +2663,7 @@ async function renderAdminStatus(body) {
     stat(s.uptime, 'Uptime'),
     stat(s.sessions, 'Sessions'),
     stat(s.messages, 'Messages'),
-    stat(s.tool_audit, 'Audited calls'),
+    stat(s.muninn, 'Audited calls'),
     stat(s.clients, 'Clients'),
     stat(s.server_tools, 'Server tools')));
 
@@ -4053,7 +4053,7 @@ function renderBackup(body) {
 
 const PRUNE_TARGETS = [
   { value: 'sessions', label: 'Conversations (and their messages and audit rows)' },
-  { value: 'tool_audit', label: 'Tool audit rows only (keeps the conversations)' },
+  { value: 'muninn', label: 'Muninn audit rows only (keeps the conversations)' },
   { value: 'fintech_ai_usage', label: 'Recorded model-call costs' },
 ];
 

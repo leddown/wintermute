@@ -136,9 +136,14 @@ const (
 	// PruneTargetSessions deletes whole conversations by last activity.
 	// Messages and audit rows go with them via ON DELETE CASCADE.
 	PruneTargetSessions = "sessions"
-	// PruneTargetToolAudit deletes audit rows on their own, leaving the
+	// PruneTargetMuninn deletes audit rows on their own, leaving the
 	// conversations they belong to. The audit trail is the bulky part of an
 	// old session and the part least often read back.
+	PruneTargetMuninn = "muninn"
+	// PruneTargetToolAudit is what muninn was called before 0012_muninn.sql.
+	// It is still accepted so a browser left open across the rename, or a
+	// saved request, prunes what the operator meant rather than failing with
+	// "unknown target" for a table that does exist under another name.
 	PruneTargetToolAudit = "tool_audit"
 	// PruneTargetAIUsage deletes recorded model-call costs.
 	PruneTargetAIUsage = "fintech_ai_usage"

@@ -71,10 +71,10 @@ type AdminStatus struct {
 	// transaction open, so it is worth surfacing next to the database itself.
 	WALBytes int64 `json:"wal_bytes"`
 
-	Sessions  int `json:"sessions"`
-	Messages  int `json:"messages"`
-	ToolAudit int `json:"tool_audit"`
-	Clients   int `json:"clients"`
+	Sessions int `json:"sessions"`
+	Messages int `json:"messages"`
+	Muninn   int `json:"muninn"`
+	Clients  int `json:"clients"`
 
 	ServerTools int `json:"server_tools"`
 }
@@ -106,7 +106,7 @@ func (s *Server) handleAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	st.Sessions = counts["sessions"]
 	st.Messages = counts["messages"]
-	st.ToolAudit = counts["tool_audit"]
+	st.Muninn = counts["muninn"]
 	st.Clients = counts["clients"]
 
 	writeJSON(w, http.StatusOK, st)

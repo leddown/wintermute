@@ -121,7 +121,7 @@ func TestPruneSessionsCascades(t *testing.T) {
 		t.Fatalf("insert message: %v", err)
 	}
 	if _, err := st.DB().Exec(
-		`INSERT INTO tool_audit (session_id, call_id, tool_name, side, risk, decision, created_at)
+		`INSERT INTO muninn (session_id, call_id, tool_name, side, risk, decision, created_at)
 		 VALUES ('old', 'c1', 'list_canary_status', 'server', 'read', 'auto', ?)`,
 		old); err != nil {
 		t.Fatalf("insert audit: %v", err)
@@ -131,7 +131,7 @@ func TestPruneSessionsCascades(t *testing.T) {
 		t.Fatalf("Prune error: %v", err)
 	}
 
-	for _, table := range []string{"messages", "tool_audit"} {
+	for _, table := range []string{"messages", "muninn"} {
 		var n int
 		if err := st.DB().QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
 			t.Fatalf("count %s: %v", table, err)
@@ -142,9 +142,9 @@ func TestPruneSessionsCascades(t *testing.T) {
 	}
 }
 
-// tool_audit can be pruned on its own, leaving the conversation intact. This is
+// muninn can be pruned on its own, leaving the conversation intact. This is
 // the case for an old session worth keeping whose audit rows are the bulk of it.
-func TestPruneToolAuditLeavesSessions(t *testing.T) {
+func TestPruneMuninnLeavesSessions(t *testing.T) {
 	ctx := context.Background()
 	st, svc := newTestDB(t)
 	clientID := seedClient(t, st.DB())
@@ -153,14 +153,14 @@ func TestPruneToolAuditLeavesSessions(t *testing.T) {
 	insertSession(t, st.DB(), clientID, "kept", now)
 	for i, at := range []time.Time{now.AddDate(0, 0, -90), now.AddDate(0, 0, -1)} {
 		if _, err := st.DB().Exec(
-			`INSERT INTO tool_audit (session_id, call_id, tool_name, side, risk, decision, created_at)
+			`INSERT INTO muninn (session_id, call_id, tool_name, side, risk, decision, created_at)
 			 VALUES ('kept', ?, 'x', 'server', 'read', 'auto', ?)`,
 			string(rune('a'+i)), at); err != nil {
 			t.Fatalf("insert audit: %v", err)
 		}
 	}
 
-	res, err := svc.Prune(ctx, PruneTargetToolAudit, 30)
+	res, err := svc.Prune(ctx, PruneTargetMuninn, 30)
 	if err != nil {
 		t.Fatalf("Prune error: %v", err)
 	}

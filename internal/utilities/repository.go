@@ -5,7 +5,7 @@ package utilities
 // Two things here need more care than the rest of the port, and both are about
 // how a timestamp is spelled in this database.
 //
-// The tables from 0001_init.sql (sessions, messages, tool_audit, clients) are
+// The tables from 0001_init.sql (sessions, messages, muninn, clients) are
 // written by passing a time.Time straight to the driver, and modernc's driver
 // renders that with Go's default layout:
 //
@@ -249,12 +249,12 @@ func (r *Repository) PruneSessions(ctx context.Context, olderThanDays int) (int6
 		`DELETE FROM sessions WHERE substr(updated_at, 1, 19) < ?`, cutoff)
 }
 
-// PruneToolAudit deletes audit rows older than olderThanDays, leaving the
+// PruneMuninn deletes audit rows older than olderThanDays, leaving the
 // sessions they belong to in place.
-func (r *Repository) PruneToolAudit(ctx context.Context, olderThanDays int) (int64, error) {
+func (r *Repository) PruneMuninn(ctx context.Context, olderThanDays int) (int64, error) {
 	cutoff := driverCutoff(olderThanDays)
 	return r.exec(ctx, "prune tool audit",
-		`DELETE FROM tool_audit WHERE substr(created_at, 1, 19) < ?`, cutoff)
+		`DELETE FROM muninn WHERE substr(created_at, 1, 19) < ?`, cutoff)
 }
 
 // PruneAIUsage deletes recorded model-call costs older than olderThanDays.

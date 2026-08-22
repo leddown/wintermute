@@ -240,8 +240,8 @@ func (s *Service) Prune(ctx context.Context, target string, olderThanDays int) (
 	switch target {
 	case PruneTargetSessions:
 		n, err = s.repo.PruneSessions(ctx, olderThanDays)
-	case PruneTargetToolAudit:
-		n, err = s.repo.PruneToolAudit(ctx, olderThanDays)
+	case PruneTargetMuninn, PruneTargetToolAudit:
+		n, err = s.repo.PruneMuninn(ctx, olderThanDays)
 	case PruneTargetAIUsage:
 		n, err = s.repo.PruneAIUsage(ctx, olderThanDays)
 	default:

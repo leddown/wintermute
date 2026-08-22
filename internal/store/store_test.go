@@ -2,10 +2,14 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"path/filepath"
+	"sort"
 	"testing"
+	"time"
 
 	"wintermute/internal/llm"
 	"wintermute/internal/tool"
@@ -182,7 +186,7 @@ func TestDeleteSessionIsScopedAndCascades(t *testing.T) {
 		t.Errorf("second delete = %v, want ErrNotFound", err)
 	}
 
-	for _, table := range []string{"messages", "tool_audit"} {
+	for _, table := range []string{"messages", "muninn"} {
 		var n int
 		if err := st.DB().QueryRowContext(ctx,
 			`SELECT count(*) FROM `+table+` WHERE session_id = ?`, sess.ID).Scan(&n); err != nil {
@@ -323,5 +327,126 @@ func TestAuditOutcomeIsTruncated(t *testing.T) {
 	}
 	if len(got[0].Outcome) >= len(huge) {
 		t.Errorf("outcome length = %d, want it truncated", len(got[0].Outcome))
+	}
+}
+
+// The rename in 0012_muninn.sql has to carry the audit trail across intact.
+// This is the one table whose whole purpose is to still be there afterwards,
+// so the test builds a genuinely pre-0012 database — migrations 0001 through
+// 0011, applied in order, with a row written through the old name — and then
+// opens it normally to let 0012 run.
+func TestMuninnRenamePreservesAuditTrail(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.db")
+
+	// Build the database as it stood before this migration existed.
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(ON)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE schema_migrations (
+		name TEXT PRIMARY KEY,
+		applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := fs.ReadDir(migrationsFS, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() && e.Name() < "0012" {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		t.Fatal("no pre-0012 migrations found")
+	}
+	for _, name := range names {
+		body, err := migrationsFS.ReadFile("migrations/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := raw.Exec(string(body)); err != nil {
+			t.Fatalf("apply %s: %v", name, err)
+		}
+		if _, err := raw.Exec(`INSERT INTO schema_migrations (name) VALUES (?)`, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A client, a session and one audit row, written through the old name.
+	now := time.Now().UTC()
+	if _, err := raw.Exec(`INSERT INTO clients (name, token_hash, kind, created_at)
+		VALUES ('harness', 'hash', 'desktop', ?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	var clientID int64
+	if err := raw.QueryRow(`SELECT id FROM clients WHERE name = 'harness'`).Scan(&clientID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO sessions (id, client_id, title, created_at, updated_at)
+		VALUES ('sess-1', ?, 'before the rename', ?, ?)`, clientID, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO tool_audit
+		(session_id, call_id, tool_name, side, risk, input, decision, outcome, is_error, created_at)
+		VALUES ('sess-1', 'call-1', 'rename_file', 'client', 'write', '{"path":"x"}', 'denied', 'user refused', 0, ?)`,
+		now); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Opening normally applies 0012 and nothing else.
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("migrating across the rename failed: %v", err)
+	}
+	defer st.Close()
+
+	// The old name must be gone, or two tables would be accepting writes.
+	var oldTables int
+	if err := st.DB().QueryRowContext(ctx,
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'tool_audit'`).Scan(&oldTables); err != nil {
+		t.Fatal(err)
+	}
+	if oldTables != 0 {
+		t.Error("tool_audit still exists after the rename")
+	}
+
+	// The row has to have survived with every column intact: a rename that
+	// silently dropped the decision would leave an audit trail that no longer
+	// records whether the user said yes.
+	entriesOut, err := st.AuditForSession(ctx, "sess-1", 10)
+	if err != nil {
+		t.Fatalf("read audit after rename: %v", err)
+	}
+	if len(entriesOut) != 1 {
+		t.Fatalf("audit rows after rename = %d, want 1", len(entriesOut))
+	}
+	got := entriesOut[0]
+	if got.CallID != "call-1" || got.ToolName != "rename_file" ||
+		got.Decision != "denied" || got.Outcome != "user refused" ||
+		string(got.Side) != "client" || string(got.Risk) != "write" ||
+		got.Input != `{"path":"x"}` {
+		t.Errorf("audit row changed across the rename: %+v", got)
+	}
+
+	// And new writes must land in the renamed table alongside the old rows.
+	if err := st.RecordTool(ctx, AuditEntry{
+		SessionID: "sess-1", CallID: "call-2", ToolName: "list_dir",
+		Side: tool.SideClient, Risk: tool.RiskRead, Decision: DecisionAuto,
+	}); err != nil {
+		t.Fatalf("record after rename: %v", err)
+	}
+	entriesOut, err = st.AuditForSession(ctx, "sess-1", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entriesOut) != 2 {
+		t.Errorf("audit rows after a new write = %d, want 2", len(entriesOut))
 	}
 }
