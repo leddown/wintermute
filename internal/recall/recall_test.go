@@ -594,6 +594,22 @@ func TestForgetEverythingLeavesNothing(t *testing.T) {
 		t.Errorf("the lexical index still holds %d entries after the wipe", ftsRows)
 	}
 
+	// The pin goes with it. With no vectors left there is nothing for it to
+	// describe, and keeping it would refuse a change of embedder over an empty
+	// index — which is exactly what someone does after clearing out a new
+	// install.
+	pin, err := f.recall.Pin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin != nil {
+		t.Errorf("the embedder pin survived the wipe: %+v", pin)
+	}
+	other := &fakeEmbedder{name: "a-fresh-choice", dim: 128}
+	if err := f.recall.CheckPin(ctx, other); err != nil {
+		t.Errorf("a wiped store refused a new embedder: %v", err)
+	}
+
 	// Clients survive: wiping conversations must not log the operator out of
 	// their own server.
 	var clients int

@@ -56,7 +56,7 @@ func (s *Server) registerAdminRoutes(authed func(string, http.HandlerFunc)) {
 	// away. See memory.go.
 	authed("GET /api/v1/admin/memory", s.handleMemoryStatus)
 	authed("PATCH /api/v1/admin/memory", s.handleSetMemoryEnabled)
-	authed("POST /api/v1/admin/memory/clear-index", s.handleClearMemoryIndex)
+	authed("POST /api/v1/admin/memory/rebuild-index", s.handleRebuildMemoryIndex)
 	authed("POST /api/v1/admin/memory/forget-everything", s.handleForgetEverything)
 }
 

@@ -13,11 +13,12 @@ import (
 // conversation behaves; these decide whether the feature is operating at all,
 // and what the store holds.
 
-// WithMemory attaches the memory store, enabling the admin endpoints below. A
-// server without an embedder configured never gets one, and the endpoints
-// report that rather than pretending to work.
-func (s *Server) WithMemory(store *recall.Store) *Server {
+// WithMemory attaches the memory store and its indexer, enabling the admin
+// endpoints below. A server without an embedder configured never gets them,
+// and the endpoints report that rather than pretending to work.
+func (s *Server) WithMemory(store *recall.Store, indexer *recall.Indexer) *Server {
 	s.memory = store
+	s.memoryIndexer = indexer
 	return s
 }
 
@@ -88,14 +89,19 @@ func (s *Server) handleSetMemoryEnabled(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "enabled": *req.Enabled})
 }
 
-// handleClearMemoryIndex throws away the retrieval index and leaves every
-// conversation intact.
+// handleRebuildMemoryIndex throws the retrieval index away and immediately
+// queues every conversation to be indexed again.
 //
-// This is the reversible one. The index is derived from `messages`, so
-// -backfill-memory rebuilds it exactly; it is what to reach for when
-// retrieval is behaving oddly and the question is whether the index is at
-// fault.
-func (s *Server) handleClearMemoryIndex(w http.ResponseWriter, r *http.Request) {
+// This is the reversible one, and it is a single operation rather than two
+// because a control that only did the destructive half would be a trap: the
+// index would be gone and retrieval silently dead until somebody remembered to
+// run the backfill. Clearing and requeueing together means the worst case is a
+// few minutes of degraded recall while the queue drains.
+//
+// It is what to reach for when retrieval is behaving oddly and the question is
+// whether the index is at fault, and it is how a changed embedder is adopted
+// from the browser rather than the command line.
+func (s *Server) handleRebuildMemoryIndex(w http.ResponseWriter, r *http.Request) {
 	if s.memory == nil {
 		s.memoryUnavailable(w)
 		return
@@ -104,10 +110,25 @@ func (s *Server) handleClearMemoryIndex(w http.ResponseWriter, r *http.Request) 
 		s.fail(w, "clear memory index", err)
 		return
 	}
-	s.log.Warn("memory index cleared; conversations kept, rebuild with -backfill-memory")
+
+	var queued int
+	if s.memoryIndexer != nil {
+		n, err := s.memoryIndexer.QueueEverything(r.Context())
+		if err != nil {
+			// The index is already gone at this point. Say so plainly rather
+			// than reporting a clean failure, because the operator needs to
+			// know the backfill is now owed.
+			s.fail(w, "index cleared, but requeueing failed (run: wintermuted -backfill-memory)", err)
+			return
+		}
+		queued = n
+	}
+
+	s.log.Warn("memory index rebuilt from the stored conversations", "queued", queued)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"cleared": "index",
-		"note":    "conversations kept; rebuild the index with: wintermuted -backfill-memory",
+		"queued": queued,
+		"note": "the index is being rebuilt from the stored conversations; " +
+			"recall is degraded until the queue drains",
 	})
 }
 

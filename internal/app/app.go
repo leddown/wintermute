@@ -362,7 +362,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil).
 		WithTwire(twireService).
 		WithUtilities(utilitiesService).
-		WithMemory(recallStore).
+		WithMemory(recallStore, indexer).
 		WithBackendAdmin(func(ctx context.Context) error {
 			return reloadBackends(ctx, cfg, st, router, catalog, log)
 		})

@@ -51,6 +51,8 @@ type Server struct {
 	// memory backs the shared-memory admin endpoints. Nil when no embedder is
 	// configured, and the endpoints say so rather than pretending.
 	memory *recall.Store
+	// memoryIndexer rebuilds the index on request. Nil for the same reason.
+	memoryIndexer *recall.Indexer
 	// reloadBackends re-resolves the backend set and swaps it into the router
 	// and catalog. Nil leaves the backend-management routes unregistered, so a
 	// server assembled without it is read-only about its backends rather than

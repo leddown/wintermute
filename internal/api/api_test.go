@@ -356,7 +356,7 @@ func TestForgetEverythingRequiresConfirmation(t *testing.T) {
 	if _, err := st.AppendMessages(t.Context(), sess.ID, llm.UserMessage("rubbish")); err != nil {
 		t.Fatal(err)
 	}
-	srv = srv.WithMemory(recall.NewStore(st.DB()))
+	srv = srv.WithMemory(recall.NewStore(st.DB()), nil)
 	handler := srv.Handler()
 
 	post := func(path, body string) *httptest.ResponseRecorder {

@@ -2799,28 +2799,33 @@ async function renderAdminMemory(body) {
     ]),
   );
 
-  // The reversible one.
+  // The reversible one. Odin's two ravens: Huginn is thought, Muninn is
+  // memory. The index is thought, derived from what Muninn holds — so renewing
+  // Huginn rebuilds it from the conversations, and slaying Muninn below
+  // destroys the conversations themselves. One is recoverable from the other;
+  // the other is not recoverable from anything.
   body.append(
-    el('h3', { text: 'Clear the retrieval index' }),
+    el('h3', { text: 'Renew Huginn' }),
     el('p', { class: 'muted', text:
-      'Throws away the vectors and the search index, and keeps every conversation. '
-      + 'Rebuild it afterwards with: wintermuted -backfill-memory' }),
+      'Throws away the vectors and the search index, then rebuilds them from the '
+      + 'conversations, which are untouched. Recall is degraded until the queue drains. '
+      + 'Use this if retrieval is behaving oddly, or after changing the embedding model.' }),
     el('button', {
-      class: 'ghost-btn', type: 'button', text: 'Clear index',
-      onclick: () => clearMemoryIndex().catch(showError),
+      class: 'ghost-btn', type: 'button', text: 'Renew Huginn',
+      onclick: () => renewHuginn().catch(showError),
     }),
   );
 
   // The irreversible one, kept apart and styled as the hazard it is.
   body.append(
     el('div', { class: 'danger-zone' }, [
-      el('h3', { text: 'Delete every conversation' }),
+      el('h3', { text: 'Slay Muninn' }),
       el('p', { class: 'muted', text:
         'Deletes all ' + m.sessions + ' conversations on this server, with their messages, '
         + 'their index entries and their audit rows. This is for clearing out test data on a '
         + 'new install. It cannot be undone — though snapshots taken before now still hold it.' }),
       el('button', {
-        class: 'danger-btn', type: 'button', text: 'Delete everything',
+        class: 'danger-btn', type: 'button', text: 'Slay Muninn',
         onclick: () => forgetEverything(m.sessions).catch(showError),
       }),
     ]),
@@ -2835,22 +2840,26 @@ async function setSharedMemory(enabled) {
   await renderAdmin();
 }
 
-async function clearMemoryIndex() {
+async function renewHuginn() {
   if (!window.confirm(
-    'Clear the retrieval index?\n\n'
-    + 'Your conversations are kept. Only the vectors and search index are thrown away, '
-    + 'and "wintermuted -backfill-memory" rebuilds them.')) return;
-  const res = await api('/api/v1/admin/memory/clear-index', { method: 'POST' });
+    'Renew Huginn?\n\n'
+    + 'Your conversations are kept. The vectors and search index are thrown away and '
+    + 'built again from what is stored. Recall is degraded until that finishes.')) return;
+  const res = await api('/api/v1/admin/memory/rebuild-index', { method: 'POST' });
   await renderAdmin();
-  toast(res.note);
+  toast(`Rebuilding: ${res.queued} messages queued.`);
 }
 
 // Typed confirmation rather than an OK button. This deletes everything and the
 // point of making it awkward is that it should not be possible to do by
 // reflex.
 async function forgetEverything(sessions) {
+  // The typed phrase stays plain rather than themed. A confirmation has one
+  // job — to state the consequence unambiguously to someone who may be tired
+  // and in a hurry — and "slay muninn" is a worse sentence to be sure about
+  // than "delete everything".
   const typed = window.prompt(
-    `This deletes all ${sessions} conversations on this server, permanently.\n\n`
+    `Slay Muninn?\n\nThis deletes all ${sessions} conversations on this server, permanently.\n\n`
     + 'Messages, index entries and audit rows all go. Snapshots taken before now still hold them.\n\n'
     + 'Type: delete everything');
   if (typed === null) return;

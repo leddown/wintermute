@@ -304,5 +304,14 @@ func (s *Store) ForgetEverything(ctx context.Context) (int64, error) {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM recall_queue`); err != nil {
 		return deleted, fmt.Errorf("recall: clear queue: %w", err)
 	}
+
+	// The pin goes too, because there are no vectors left for it to describe.
+	// Leaving it would mean an empty index still refused a change of embedding
+	// model until someone ran a reindex over nothing — obstructive exactly
+	// where this operation is most used, which is a new install being cleared
+	// out before its real embedder is chosen.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM recall_meta`); err != nil {
+		return deleted, fmt.Errorf("recall: clear pin: %w", err)
+	}
 	return deleted, nil
 }
