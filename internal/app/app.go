@@ -297,9 +297,10 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	// Memory. Configured only when an embedder is, so a deployment without one
 	// runs exactly as it did before this existed.
 	var indexer *recall.Indexer
+	var recallStore *recall.Store
 	if cfg.EmbedURL != "" {
 		embedder := llm.NewOpenAIEmbedder(cfg.EmbedURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.LLMTimeout)
-		recallStore := recall.NewStore(st.DB())
+		recallStore = recall.NewStore(st.DB())
 
 		// Refuse to start on a mismatch rather than retrieving against vectors
 		// from another model's space. Distances between two models' embeddings
@@ -319,6 +320,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		searcher := recall.NewSearcher(st.DB(), recallStore, embedder)
 		ag = ag.WithIndexer(indexer).WithRecall(&memoryLayer{
 			searcher:    searcher,
+			recall:      recallStore,
 			store:       st,
 			log:         log,
 			topK:        cfg.RecallTopK,
@@ -360,6 +362,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil).
 		WithTwire(twireService).
 		WithUtilities(utilitiesService).
+		WithMemory(recallStore).
 		WithBackendAdmin(func(ctx context.Context) error {
 			return reloadBackends(ctx, cfg, st, router, catalog, log)
 		})

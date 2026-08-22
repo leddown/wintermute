@@ -74,6 +74,19 @@
   color: var(--text);
 }
 
+/* Also outline-styled, so it loses to the accent-fill rule above in the same
+   way — but this one must stay red rather than taking the theme's text
+   colour. A destructive control that reads as ordinary green on the matrix
+   theme is the one button on the page that should never blend in. */
+:root[data-theme="matrix"] .danger-btn,
+:root[data-theme="chaos"] .danger-btn {
+  color: var(--error);
+}
+:root[data-theme="matrix"] .danger-btn:hover,
+:root[data-theme="chaos"] .danger-btn:hover {
+  color: var(--bg);
+}
+
 /* The topbar view switcher is transparent-backed, so the black above landed it
    on black: the menu was all but invisible, and the dim --muted it asks for in
    the base rule is barely better on this palette. Full phosphor green instead,
@@ -867,6 +880,21 @@ dialog h3 { margin: 0; font-size: 15px; }
   border: 1px dashed #d29922; border-radius: 8px;
   color: #d29922; font-size: 12px;
 }
+
+/* The irreversible half of the memory screen, fenced off from the reversible
+   half above it. Clearing the index and deleting every conversation are one
+   click apart and one of them cannot be undone, so they must not look alike. */
+.danger-zone {
+  margin-top: 28px; padding: 14px 16px;
+  border: 1px solid var(--error, #ff3b3b); border-radius: 10px;
+}
+.danger-zone h3 { margin-top: 0; color: var(--error, #ff3b3b); }
+.danger-btn {
+  background: transparent; border: 1px solid var(--error, #ff3b3b);
+  border-radius: 8px; padding: 6px 12px; font: inherit; cursor: pointer;
+  color: var(--error, #ff3b3b);
+}
+.danger-btn:hover { background: var(--error, #ff3b3b); color: var(--bg); }
 
 ul.plain { list-style: none; margin: 10px 0 0; padding: 0; }
 ul.plain li {

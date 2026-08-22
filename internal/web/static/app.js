@@ -2742,7 +2742,7 @@ async function renderAdmin() {
   const titles = {
     status: 'Status', config: 'Configuration', backends: 'Backends',
     hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
-    appearance: 'Appearance',
+    memory: 'Memory', appearance: 'Appearance',
   };
   $('admin-title').textContent = titles[admin.tab];
   body.innerHTML = '';
@@ -2752,10 +2752,119 @@ async function renderAdmin() {
   if (admin.tab === 'backends') return renderAdminBackends(body);
   if (admin.tab === 'hardware') return renderAdminHardware(body);
   if (admin.tab === 'tools') return renderAdminTools(body);
+  if (admin.tab === 'memory') return renderAdminMemory(body);
   // Purely local, unlike every other tab here: it reads and writes
   // localStorage and asks the server nothing.
   if (admin.tab === 'appearance') return renderAdminAppearance(body);
   return renderAdminClients(body);
+}
+
+// Shared memory: the master switch, and the two ways to throw things away.
+//
+// The two are kept visually apart on purpose. Clearing the index is
+// reversible — a backfill rebuilds it from the conversations, which are
+// untouched — while wiping the store is not, and a screen that presented them
+// as two similar buttons would eventually get the wrong one pressed.
+async function renderAdminMemory(body) {
+  const m = await api('/api/v1/admin/memory');
+
+  if (!m.configured) {
+    body.append(el('p', { class: 'muted', text:
+      'No embedder is configured, so nothing is being remembered across conversations. ' +
+      'Set WINTERMUTE_EMBED_URL and WINTERMUTE_EMBED_MODEL to switch memory on.' }));
+    return;
+  }
+
+  const toggle = el('button', {
+    class: `memory-badge ${m.enabled ? 'on' : 'off'}`,
+    type: 'button',
+    onclick: () => setSharedMemory(!m.enabled).catch(showError),
+  }, [
+    el('span', { class: 'memory-dot', text: m.enabled ? '\u25cf' : '\u25cb' }),
+    el('span', { text: m.enabled ? 'Shared memory on' : 'Shared memory off' }),
+  ]);
+
+  body.append(
+    el('p', { class: 'muted', text: m.enabled
+      ? 'Conversations can draw on earlier ones. Individual chats can still opt out.'
+      : 'No conversation is being given prior context, whatever its own setting says. '
+        + 'What is said is still being recorded and indexed, so turning this back on '
+        + 'will not leave a gap.' }),
+    toggle,
+    facts([
+      ['Embedder', m.embedder ? `${m.embedder} (${m.dimension} dimensions)` : 'nothing indexed yet'],
+      ['Indexed messages', `${m.indexed} of ${m.messages}`],
+      ['Waiting to be indexed', m.queued],
+      ['Conversations', m.sessions],
+    ]),
+  );
+
+  // The reversible one.
+  body.append(
+    el('h3', { text: 'Clear the retrieval index' }),
+    el('p', { class: 'muted', text:
+      'Throws away the vectors and the search index, and keeps every conversation. '
+      + 'Rebuild it afterwards with: wintermuted -backfill-memory' }),
+    el('button', {
+      class: 'ghost-btn', type: 'button', text: 'Clear index',
+      onclick: () => clearMemoryIndex().catch(showError),
+    }),
+  );
+
+  // The irreversible one, kept apart and styled as the hazard it is.
+  body.append(
+    el('div', { class: 'danger-zone' }, [
+      el('h3', { text: 'Delete every conversation' }),
+      el('p', { class: 'muted', text:
+        'Deletes all ' + m.sessions + ' conversations on this server, with their messages, '
+        + 'their index entries and their audit rows. This is for clearing out test data on a '
+        + 'new install. It cannot be undone — though snapshots taken before now still hold it.' }),
+      el('button', {
+        class: 'danger-btn', type: 'button', text: 'Delete everything',
+        onclick: () => forgetEverything(m.sessions).catch(showError),
+      }),
+    ]),
+  );
+}
+
+async function setSharedMemory(enabled) {
+  await api('/api/v1/admin/memory', {
+    method: 'PATCH',
+    body: JSON.stringify({ enabled }),
+  });
+  await renderAdmin();
+}
+
+async function clearMemoryIndex() {
+  if (!window.confirm(
+    'Clear the retrieval index?\n\n'
+    + 'Your conversations are kept. Only the vectors and search index are thrown away, '
+    + 'and "wintermuted -backfill-memory" rebuilds them.')) return;
+  const res = await api('/api/v1/admin/memory/clear-index', { method: 'POST' });
+  await renderAdmin();
+  toast(res.note);
+}
+
+// Typed confirmation rather than an OK button. This deletes everything and the
+// point of making it awkward is that it should not be possible to do by
+// reflex.
+async function forgetEverything(sessions) {
+  const typed = window.prompt(
+    `This deletes all ${sessions} conversations on this server, permanently.\n\n`
+    + 'Messages, index entries and audit rows all go. Snapshots taken before now still hold them.\n\n'
+    + 'Type: delete everything');
+  if (typed === null) return;
+  if (typed.trim() !== 'delete everything') {
+    showError(new Error('Not deleted — the confirmation did not match.'));
+    return;
+  }
+  const res = await api('/api/v1/admin/memory/forget-everything', {
+    method: 'POST',
+    body: JSON.stringify({ confirm: 'delete everything' }),
+  });
+  await renderAdmin();
+  await loadSessions();
+  toast(`Deleted ${res.deleted_sessions} conversations.`);
 }
 
 async function renderAdminStatus(body) {

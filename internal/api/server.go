@@ -17,6 +17,7 @@ import (
 	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
 	"wintermute/internal/models"
+	"wintermute/internal/recall"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
 	"wintermute/internal/twire"
@@ -47,6 +48,9 @@ type Server struct {
 	// utilities is the housekeeping surface: backups, diagnostics, vacuum and
 	// pruning. Nil likewise leaves its routes off.
 	utilities *utilities.Service
+	// memory backs the shared-memory admin endpoints. Nil when no embedder is
+	// configured, and the endpoints say so rather than pretending.
+	memory *recall.Store
 	// reloadBackends re-resolves the backend set and swaps it into the router
 	// and catalog. Nil leaves the backend-management routes unregistered, so a
 	// server assembled without it is read-only about its backends rather than

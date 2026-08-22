@@ -51,6 +51,13 @@ func (s *Server) registerAdminRoutes(authed func(string, http.HandlerFunc)) {
 	authed("GET /api/v1/admin/clients", s.handleAdminClients)
 	authed("DELETE /api/v1/admin/clients/{name}", s.handleAdminRevokeClient)
 	authed("GET /api/v1/admin/tools", s.handleAdminTools)
+
+	// Shared memory: the master switch, and the two ways to throw things
+	// away. See memory.go.
+	authed("GET /api/v1/admin/memory", s.handleMemoryStatus)
+	authed("PATCH /api/v1/admin/memory", s.handleSetMemoryEnabled)
+	authed("POST /api/v1/admin/memory/clear-index", s.handleClearMemoryIndex)
+	authed("POST /api/v1/admin/memory/forget-everything", s.handleForgetEverything)
 }
 
 func (s *Server) handleAdminConfig(w http.ResponseWriter, r *http.Request) {

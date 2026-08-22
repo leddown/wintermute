@@ -186,3 +186,123 @@ func cosine(a, b []float32) float64 {
 	}
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
+
+// ---- master switch ---------------------------------------------------------
+
+// Enabled reports whether shared memory is switched on.
+//
+// This sits above the per-session recall flag: when it is off, no conversation
+// is given prior context regardless of its own setting. A missing row means on,
+// so a database that predates the switch behaves as it always did.
+func (s *Store) Enabled(ctx context.Context) bool {
+	var enabled bool
+	err := s.db.QueryRowContext(ctx,
+		`SELECT recall_enabled FROM recall_config WHERE id = 1`).Scan(&enabled)
+	if err != nil {
+		// Read failures resolve to "on" because that is the state the rest of
+		// the system already assumes, and because a switch that silently
+		// turned memory off whenever a query hiccuped would be far harder to
+		// diagnose than one that stayed on.
+		return true
+	}
+	return enabled
+}
+
+// SetEnabled turns shared memory on or off for the whole server.
+//
+// Indexing is deliberately unaffected. Turning recall off is about what the
+// model is shown, not about discarding what is said, so switching it back on
+// does not reveal a hole covering however long it was off.
+func (s *Store) SetEnabled(ctx context.Context, enabled bool) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO recall_config (id, recall_enabled, updated_at) VALUES (1, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET recall_enabled = excluded.recall_enabled,
+		                               updated_at = excluded.updated_at`,
+		enabled, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("recall: set master switch: %w", err)
+	}
+	return nil
+}
+
+// Stats summarises what the memory holds, for the admin screen.
+type Stats struct {
+	Enabled bool `json:"enabled"`
+	// Indexed is how many messages have vectors; Queued is how many are
+	// waiting. A queue that never empties is the visible symptom of an
+	// embedder that cannot be reached.
+	Indexed int `json:"indexed"`
+	Queued  int `json:"queued"`
+	// Messages and Sessions are the whole store, so the admin screen can show
+	// how much of it the index has caught up with.
+	Messages int `json:"messages"`
+	Sessions int `json:"sessions"`
+	// Embedder and Dimension are the pin, empty when nothing is indexed yet.
+	Embedder  string `json:"embedder,omitempty"`
+	Dimension int    `json:"dimension,omitempty"`
+}
+
+// Stats reads the summary above.
+func (s *Store) Stats(ctx context.Context) (Stats, error) {
+	out := Stats{Enabled: s.Enabled(ctx)}
+
+	counts := map[string]*int{
+		"recall_vectors": &out.Indexed,
+		"recall_queue":   &out.Queued,
+		"messages":       &out.Messages,
+		"sessions":       &out.Sessions,
+	}
+	for table, dest := range counts {
+		// The table names come from this fixed map, never from a request.
+		if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(dest); err != nil {
+			return out, fmt.Errorf("recall: count %s: %w", table, err)
+		}
+	}
+
+	pin, err := s.Pin(ctx)
+	if err != nil {
+		return out, err
+	}
+	if pin != nil {
+		out.Embedder, out.Dimension = pin.Model, pin.Dimension
+	}
+	return out, nil
+}
+
+// ForgetEverything deletes every conversation on the server, and with them
+// every message, vector, lexical entry and audit row.
+//
+// This is for the state a new installation is in for its first few weeks: full
+// of test conversations that are worth nothing and would otherwise be recalled
+// forever as though they meant something. It is not a maintenance routine and
+// nothing calls it on a schedule.
+//
+// It deletes sessions and lets the cascades do the rest, rather than emptying
+// each table by hand: that way it reaches exactly what deleting a conversation
+// reaches, and cannot drift from it as tables are added. Vectors go by foreign
+// key, lexical entries by the trigger in 0014, and secure_delete (see
+// store.Open) means the text is overwritten rather than merely unlinked.
+//
+// The audit trail goes too. That is a deliberate exception to the rule that
+// muninn outlives transcripts, and it is confined to this one operation: an
+// audit trail of a fortnight of testing against fake data is not evidence of
+// anything, and keeping it would mean the wipe left the bulkiest half of the
+// rubbish behind.
+func (s *Store) ForgetEverything(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions`)
+	if err != nil {
+		return 0, fmt.Errorf("recall: forget everything: %w", err)
+	}
+	deleted, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("recall: forget everything: %w", err)
+	}
+
+	// The queue references messages that no longer exist. The foreign key
+	// clears it, but an explicit sweep costs nothing and means a database
+	// opened without foreign keys enforced cannot leave orphans behind.
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM recall_queue`); err != nil {
+		return deleted, fmt.Errorf("recall: clear queue: %w", err)
+	}
+	return deleted, nil
+}

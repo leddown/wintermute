@@ -16,6 +16,7 @@ import (
 // the answering model's context window the result may occupy.
 type memoryLayer struct {
 	searcher *recall.Searcher
+	recall   *recall.Store
 	store    *store.Store
 	log      *slog.Logger
 
@@ -37,6 +38,14 @@ func (m *memoryLayer) Framing() string { return recall.SystemPromptAddendum }
 // a home network the usual cause is that the machine serving the embedding
 // model is switched off, which is not an incident.
 func (m *memoryLayer) Recall(ctx context.Context, sess *store.Session, query string) string {
+	// The master switch, checked per turn rather than cached at startup: an
+	// operator turning memory off wants it off now, not after a restart. It is
+	// one indexed single-row read against a turn that is about to spend
+	// seconds in a model.
+	if !m.recall.Enabled(ctx) {
+		return ""
+	}
+
 	scope := recall.Scope{
 		ClientID: sess.ClientID,
 		// The one-way mirror. A session scoped to an agent recalls that

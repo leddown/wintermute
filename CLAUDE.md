@@ -132,6 +132,15 @@ never coupled to a chat model.
   into `agent_id = ? OR agent_id = ''`, which would let one agent read
   another's material through Wintermute's own conversations.
 
+A master switch in `recall_config` sits above everything: when it is off, no
+conversation is given prior context whatever its own setting says. Indexing
+carries on regardless, so turning it back on does not leave a gap. It is a row
+rather than an env var so it can be flipped without a restart, and it is
+reachable from Admin → Memory along with two ways to throw things away:
+clearing the index (reversible — `-backfill-memory` rebuilds it) and deleting
+every conversation (not reversible, and gated on a typed confirmation checked
+server-side).
+
 Two independent switches live on each session. `record` decides whether the
 conversation is written down; `recall` decides whether prior context is
 retrieved into it. Both default to on and ephemeral is never inferred. An

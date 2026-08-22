@@ -16,6 +16,7 @@ import (
 	"wintermute/internal/agent"
 	"wintermute/internal/llm"
 	"wintermute/internal/models"
+	"wintermute/internal/recall"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
 )
@@ -336,5 +337,82 @@ func TestSessionJSONAlwaysStatesItsMemoryState(t *testing.T) {
 		if !strings.Contains(string(buf), field) {
 			t.Errorf("session JSON is missing %s: %s", field, buf)
 		}
+	}
+}
+
+// The wipe endpoint must not be reachable without the confirmation phrase.
+// Checked server-side, because an endpoint that trusts the browser to have
+// asked first is one curl away from emptying the store.
+func TestForgetEverythingRequiresConfirmation(t *testing.T) {
+	srv, st := newTestServer(t)
+	client, token, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(t.Context(), client.ID, "test data", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.AppendMessages(t.Context(), sess.ID, llm.UserMessage("rubbish")); err != nil {
+		t.Fatal(err)
+	}
+	srv = srv.WithMemory(recall.NewStore(st.DB()))
+	handler := srv.Handler()
+
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	for _, body := range []string{`{}`, `{"confirm": "yes"}`, `{"confirm": "Delete Everything"}`} {
+		rec := post("/api/v1/admin/memory/forget-everything", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("body %s gave %d, want 400", body, rec.Code)
+		}
+	}
+	// Nothing was deleted on the way to refusing.
+	msgs, err := st.Messages(t.Context(), sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("a refused wipe deleted %d messages", 1-len(msgs))
+	}
+
+	rec := post("/api/v1/admin/memory/forget-everything", `{"confirm": "delete everything"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirmed wipe gave %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.Session(t.Context(), sess.ID, client.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("session survived a confirmed wipe: %v", err)
+	}
+}
+
+// With no embedder configured the admin endpoints report that plainly rather
+// than 404ing, so the screen can render "memory is not set up".
+func TestMemoryStatusWithoutAnEmbedder(t *testing.T) {
+	srv, st := newTestServer(t)
+	_, token, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/memory", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body["configured"] != false {
+		t.Errorf("configured = %v, want false", body["configured"])
 	}
 }

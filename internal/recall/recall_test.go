@@ -456,3 +456,151 @@ func countTable(t *testing.T, f *fixture, table string) int {
 	}
 	return n
 }
+
+// The master switch sits above the per-session flag: when it is off, nothing
+// is recalled anywhere, whatever an individual conversation asks for.
+func TestMasterSwitchDefaultsOnAndPersists(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	// An install that has never touched the switch behaves as it always did.
+	if !f.recall.Enabled(ctx) {
+		t.Error("shared memory defaulted to off; an existing install must behave as before")
+	}
+
+	if err := f.recall.SetEnabled(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	if f.recall.Enabled(ctx) {
+		t.Error("switch did not take effect")
+	}
+	if err := f.recall.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	if !f.recall.Enabled(ctx) {
+		t.Error("switch did not turn back on")
+	}
+}
+
+// Turning recall off must not stop the store recording. Switching it back on
+// should not reveal a hole covering however long it was off.
+func TestMasterSwitchDoesNotStopIndexing(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	if err := f.recall.SetEnabled(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	f.say(t, "while-off", "local", "qwen3:8b", "",
+		llm.Message{Role: llm.RoleUser, Content: "the fuse box is in the garage"},
+	)
+	if n := countTable(t, f, "recall_vectors"); n == 0 {
+		t.Error("nothing was indexed while recall was off; turning it back on would leave a gap")
+	}
+
+	// And once it is back on, that period is retrievable.
+	if err := f.recall.SetEnabled(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := f.searcher.Search(ctx, "where is the fuse box", Scope{ClientID: f.clientID},
+		Options{TopK: 3, RecentTurns: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Error("what was said while recall was off is not retrievable now that it is on")
+	}
+}
+
+// Clearing the index must be the reversible operation: conversations stay, and
+// a backfill rebuilds what was thrown away.
+func TestClearIndexIsReversible(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	f.say(t, "kept", "local", "qwen3:8b", "",
+		llm.Message{Role: llm.RoleUser, Content: "the bins go out on Tuesday"},
+	)
+
+	if err := f.recall.ClearIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n := countTable(t, f, "messages"); n != 1 {
+		t.Fatalf("clearing the index took %d messages with it", 1-n)
+	}
+
+	if _, err := f.indexer.QueueEverything(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.indexer.DrainFully(ctx); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := f.searcher.Search(ctx, "when do the bins go out", Scope{ClientID: f.clientID},
+		Options{TopK: 3, RecentTurns: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 {
+		t.Error("the index did not come back after a backfill")
+	}
+}
+
+// Wiping the store is the irreversible one, and it has to reach everything —
+// asserted by searching for the content afterwards, not only by counting rows.
+func TestForgetEverythingLeavesNothing(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t)
+
+	sess := f.say(t, "rubbish", "local", "qwen3:8b", "",
+		llm.Message{Role: llm.RoleUser, Content: "test test my card number is 4111111111111111"},
+		llm.Message{Role: llm.RoleAssistant, Content: "noted"},
+	)
+	if err := f.store.RecordTool(ctx, store.AuditEntry{
+		SessionID: sess.ID, CallID: "c1", ToolName: "rename_file",
+		Side: "client", Risk: "write", Decision: store.DecisionApproved,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := f.recall.ForgetEverything(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted %d sessions, want 1", deleted)
+	}
+
+	for _, table := range []string{"sessions", "messages", "recall_vectors", "recall_queue", "muninn"} {
+		if n := countTable(t, f, table); n != 0 {
+			t.Errorf("%s still holds %d rows after the wipe", table, n)
+		}
+	}
+
+	// The real assertion: it is not retrievable any more.
+	hits, err := f.searcher.Search(ctx, "card number 4111111111111111", Scope{ClientID: f.clientID},
+		Options{TopK: 5, RecentTurns: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Errorf("wiped content is still retrievable: %+v", hits)
+	}
+	var ftsRows int
+	if err := f.store.DB().QueryRow(
+		`SELECT count(*) FROM recall_fts WHERE recall_fts MATCH 'card'`).Scan(&ftsRows); err != nil {
+		t.Fatal(err)
+	}
+	if ftsRows != 0 {
+		t.Errorf("the lexical index still holds %d entries after the wipe", ftsRows)
+	}
+
+	// Clients survive: wiping conversations must not log the operator out of
+	// their own server.
+	var clients int
+	if err := f.store.DB().QueryRow(`SELECT count(*) FROM clients`).Scan(&clients); err != nil {
+		t.Fatal(err)
+	}
+	if clients == 0 {
+		t.Error("the wipe deleted the registered clients along with the conversations")
+	}
+}
