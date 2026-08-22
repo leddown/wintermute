@@ -55,6 +55,8 @@ type App struct {
 	// indexer is held so Run can start the retrieval indexer. Nil when no
 	// embedder is configured.
 	indexer *recall.Indexer
+	// inference buffers model-call measurements; Run drains it.
+	inference *inferenceRecorder
 }
 
 // buildRouter turns the configured backends into live providers.
@@ -291,6 +293,11 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Language:   cfg.SearxLanguage,
 	})
 
+	// Measure every model call. Attached at the router because that is the one
+	// place they all pass through — the turn loop is not the only caller.
+	inference := newInferenceRecorder(st, log)
+	router = router.WithRecorder(inference)
+
 	scope := &agentScope{knowledge: knowledgeService, grc: grcClient, web: webClient}
 	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations).WithScope(scope)
 
@@ -376,6 +383,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		twire:     twireService,
 		utilities: utilitiesService,
 		indexer:   indexer,
+		inference: inference,
 		http: &http.Server{
 			Addr:    cfg.Addr,
 			Handler: srv.Handler(),
@@ -570,6 +578,12 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.fintech != nil && a.cfg.FintechReviewInterval > 0 {
 		go fintech.NewReviewScheduler(a.fintech, a.cfg.FintechReviewInterval).Run(ctx)
+	}
+
+	// Draining the measurement buffer. Started before anything can serve a
+	// turn, so the first call of the process is recorded like every other.
+	if a.inference != nil {
+		go a.inference.Run(ctx)
 	}
 
 	// The retrieval indexer works behind the write path: a message is committed

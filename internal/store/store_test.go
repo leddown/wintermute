@@ -762,3 +762,94 @@ func TestNoteKeyFoldsCase(t *testing.T) {
 		t.Errorf("note = %q, want the later write to have won", notes["qwen3:8b"].Note)
 	}
 }
+
+// Performance is summarised from summed tokens over summed time, not from an
+// average of per-call rates — averaging rates weights a two-token reply the
+// same as a two-thousand-token one.
+func TestModelPerformanceSummarises(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := st.RecordInference(ctx, []InferenceSample{
+		// 100 tokens in 1s, then 300 tokens in 3s: 400 tokens over 4s = 100/s.
+		{Backend: "rig", Model: "qwen3:8b", CompletionTokens: 100, PromptTokens: 10,
+			DurationMS: 1000, CreatedAt: now.Add(-time.Minute)},
+		{Backend: "rig", Model: "qwen3:8b", CompletionTokens: 300, PromptTokens: 20,
+			DurationMS: 3000, CreatedAt: now.Add(-time.Minute)},
+		// A failure: counted, but kept out of the timing so a backend that
+		// refuses quickly does not look fast.
+		{Backend: "rig", Model: "qwen3:8b", Failed: true, DurationMS: 50, CreatedAt: now},
+		// A different model, so the grouping has something to separate.
+		{Backend: "rig", Model: "devstral:24b", CompletionTokens: 50,
+			DurationMS: 5000, CreatedAt: now},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	perf, err := st.ModelPerformanceSince(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byModel := map[string]ModelPerformance{}
+	for _, p := range perf {
+		byModel[p.Model] = p
+	}
+
+	qwen := byModel["qwen3:8b"]
+	if qwen.Calls != 3 || qwen.Failed != 1 {
+		t.Errorf("calls/failed = %d/%d, want 3/1", qwen.Calls, qwen.Failed)
+	}
+	if qwen.TokensPerSecond < 99 || qwen.TokensPerSecond > 101 {
+		t.Errorf("tokens/sec = %.2f, want ~100 (400 tokens over 4s)", qwen.TokensPerSecond)
+	}
+	if qwen.CompletionTokens != 400 {
+		t.Errorf("completion tokens = %d, want 400", qwen.CompletionTokens)
+	}
+	// The failed call's 50ms must not have become the slowest successful one.
+	if qwen.SlowestMS != 3000 {
+		t.Errorf("slowest = %dms, want 3000", qwen.SlowestMS)
+	}
+
+	dev := byModel["devstral:24b"]
+	if dev.TokensPerSecond < 9 || dev.TokensPerSecond > 11 {
+		t.Errorf("devstral tokens/sec = %.2f, want ~10", dev.TokensPerSecond)
+	}
+}
+
+// A window must not pick up calls from before it.
+func TestModelPerformanceRespectsTheWindow(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	if err := st.RecordInference(ctx, []InferenceSample{
+		{Backend: "rig", Model: "old", CompletionTokens: 100, DurationMS: 1000,
+			CreatedAt: now.AddDate(0, 0, -30)},
+		{Backend: "rig", Model: "recent", CompletionTokens: 100, DurationMS: 1000,
+			CreatedAt: now.Add(-time.Hour)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	perf, err := st.ModelPerformanceSince(ctx, now.AddDate(0, 0, -7))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(perf) != 1 || perf[0].Model != "recent" {
+		t.Errorf("window returned %+v, want only the recent model", perf)
+	}
+}
+
+// Nothing measured is a normal answer, not an error — a fresh install has no
+// samples and the screen has to render anyway.
+func TestModelPerformanceOnAnEmptyTable(t *testing.T) {
+	st := newTestStore(t)
+	perf, err := st.ModelPerformanceSince(context.Background(), time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("empty table errored: %v", err)
+	}
+	if len(perf) != 0 {
+		t.Errorf("got %d rows from an empty table", len(perf))
+	}
+}

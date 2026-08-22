@@ -462,6 +462,32 @@ func (s *Server) handleResident(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"resident": out})
 }
 
+// handleModelPerformance reports what each model has actually been doing.
+//
+// The window defaults to seven days, which is long enough for a model used
+// occasionally to have a figure at all and short enough that a model replaced
+// last month is not still being judged on it.
+func (s *Server) handleModelPerformance(w http.ResponseWriter, r *http.Request) {
+	days := queryInt(r, "days", 7)
+	if days < 1 {
+		days = 1
+	}
+	if days > 365 {
+		days = 365
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days)
+
+	perf, err := s.store.ModelPerformanceSince(r.Context(), since)
+	if err != nil {
+		s.fail(w, "read model performance", err)
+		return
+	}
+	if perf == nil {
+		perf = []store.ModelPerformance{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"days": days, "performance": perf})
+}
+
 // handleModelSearch proxies a Hugging Face Hub search.
 //
 // It is proxied rather than called from the browser because the Hub token, if

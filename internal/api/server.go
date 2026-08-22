@@ -150,6 +150,7 @@ func (s *Server) Handler() http.Handler {
 	authed("POST /api/v1/models/champions", s.handleSetChampion)
 	// Putting a model in memory on a backend, and taking it out again.
 	authed("GET /api/v1/models/resident", s.handleResident)
+	authed("GET /api/v1/models/performance", s.handleModelPerformance)
 	authed("POST /api/v1/models/load", s.handleLoadModel)
 	authed("POST /api/v1/models/unload", s.handleUnloadModel)
 

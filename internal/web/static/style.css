@@ -940,6 +940,18 @@ dialog h3 { margin: 0; font-size: 15px; }
 
 .model-facts { font-size: 12px; color: var(--muted); }
 
+/* What the model has actually been doing, as opposed to what it claims to be.
+   Set in the numeric face and tabular so rates line up down a list of cards. */
+.model-measured {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  font-family: ui-monospace, "Courier New", monospace;
+  font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.measured-rate { color: var(--text); font-weight: 600; }
+.measured-sep { opacity: 0.45; }
+.measured-failed { color: var(--error, #ff5f56); }
+
 .model-hosts { display: flex; gap: 6px; flex-wrap: wrap; }
 /* Which machines carry it, and which are holding it in memory right now —
    the difference between "installed here" and "costing VRAM here". */

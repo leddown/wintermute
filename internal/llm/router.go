@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 // ErrNoBackend is returned when a named backend is not configured.
@@ -57,6 +58,8 @@ type Router struct {
 	def      string
 	fallback string
 	log      *slog.Logger
+	// recorder, when set, is told about every completed call. See metrics.go.
+	recorder Recorder
 }
 
 // NewRouter builds a router. def names the default backend; fallback names an
@@ -170,7 +173,7 @@ func (r *Router) Complete(ctx context.Context, backend string, req Request) (*Re
 		return nil, fmt.Errorf("%q: %w", backend, ErrNoBackend)
 	}
 
-	res, err := r.complete(ctx, b, req)
+	res, err := r.complete(ctx, b, req, false)
 	if err == nil {
 		return res, nil
 	}
@@ -197,7 +200,7 @@ func (r *Router) Complete(ctx context.Context, backend string, req Request) (*Re
 	fbReq := req
 	fbReq.Model = ""
 
-	res, fbErr := r.complete(ctx, fb, fbReq)
+	res, fbErr := r.complete(ctx, fb, fbReq, true)
 	if fbErr != nil {
 		return nil, fmt.Errorf("%s failed (%v); fallback %s also failed: %w", b.Name, err, fb.Name, fbErr)
 	}
@@ -217,14 +220,39 @@ func (r *Router) CompleteOn(ctx context.Context, backend string, req Request) (*
 	if !ok {
 		return nil, fmt.Errorf("%q: %w", backend, ErrNoBackend)
 	}
-	return r.complete(ctx, b, req)
+	return r.complete(ctx, b, req, false)
 }
 
-func (r *Router) complete(ctx context.Context, b *Backend, req Request) (*Result, error) {
+func (r *Router) complete(ctx context.Context, b *Backend, req Request, fellBack bool) (*Result, error) {
 	if req.Model == "" {
 		req.Model = b.Model
 	}
+
+	// The one place every model call passes through, and therefore the only
+	// place a measurement covers all of them: turns, batch workers, the
+	// forecaster and the backend test page alike.
+	started := time.Now()
 	resp, err := b.Complete(ctx, req)
+	elapsed := time.Since(started)
+
+	sample := Sample{
+		Backend:  b.Name,
+		Model:    req.Model,
+		Duration: elapsed,
+		Failed:   err != nil,
+		FellBack: fellBack,
+	}
+	if resp != nil {
+		sample.PromptTokens = resp.Usage.PromptTokens
+		sample.CompletionTokens = resp.Usage.CompletionTokens
+	}
+	// A cancelled call is the user pressing stop, not the backend being slow.
+	// Recording it would drag every average down with a duration that measures
+	// how long somebody waited before changing their mind.
+	if ctx.Err() == nil {
+		r.record(sample)
+	}
+
 	if err != nil {
 		return nil, err
 	}

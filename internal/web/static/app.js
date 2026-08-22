@@ -2769,11 +2769,22 @@ async function renderAdmin() {
 // showing it four times would invite four contradictory notes. Each model
 // appears once, with the machines carrying it listed beside it.
 async function renderAdminModels(body) {
-  const [{ models: list }, { champions }, { tasks }] = await Promise.all([
+  const [{ models: list }, { champions }, { tasks }, perf] = await Promise.all([
     api('/api/v1/models'),
     api('/api/v1/models/champions'),
     api('/api/v1/tasks'),
+    api('/api/v1/models/performance?days=7').catch(() => ({ performance: [] })),
   ]);
+
+  // Measured speed, keyed the same way the cards are folded. A model on two
+  // hosts has two sets of numbers; the card shows the best observed rate,
+  // because the question it answers is "how fast can this model go here".
+  const measured = new Map();
+  for (const p of perf.performance || []) {
+    const key = (p.model || '').toLowerCase();
+    const prev = measured.get(key);
+    if (!prev || p.tokens_per_second > prev.tokens_per_second) measured.set(key, p);
+  }
 
   // Only Ollama backends can load and unload on demand. Knowing which before
   // rendering means a host that cannot be controlled is shown as a plain label
@@ -2826,11 +2837,12 @@ async function renderAdminModels(body) {
   });
 
   for (const [key, entry] of rows) {
-    body.append(modelCard(key, entry, championTask.get(key) || [], tasks || [], taskLabel));
+    body.append(modelCard(key, entry, championTask.get(key) || [], tasks || [], taskLabel,
+      measured.get(key)));
   }
 }
 
-function modelCard(key, entry, titles, tasks, taskLabel) {
+function modelCard(key, entry, titles, tasks, taskLabel, perf) {
   const m = entry.model;
   const resident = entry.hosts.filter((h) => h.loaded);
 
@@ -2871,6 +2883,25 @@ function modelCard(key, entry, titles, tasks, taskLabel) {
     resident.length ? `resident on ${resident.length} of ${entry.hosts.length}` : null,
   ].filter(Boolean).join(' · ');
 
+  // What it has actually been doing, as opposed to what it claims to be.
+  // Absent until it has been used: an empty row would read as "slow" rather
+  // than "not measured yet".
+  const measuredRow = perf && perf.calls
+    ? el('div', { class: 'model-measured', title:
+        `${perf.calls} calls over the last 7 days on ${perf.backend}`
+        + (perf.failed ? `, ${perf.failed} failed` : '') }, [
+        el('span', { class: 'measured-rate', text:
+          perf.tokens_per_second ? `${perf.tokens_per_second.toFixed(1)} tok/s` : 'no usage reported' }),
+        el('span', { class: 'measured-sep', text: '·' }),
+        el('span', { text: `${formatMs(perf.median_ms)} typical` }),
+        el('span', { class: 'measured-sep', text: '·' }),
+        el('span', { text: `${perf.calls} call${perf.calls === 1 ? '' : 's'}` }),
+        perf.failed
+          ? el('span', { class: 'measured-failed', text: `${perf.failed} failed` })
+          : null,
+      ].filter(Boolean))
+    : null;
+
   const noteBox = el('textarea', {
     class: 'model-note',
     rows: 2,
@@ -2896,6 +2927,7 @@ function modelCard(key, entry, titles, tasks, taskLabel) {
       ...titleChips,
     ]),
     el('div', { class: 'model-facts', text: facts }),
+    measuredRow,
     el('div', { class: 'model-hosts' }, hostChips),
     noteBox,
     el('div', { class: 'model-actions' }, [
@@ -2933,6 +2965,13 @@ async function controlModel(backend, modelID, load) {
   toast(load
     ? `${modelID} loaded on ${backend}. ${held} model${held === 1 ? '' : 's'} resident there.`
     : `${modelID} unloaded from ${backend}.`);
+}
+
+// Milliseconds are the wrong unit to read once a call takes seconds.
+function formatMs(ms) {
+  if (!ms) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
 }
 
 async function saveModelNote(modelID, note) {
@@ -4467,6 +4506,7 @@ function renderBackup(body) {
 const PRUNE_TARGETS = [
   { value: 'sessions', label: 'Conversations (and their messages and audit rows)' },
   { value: 'muninn', label: 'Muninn audit rows only (keeps the conversations)' },
+  { value: 'inference_samples', label: 'Model timing measurements' },
   { value: 'fintech_ai_usage', label: 'Recorded model-call costs' },
 ];
 

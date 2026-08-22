@@ -307,6 +307,16 @@ func (r *Repository) PruneSessions(ctx context.Context, olderThanDays int) (int6
 		`DELETE FROM sessions WHERE substr(updated_at, 1, 19) < ?`, cutoff)
 }
 
+// PruneInference deletes measured model-call timings older than olderThanDays.
+//
+// A range delete against an index over created_at alone, so it costs the same
+// whether the table holds a thousand rows or a million.
+func (r *Repository) PruneInference(ctx context.Context, olderThanDays int) (int64, error) {
+	cutoff := time.Now().UTC().AddDate(0, 0, -olderThanDays).Format("2006-01-02T15:04:05")
+	return r.exec(ctx, "prune inference samples",
+		`DELETE FROM inference_samples WHERE substr(created_at, 1, 19) < ?`, cutoff)
+}
+
 // PruneMuninn deletes audit rows older than olderThanDays, leaving the
 // sessions they belong to in place.
 func (r *Repository) PruneMuninn(ctx context.Context, olderThanDays int) (int64, error) {

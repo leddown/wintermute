@@ -186,6 +186,11 @@ const (
 	PruneTargetToolAudit = "tool_audit"
 	// PruneTargetAIUsage deletes recorded model-call costs.
 	PruneTargetAIUsage = "fintech_ai_usage"
+	// PruneTargetInference deletes measured model-call timings. One row per
+	// call, so it grows with use rather than with time, and it is the table
+	// most worth ageing out: a six-month-old latency says nothing about a
+	// backend that has been re-quantised twice since.
+	PruneTargetInference = "inference_samples"
 )
 
 // PruneResult reports how many rows were deleted by a prune operation.

@@ -370,6 +370,8 @@ func (s *Service) Prune(ctx context.Context, target string, olderThanDays int) (
 		n, err = s.repo.PruneMuninn(ctx, olderThanDays)
 	case PruneTargetAIUsage:
 		n, err = s.repo.PruneAIUsage(ctx, olderThanDays)
+	case PruneTargetInference:
+		n, err = s.repo.PruneInference(ctx, olderThanDays)
 	default:
 		return PruneResult{}, ErrInvalidPruneTarget
 	}
