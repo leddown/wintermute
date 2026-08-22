@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"wintermute/internal/agent"
@@ -119,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	authed("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 	authed("PATCH /api/v1/sessions/{id}/model", s.handleSetSessionModel)
 	authed("PATCH /api/v1/sessions/{id}/memory", s.handleSetSessionMemory)
+	authed("DELETE /api/v1/sessions/{id}/messages/{messageID}", s.handleDeleteMessage)
 
 	// Model awareness: hardware, backends, catalog, discovery and planning.
 	authed("GET /api/v1/system", s.handleSystem)
@@ -284,6 +286,28 @@ func (s *Server) handleSetSessionMemory(w http.ResponseWriter, r *http.Request) 
 	}
 	sess.Record, sess.Recall = *req.Record, *req.Recall
 	writeJSON(w, http.StatusOK, sess)
+}
+
+// handleDeleteMessage removes one message and everything derived from it.
+func (s *Server) handleDeleteMessage(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	id, err := strconv.ParseInt(r.PathValue("messageID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "message id must be a number")
+		return
+	}
+	if err := s.store.DeleteMessage(r.Context(), sess.ID, sess.ClientID, id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "no such message in this conversation")
+			return
+		}
+		s.fail(w, "delete message", err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // checkBackend rejects an unknown backend name up front, so the failure lands

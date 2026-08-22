@@ -77,10 +77,12 @@ func run() error {
 		return archive(*backupTo, *exportMemory, *importMemory)
 	}
 
-	// Index maintenance needs the embedder from the configuration, so unlike
-	// the archive commands it loads config first.
+	// Index maintenance needs the embedder but nothing about chat models, so
+	// it loads only that much. These are the commands reached for while
+	// migrating or recovering, which is exactly when backends.json is most
+	// likely to be missing.
 	if *backfill || *reindex {
-		cfg, err := config.Load()
+		cfg, err := config.LoadMemory()
 		if err != nil {
 			return err
 		}
@@ -116,18 +118,14 @@ func run() error {
 // than either. It never touches `messages`: the index is derived, and
 // rebuilding it must not be able to cost the operator the thing it is derived
 // from.
-func maintainIndex(ctx context.Context, cfg *config.Config, log *slog.Logger, reindex bool) error {
-	if cfg.EmbedURL == "" {
-		return errors.New("no embedder configured: set WINTERMUTE_EMBED_URL and WINTERMUTE_EMBED_MODEL")
-	}
-
+func maintainIndex(ctx context.Context, cfg *config.MemoryConfig, log *slog.Logger, reindex bool) error {
 	st, err := store.Open(cfg.DatabasePath)
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	embedder := llm.NewOpenAIEmbedder(cfg.EmbedURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.LLMTimeout)
+	embedder := llm.NewOpenAIEmbedder(cfg.EmbedURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.Timeout)
 	rs := recall.NewStore(st.DB())
 
 	if reindex {

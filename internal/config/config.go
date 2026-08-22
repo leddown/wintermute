@@ -375,6 +375,46 @@ func Load() (*Config, error) {
 	return cfg, nil
 }
 
+// MemoryConfig is the subset needed to maintain the retrieval index: the
+// database and the embedder, and nothing about chat models.
+//
+// It exists because backfilling or rebuilding the index must not require a
+// working chat backend. Those are the commands an operator reaches for while
+// migrating to a new machine or recovering from something, which is exactly
+// when backends.json is likely to be absent or wrong — and being unable to
+// index the archive because no chat model is configured would be a poor reason
+// to be stuck.
+type MemoryConfig struct {
+	DatabasePath string
+	EmbedURL     string
+	EmbedModel   string
+	EmbedAPIKey  string
+	Timeout      time.Duration
+}
+
+// LoadMemory reads just the memory settings, applying .env as Load does.
+func LoadMemory() (*MemoryConfig, error) {
+	if err := loadDotEnv(".env"); err != nil {
+		return nil, fmt.Errorf("load .env: %w", err)
+	}
+	timeout, err := envDuration("WINTERMUTE_LLM_TIMEOUT", 10*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	cfg := &MemoryConfig{
+		DatabasePath: envString("WINTERMUTE_DB", "wintermute.db"),
+		EmbedURL:     strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_URL")),
+		EmbedModel:   strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_MODEL")),
+		EmbedAPIKey:  strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_API_KEY")),
+		Timeout:      timeout,
+	}
+	if cfg.EmbedURL == "" || cfg.EmbedModel == "" {
+		return nil, errors.New(
+			"no embedder configured: set WINTERMUTE_EMBED_URL and WINTERMUTE_EMBED_MODEL")
+	}
+	return cfg, nil
+}
+
 func envString(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v

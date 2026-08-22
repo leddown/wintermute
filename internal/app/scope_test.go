@@ -69,7 +69,7 @@ func TestScopeRegistersOnlyTheAgentsSources(t *testing.T) {
 
 	t.Run("documents only", func(t *testing.T) {
 		reg := tool.NewRegistry()
-		if _, err := scope.Scope(ctx, docsOnly.ID, reg); err != nil {
+		if _, err := scope.Scope(ctx, 1, docsOnly.ID, reg); err != nil {
 			t.Fatalf("Scope: %v", err)
 		}
 		names := toolNames(reg)
@@ -85,7 +85,7 @@ func TestScopeRegistersOnlyTheAgentsSources(t *testing.T) {
 
 	t.Run("every source", func(t *testing.T) {
 		reg := tool.NewRegistry()
-		if _, err := scope.Scope(ctx, everything.ID, reg); err != nil {
+		if _, err := scope.Scope(ctx, 1, everything.ID, reg); err != nil {
 			t.Fatalf("Scope: %v", err)
 		}
 		names := toolNames(reg)
@@ -100,7 +100,7 @@ func TestScopeRegistersOnlyTheAgentsSources(t *testing.T) {
 	// unscoped assistant rather than an error or a free-for-all.
 	for _, id := range []string{"", "deleted-agent"} {
 		reg := tool.NewRegistry()
-		prompt, err := scope.Scope(ctx, id, reg)
+		prompt, err := scope.Scope(ctx, 1, id, reg)
 		if err != nil {
 			t.Fatalf("Scope(%q): %v", id, err)
 		}
@@ -127,7 +127,7 @@ func TestScopeSaysWhenASourceIsNotConfigured(t *testing.T) {
 	}
 
 	reg := tool.NewRegistry()
-	prompt, err := scope.Scope(ctx, agent.ID, reg)
+	prompt, err := scope.Scope(ctx, 1, agent.ID, reg)
 	if err != nil {
 		t.Fatalf("Scope: %v", err)
 	}

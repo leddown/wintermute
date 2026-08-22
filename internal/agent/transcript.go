@@ -206,7 +206,14 @@ func (e *Ephemeral) evictLocked() {
 		var oldestID string
 		var oldest time.Time
 		for id, s := range e.sessions {
-			if oldestID == "" || s.lastUsed.Before(oldest) {
+			// Ties break on the session id. Two sessions touched in the same
+			// instant are common — a turn writes several messages at once —
+			// and without a tiebreak the victim would be chosen by map
+			// iteration order, making eviction non-deterministic.
+			switch {
+			case oldestID == "",
+				s.lastUsed.Before(oldest),
+				s.lastUsed.Equal(oldest) && id < oldestID:
 				oldestID, oldest = id, s.lastUsed
 			}
 		}

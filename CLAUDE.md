@@ -42,6 +42,7 @@ internal/llm/       Provider interface + Anthropic Messages API implementation
 internal/tool/      shared vocabulary: Definition, Call, Result, Registry
 internal/lookup/    server-side tools: TMDB/TVDB/OMDb metadata lookup
 internal/store/     SQLite: clients, sessions, messages, muninn (audit)
+internal/recall/    memory: embedding index, hybrid retrieval, prior-context block
 internal/client/    harness: config, transport, approval policy, prompting
 internal/client/actions/   tools that run on the user's machine (fs, roots)
 internal/config/    server config from env + .env
@@ -92,6 +93,67 @@ strip it, and don't disable thinking to avoid the problem (with thinking off,
 the model sometimes writes a tool call into its visible text instead of
 emitting a tool_use block, which looks like a turn that succeeded while the
 rename silently never ran).
+
+## Memory
+
+Every conversation is recorded in `messages` as neutral role/content text and
+is never stored as a rendered prompt with a model's chat template applied.
+That is what lets the history outlive the model that produced it, and it is
+the constraint to protect above all others here — templates are applied at
+call time, inside the provider, and nowhere else. Each row also records which
+backend and model it passed through, because a session can be repointed at
+another model mid-conversation.
+
+`internal/recall` is the layer above: it embeds messages, retrieves relevant
+prior exchanges for a new turn, and renders them as a delimited block. It is
+never coupled to a chat model.
+
+- **The embedder is pinned and separately configured.** `WINTERMUTE_EMBED_*`
+  is not one of the chat backends. Its name and vector width are written to
+  `recall_meta` on first index and compared at every startup; a mismatch
+  refuses to start rather than retrieving against another model's vector
+  space, which fails silently. Changing it is a deliberate
+  `wintermuted -reindex-memory`.
+- **The index is derived.** Vectors are float32 BLOBs and the lexical half is
+  a contentless FTS5 table; both are rebuildable from `messages`, which is the
+  source of truth. Do not make the index authoritative for anything.
+- **Retrieved context goes in front of the user's message, not in the system
+  prompt.** The system prompt is the cached prefix — Anthropic's cache
+  hierarchy and a local backend's KV cache both key on it — and memory changes
+  every turn. Only the static framing belongs there.
+- **Only user and assistant turns are indexed.** Tool results and fetched web
+  pages are excluded on purpose: indexing them would let text this server did
+  not author be injected into later conversations as trusted context, and a
+  poisoned memory is retrieved repeatedly. Treat retrieved context as
+  untrusted input.
+- **Recall is scoped.** `client_id` is a hard boundary. A session scoped to an
+  agent recalls that agent's history alone; the unscoped assistant recalls
+  everything the client owns. The asymmetry is deliberate — do not collapse it
+  into `agent_id = ? OR agent_id = ''`, which would let one agent read
+  another's material through Wintermute's own conversations.
+
+Two independent switches live on each session. `record` decides whether the
+conversation is written down; `recall` decides whether prior context is
+retrieved into it. Both default to on and ephemeral is never inferred. An
+off-the-record conversation writes **no rows at all** — its transcript lives
+in memory in `internal/agent`, and turning recording off mid-conversation
+deletes what was already written in the same transaction. Muninn keeps
+recording throughout: it holds what was *done*, not what was said.
+
+## Backups
+
+The memory store cannot be rebuilt from anything else, so it has two
+independent protections, both in `internal/utilities`:
+
+- `Backup` takes a `VACUUM INTO` snapshot, then **reopens and verifies it**
+  before reporting success, writing a `manifest.json` with checksums and row
+  counts. A snapshot that fails verification is deleted rather than left
+  looking like a backup. `WINTERMUTE_BACKUP_*` schedules it.
+- `ExportMemory` writes a portable JSON Lines archive for carrying history
+  into a rebuilt installation. Import is idempotent and verifies checksums
+  before writing a row. Credentials are never exported.
+
+Never make either path depend on a model or an embedder being reachable.
 
 Migrations live in `internal/store/migrations/*.sql`, are embedded into the
 binary, and are applied on every `store.Open` (so both the server and

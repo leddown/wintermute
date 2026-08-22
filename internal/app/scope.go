@@ -7,6 +7,7 @@ import (
 
 	"wintermute/internal/grc"
 	"wintermute/internal/knowledge"
+	"wintermute/internal/recall"
 	"wintermute/internal/tool"
 	"wintermute/internal/websearch"
 )
@@ -25,12 +26,32 @@ type agentScope struct {
 	knowledge *knowledge.Service
 	grc       *grc.Client
 	web       *websearch.Client
+	// recall, when memory is configured, backs the episodic-memory tool: what
+	// was actually done in past conversations, across every agent this client
+	// owns.
+	recall *recall.Store
 }
 
 // Scope registers the session agent's permitted tools and returns the prompt
 // text to append.
-func (s *agentScope) Scope(ctx context.Context, agentID string, registry *tool.Registry) (string, error) {
-	if s == nil || s.knowledge == nil {
+func (s *agentScope) Scope(ctx context.Context, clientID int64, agentID string, registry *tool.Registry) (string, error) {
+	if s == nil {
+		return "", nil
+	}
+
+	// Episodic memory is offered to every session, scoped or not, because it
+	// is a record of this client's own actions rather than a body of knowledge
+	// an agent profile grants access to. A scoped session sees only its own
+	// agent's activity; the unscoped assistant sees all of it, which is what
+	// makes it the memory across every agent.
+	if s.recall != nil {
+		def, handler := recall.ActivityTool(s.recall, clientID, agentID)
+		if err := registry.Register(def, handler); err != nil {
+			return "", fmt.Errorf("activity tool: %w", err)
+		}
+	}
+
+	if s.knowledge == nil {
 		return "", nil
 	}
 	agent, err := s.knowledge.Lookup(ctx, agentID)

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -283,10 +284,13 @@ func TestEphemeralEvictsByAgeAndCount(t *testing.T) {
 	now := time.Now()
 	e.now = func() time.Time { return now }
 
+	// Distinct times, so "least recently used" is unambiguous rather than a
+	// tie the eviction has to break arbitrarily.
 	for _, id := range []string{"a", "b"} {
 		if err := e.Append(ctx, id, llm.UserMessage("hello")); err != nil {
 			t.Fatal(err)
 		}
+		now = now.Add(time.Second)
 	}
 	// A third session evicts the least recently used.
 	now = now.Add(time.Minute)
@@ -328,5 +332,120 @@ func TestRecordedConversationDoesNotUseMemory(t *testing.T) {
 	}
 	if _, ok := a.transcriptFor(sess).(storeTranscript); !ok {
 		t.Errorf("recorded session did not use the store transcript: %T", a.transcriptFor(sess))
+	}
+}
+
+// stubRecaller stands in for the memory layer.
+type stubRecaller struct {
+	block   string
+	queries []string
+	// fail makes it behave as a broken retrieval: it returns nothing, which is
+	// the contract — a failed recall is indistinguishable from an empty one.
+	fail bool
+}
+
+func (r *stubRecaller) Framing() string { return "PRIOR-CONTEXT-FRAMING" }
+
+func (r *stubRecaller) Recall(_ context.Context, _ *store.Session, query string) string {
+	r.queries = append(r.queries, query)
+	if r.fail {
+		return ""
+	}
+	return r.block
+}
+
+// Retrieved context has to reach the model in front of the user's message, and
+// the framing has to reach the system prompt — but neither may be written to
+// the transcript, or the block would be stored, replayed, and eventually
+// indexed as if the user had said it.
+func TestRecalledContextReachesTheModelWithoutBeingStored(t *testing.T) {
+	ctx := context.Background()
+	p := &scriptedProvider{responses: []llm.Response{reply("under the stairs")}}
+	rec := &stubRecaller{block: "<prior_context>the stopcock is under the stairs</prior_context>"}
+	a, st, sess := newTestAgent(t, p, tool.NewRegistry())
+	a = a.WithRecall(rec)
+
+	if _, err := a.Advance(ctx, sess, nil, llm.UserMessage("where is the stopcock?")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Retrieved against the user's question.
+	if len(rec.queries) != 1 || rec.queries[0] != "where is the stopcock?" {
+		t.Errorf("recall queries = %v", rec.queries)
+	}
+
+	req := p.requests[0]
+	// The framing is in the system prompt...
+	if !strings.Contains(req.System, "PRIOR-CONTEXT-FRAMING") {
+		t.Error("the framing did not reach the system prompt")
+	}
+	// ...and the block is in front of the user's own words, in their message.
+	last := req.Messages[len(req.Messages)-1]
+	if !strings.Contains(last.Content, "under the stairs") {
+		t.Errorf("prior context did not reach the model: %q", last.Content)
+	}
+	if !strings.HasSuffix(last.Content, "where is the stopcock?") {
+		t.Errorf("the user's message should follow the block, got %q", last.Content)
+	}
+
+	// And none of it was persisted.
+	stored, err := st.Messages(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range stored {
+		if strings.Contains(m.Content, "prior_context") {
+			t.Errorf("the injected block was written to the transcript: %q", m.Content)
+		}
+	}
+	if stored[0].Content != "where is the stopcock?" {
+		t.Errorf("stored user message = %q, want the user's own words alone", stored[0].Content)
+	}
+}
+
+// A conversation with recall switched off must not be retrieved for at all.
+func TestRecallSwitchIsHonoured(t *testing.T) {
+	ctx := context.Background()
+	p := &scriptedProvider{responses: []llm.Response{reply("ok")}}
+	rec := &stubRecaller{block: "<prior_context>something</prior_context>"}
+	a, _, sess := newTestAgent(t, p, tool.NewRegistry())
+	a = a.WithRecall(rec)
+
+	if err := a.SetMemory(ctx, sess, true, false); err != nil {
+		t.Fatal(err)
+	}
+	sess.Recall = false
+
+	if _, err := a.Advance(ctx, sess, nil, llm.UserMessage("anything")); err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.queries) != 0 {
+		t.Errorf("recall ran %d times for a session with recall off", len(rec.queries))
+	}
+	if strings.Contains(p.requests[0].Messages[0].Content, "prior_context") {
+		t.Error("context was injected into a session with recall switched off")
+	}
+}
+
+// Retrieval failing must leave the conversation working exactly as it would
+// without memory at all.
+func TestRetrievalFailureLeavesChatWorking(t *testing.T) {
+	ctx := context.Background()
+	p := &scriptedProvider{responses: []llm.Response{reply("answered anyway")}}
+	rec := &stubRecaller{fail: true}
+	a, _, sess := newTestAgent(t, p, tool.NewRegistry())
+	a = a.WithRecall(rec)
+
+	turn, err := a.Advance(ctx, sess, nil, llm.UserMessage("still there?"))
+	if err != nil {
+		t.Fatalf("a failed recall broke the turn: %v", err)
+	}
+	if turn.Reply != "answered anyway" {
+		t.Errorf("reply = %q", turn.Reply)
+	}
+	// With nothing retrieved, the framing must not be added either — it would
+	// tell the model to expect a block that is not there.
+	if strings.Contains(p.requests[0].System, "PRIOR-CONTEXT-FRAMING") {
+		t.Error("framing was added to the system prompt with no context to frame")
 	}
 }

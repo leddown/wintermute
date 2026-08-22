@@ -167,6 +167,37 @@ func (s *Store) SetSessionMemory(ctx context.Context, id string, clientID int64,
 	return tx.Commit()
 }
 
+// DeleteMessage removes one message from a conversation, scoped to the owning
+// client.
+//
+// Its vector goes with it by ON DELETE CASCADE and its lexical index entry by
+// the trigger in 0014, so a deleted message stops being retrievable rather than
+// merely stopping being displayed. secure_delete (see Open) means the text is
+// overwritten rather than left in a freeblock.
+//
+// The sequence numbers of the remaining messages are deliberately not
+// renumbered. seq orders a transcript; it is not a count, nothing reads it as
+// one, and rewriting every later row to close a gap would touch far more data
+// than the deletion asked for.
+func (s *Store) DeleteMessage(ctx context.Context, sessionID string, clientID int64, messageID int64) error {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM messages
+		 WHERE id = ? AND session_id = ?
+		   AND session_id IN (SELECT id FROM sessions WHERE client_id = ?)`,
+		messageID, sessionID, clientID)
+	if err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // Session fetches a session scoped to its owning client. Callers pass the
 // authenticated client ID; a session belonging to another client reports
 // ErrNotFound rather than a permission error, so the API leaks nothing about

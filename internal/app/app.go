@@ -291,8 +291,8 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Language:   cfg.SearxLanguage,
 	})
 
-	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations).
-		WithScope(&agentScope{knowledge: knowledgeService, grc: grcClient, web: webClient})
+	scope := &agentScope{knowledge: knowledgeService, grc: grcClient, web: webClient}
+	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations).WithScope(scope)
 
 	// Memory. Configured only when an embedder is, so a deployment without one
 	// runs exactly as it did before this existed.
@@ -314,6 +314,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 			return nil, err
 		}
 
+		scope.recall = recallStore
 		indexer = recall.NewIndexer(st.DB(), recallStore, embedder, log)
 		searcher := recall.NewSearcher(st.DB(), recallStore, embedder)
 		ag = ag.WithIndexer(indexer).WithRecall(&memoryLayer{

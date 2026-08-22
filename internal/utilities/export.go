@@ -187,6 +187,24 @@ func (s *Service) ExportMemory(ctx context.Context, destDir string) (ExportResul
 		Files:         files,
 		Counts:        counts,
 	}
+	// Which embedder produced this history's vectors, when there are any.
+	//
+	// The vectors themselves are not carried: they are derivable from the text
+	// beside them, and a reindex on the far side rebuilds them exactly. Which
+	// model produced them is *not* derivable, and without it whoever restores
+	// this archive years from now cannot tell whether their embedder matches
+	// or whether they are about to mix two vector spaces in one index.
+	//
+	// A missing recall_meta table is not an error: an archive from an
+	// installation that never had memory configured is still a valid archive.
+	var embedder string
+	var dim int
+	if err := s.repo.db.QueryRowContext(ctx,
+		`SELECT embedding_model, dimension FROM recall_meta WHERE id = 1`).
+		Scan(&embedder, &dim); err == nil {
+		manifest.Embedder = embedder
+		manifest.EmbedderDim = dim
+	}
 	buf, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return ExportResult{}, fmt.Errorf("utilities: encode export manifest: %w", err)

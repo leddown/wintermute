@@ -115,7 +115,12 @@ func (a *Agent) WithRecall(r Recaller) *Agent {
 type Scoper interface {
 	// Scope registers the session's permitted knowledge tools onto registry and
 	// returns any prompt text to append to the base system prompt.
-	Scope(ctx context.Context, agentID string, registry *tool.Registry) (prompt string, err error)
+	//
+	// clientID is passed because some of those tools read the client's own
+	// history, and their scope has to be bound at registration rather than
+	// taken from an argument the model fills in — the same rule that keeps a
+	// session's document library decided by the session.
+	Scope(ctx context.Context, clientID int64, agentID string, registry *tool.Registry) (prompt string, err error)
 }
 
 // WithScope attaches the profile scoper.
@@ -348,7 +353,7 @@ func (a *Agent) registryFor(ctx context.Context, sess *store.Session, clientTool
 
 	var extraPrompt string
 	if a.scope != nil {
-		prompt, err := a.scope.Scope(ctx, sess.AgentID, registry)
+		prompt, err := a.scope.Scope(ctx, sess.ClientID, sess.AgentID, registry)
 		if err != nil {
 			return nil, "", err
 		}
