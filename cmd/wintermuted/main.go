@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sort"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"wintermute/internal/app"
 	"wintermute/internal/config"
 	"wintermute/internal/store"
+	"wintermute/internal/utilities"
 )
 
 func main() {
@@ -36,6 +38,16 @@ func run() error {
 		revoke      = flag.String("revoke-client", "", "revoke the named client's token and exit")
 		migrateOnly = flag.Bool("migrate-only", false, "apply database migrations and exit")
 		debug       = flag.Bool("debug", false, "enable debug logging")
+
+		// The memory store is the one thing here that cannot be reconstructed
+		// from anything else, so its protection is reachable without starting
+		// the server or configuring a model.
+		backupTo = flag.String("backup", "",
+			"write a verified snapshot of the database into this absolute directory and exit")
+		exportMemory = flag.String("export-memory", "",
+			"export the conversation history as portable JSON Lines into this absolute directory and exit")
+		importMemory = flag.String("import-memory", "",
+			"merge a memory export directory into this database and exit")
 	)
 	flag.Parse()
 
@@ -49,6 +61,14 @@ func run() error {
 	// config's LLM requirements are enforced.
 	if *addClient != "" || *listClients || *revoke != "" || *migrateOnly {
 		return manage(log, *addClient, *clientKind, *listClients, *revoke)
+	}
+
+	// Archive commands, likewise. Backing up or carrying the history into a
+	// new installation must not require a working model backend: the moment
+	// this is most needed is the moment the rest of the configuration is
+	// broken or absent.
+	if *backupTo != "" || *exportMemory != "" || *importMemory != "" {
+		return archive(*backupTo, *exportMemory, *importMemory)
 	}
 
 	cfg, err := config.Load()
@@ -66,6 +86,77 @@ func run() error {
 	defer stop()
 
 	return application.Run(ctx)
+}
+
+// archive handles the snapshot and portability subcommands. Like manage, it
+// opens the store directly — which applies migrations — and needs no model
+// configuration.
+func archive(backupTo, exportTo, importFrom string) error {
+	path := os.Getenv("WINTERMUTE_DB")
+	if path == "" {
+		path = "wintermute.db"
+	}
+	st, err := store.Open(path)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	svc := utilities.NewService(st.DB(), path)
+
+	// No timeout. Exporting or importing years of conversation is bounded by
+	// the size of the archive rather than by anything that should be cut off
+	// mid-write, and a half-written archive is the failure worth avoiding.
+	ctx := context.Background()
+
+	switch {
+	case backupTo != "":
+		res, err := svc.Backup(ctx, backupTo)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("snapshot written to %s\n", res.Destination)
+		fmt.Printf("  verified: %v (integrity %s)\n", res.Verified, res.Integrity)
+		for _, f := range res.Files {
+			fmt.Printf("  %s  %d bytes  sha256:%s\n", f.Name, f.Size, f.SHA256)
+		}
+		printCounts("  contains", res.Rows)
+
+	case exportTo != "":
+		res, err := svc.ExportMemory(ctx, exportTo)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("memory exported to %s\n", res.Destination)
+		printCounts("  exported", res.Counts)
+
+	case importFrom != "":
+		res, err := svc.ImportMemory(ctx, importFrom)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("memory imported from %s\n", res.Source)
+		printCounts("  inserted", res.Inserted)
+		printCounts("  already present", res.Skipped)
+	}
+	return nil
+}
+
+// printCounts renders a counts map in a stable order, so two runs of the same
+// command produce output that can be diffed.
+func printCounts(label string, counts map[string]int64) {
+	if len(counts) == 0 {
+		fmt.Printf("%s: nothing\n", label)
+		return
+	}
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		fmt.Printf("%s: %-16s %d\n", label, name, counts[name])
+	}
 }
 
 // manage handles the database-only subcommands. Opening the store applies

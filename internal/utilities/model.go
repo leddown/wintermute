@@ -38,6 +38,10 @@ var ErrInvalidDays = errors.New("utilities: older_than_days must be at least 1")
 type BackupFile struct {
 	Name string `json:"name"`
 	Size int64  `json:"size_bytes"`
+	// SHA256 lets a copy made years later be checked against what was
+	// actually written, which is the difference between having a file and
+	// having the file.
+	SHA256 string `json:"sha256,omitempty"`
 }
 
 // BackupResult summarises a completed backup run.
@@ -47,6 +51,41 @@ type BackupResult struct {
 	Destination string       `json:"destination"`
 	Files       []BackupFile `json:"files"`
 	CreatedAt   time.Time    `json:"created_at"`
+
+	// Verified reports that the snapshot was reopened after being written and
+	// found to be a readable, internally consistent database.
+	//
+	// An unverified backup is not a backup. The whole point of this file is to
+	// still be readable after the machine that wrote it is gone, and the only
+	// way to know that is to open it and look — so Backup does, every time,
+	// rather than trusting that VACUUM INTO returned without an error.
+	Verified bool `json:"verified"`
+	// Integrity is SQLite's own verdict: "ok", or the first problem it found.
+	Integrity string `json:"integrity"`
+	// Rows counts what the snapshot actually contains, per table. A backup
+	// that verifies clean but holds no messages is a successful backup of
+	// nothing, and that is worth being able to see.
+	Rows map[string]int64 `json:"rows"`
+}
+
+// Snapshot manifest.
+
+// backupManifestVersion is the manifest schema's own version, so a reader
+// years from now can tell what it is looking at before it parses the rest.
+const backupManifestVersion = 1
+
+// BackupManifest is written alongside the snapshot as manifest.json, so the
+// directory describes itself without needing this program to interpret it.
+// It is the difference between an archive and an unlabelled binary blob.
+type BackupManifest struct {
+	ManifestVersion int              `json:"manifest_version"`
+	Application     string           `json:"application"`
+	CreatedAt       time.Time        `json:"created_at"`
+	SourcePath      string           `json:"source_path"`
+	SchemaVersion   string           `json:"schema_version"`
+	Files           []BackupFile     `json:"files"`
+	Integrity       string           `json:"integrity"`
+	Rows            map[string]int64 `json:"rows"`
 }
 
 // ---- system info -----------------------------------------------------------

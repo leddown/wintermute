@@ -2,13 +2,19 @@ package utilities
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"syscall"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // Service performs administrative operations: backups, system diagnostics,
@@ -51,8 +57,12 @@ func (s *Service) Backup(ctx context.Context, destDir string) (BackupResult, err
 		return BackupResult{}, ErrInvalidDestination
 	}
 
-	stamp := time.Now().Format("2006-01-02T15-04-05")
-	outDir := filepath.Join(destDir, "wintermute-backup-"+stamp)
+	// UTC, not local time. Retention (PruneBackups) relies on these names
+	// sorting chronologically, and local time does not: an hour after a
+	// daylight-saving rollback, a new snapshot would sort *before* one taken
+	// earlier and become the candidate for deletion.
+	stamp := time.Now().UTC().Format("2006-01-02T15-04-05")
+	outDir := filepath.Join(destDir, backupDirPrefix+stamp)
 	if err := os.MkdirAll(outDir, 0o750); err != nil {
 		return BackupResult{}, fmt.Errorf("utilities: create backup directory: %w", err)
 	}
@@ -72,12 +82,128 @@ func (s *Service) Backup(ctx context.Context, destDir string) (BackupResult, err
 	if err != nil {
 		return BackupResult{}, fmt.Errorf("utilities: stat backup file: %w", err)
 	}
+	sum, err := sha256File(dbFile)
+	if err != nil {
+		return BackupResult{}, err
+	}
 
-	return BackupResult{
+	// Reopen what was just written and check it. A backup that has never been
+	// opened is an assumption, not a copy — and a snapshot that fails here is
+	// worse than no snapshot, because it would be trusted.
+	check, err := verifySnapshot(ctx, dbFile)
+	if err != nil {
+		// The unreadable file is removed rather than left looking like a
+		// backup. Leaving it would put a broken copy in the retention set,
+		// where it could be the one still standing when it is needed.
+		os.RemoveAll(outDir)
+		return BackupResult{}, fmt.Errorf("utilities: backup failed verification: %w", err)
+	}
+
+	result := BackupResult{
 		Destination: outDir,
-		Files:       []BackupFile{{Name: name, Size: fi.Size()}},
+		Files:       []BackupFile{{Name: name, Size: fi.Size(), SHA256: sum}},
 		CreatedAt:   time.Now(),
-	}, nil
+		Verified:    check.Integrity == "ok",
+		Integrity:   check.Integrity,
+		Rows:        check.Rows,
+	}
+	if !result.Verified {
+		os.RemoveAll(outDir)
+		return BackupResult{}, fmt.Errorf("utilities: backup failed integrity check: %s", check.Integrity)
+	}
+
+	if err := writeManifest(outDir, s.databasePath, check.SchemaVersion, result); err != nil {
+		return BackupResult{}, err
+	}
+	return result, nil
+}
+
+// verifySnapshot opens a freshly written snapshot read-only and asks SQLite
+// whether it is sound, then counts what it holds.
+//
+// query_only is set so that opening the file to check it cannot modify it —
+// verification must not be able to damage the thing it is verifying.
+func verifySnapshot(ctx context.Context, path string) (snapshotCheck, error) {
+	var out snapshotCheck
+	db, err := sql.Open("sqlite", path+"?_pragma=query_only(1)&_pragma=foreign_keys(ON)")
+	if err != nil {
+		return out, fmt.Errorf("open snapshot: %w", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	if err := db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&out.Integrity); err != nil {
+		return out, fmt.Errorf("integrity check: %w", err)
+	}
+	if out.Integrity != "ok" {
+		return out, nil
+	}
+
+	// The newest applied migration names the schema this file was written
+	// under, which is what a future reader needs before interpreting it.
+	if err := db.QueryRowContext(ctx,
+		`SELECT COALESCE(MAX(name), '') FROM schema_migrations`).Scan(&out.SchemaVersion); err != nil {
+		return out, fmt.Errorf("read schema version: %w", err)
+	}
+
+	// Row counts double as proof that the tables are actually readable, not
+	// merely structurally intact.
+	out.Rows = map[string]int64{}
+	for _, table := range backupTables {
+		var n int64
+		if err := db.QueryRowContext(ctx, `SELECT count(*) FROM `+table).Scan(&n); err != nil {
+			// A table absent from an older snapshot is not a corruption.
+			continue
+		}
+		out.Rows[table] = n
+	}
+	return out, nil
+}
+
+// snapshotCheck is what reopening a snapshot established about it.
+type snapshotCheck struct {
+	Integrity     string
+	SchemaVersion string
+	Rows          map[string]int64
+}
+
+// backupTables are the tables whose counts are recorded with a snapshot. These
+// are the ones whose loss would be unrecoverable: the conversations, what was
+// done in them, and who owned them.
+var backupTables = []string{"sessions", "messages", "muninn", "clients"}
+
+// writeManifest makes the snapshot directory self-describing.
+func writeManifest(outDir, sourcePath, schemaVersion string, res BackupResult) error {
+	manifest := BackupManifest{
+		ManifestVersion: backupManifestVersion,
+		Application:     "wintermute",
+		CreatedAt:       res.CreatedAt.UTC(),
+		SourcePath:      sourcePath,
+		SchemaVersion:   schemaVersion,
+		Files:           res.Files,
+		Integrity:       res.Integrity,
+		Rows:            res.Rows,
+	}
+	buf, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("utilities: encode manifest: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), append(buf, '\n'), 0o640); err != nil {
+		return fmt.Errorf("utilities: write manifest: %w", err)
+	}
+	return nil
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("utilities: open for checksum: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("utilities: checksum: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ---- system info -----------------------------------------------------------

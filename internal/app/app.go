@@ -47,6 +47,10 @@ type App struct {
 	// twire is held for the same reason: its canary listeners are opened by
 	// Run and closed when the context is cancelled.
 	twire *twire.Service
+	// utilities is held so Run can start the backup scheduler. It is the same
+	// service the API exposes, so a scheduled backup and one triggered from
+	// the UI are the same operation with the same verification.
+	utilities *utilities.Service
 }
 
 // buildRouter turns the configured backends into live providers.
@@ -322,12 +326,13 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		})
 
 	return &App{
-		cfg:     cfg,
-		log:     log,
-		store:   st,
-		catalog: catalog,
-		fintech: fintechService,
-		twire:   twireService,
+		cfg:       cfg,
+		log:       log,
+		store:     st,
+		catalog:   catalog,
+		fintech:   fintechService,
+		twire:     twireService,
+		utilities: utilitiesService,
 		http: &http.Server{
 			Addr:    cfg.Addr,
 			Handler: srv.Handler(),
@@ -522,6 +527,14 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.fintech != nil && a.cfg.FintechReviewInterval > 0 {
 		go fintech.NewReviewScheduler(a.fintech, a.cfg.FintechReviewInterval).Run(ctx)
+	}
+
+	// Verified snapshots on a timer, when a destination and interval are
+	// configured. This is the one background pass whose absence is silent
+	// until it matters, so it announces itself in the log at startup.
+	if a.utilities != nil && a.cfg.BackupDir != "" && a.cfg.BackupInterval > 0 {
+		go utilities.NewScheduler(a.utilities, a.cfg.BackupDir,
+			a.cfg.BackupInterval, a.cfg.BackupKeep, a.log).Run(ctx)
 	}
 
 	// Open the listeners for any canary enabled before the last restart. Every

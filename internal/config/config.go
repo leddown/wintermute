@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -149,6 +150,24 @@ type Config struct {
 	// TwireAlertTo is a comma-separated recipient list.
 	TwireAlertTo string
 
+	// Backups. The memory store is the one thing here that cannot be rebuilt
+	// from anything else — models change, backends come and go, but a
+	// conversation from three years ago exists in exactly one place — so the
+	// server can take verified snapshots on its own schedule rather than
+	// relying on someone remembering to press a button.
+	//
+	// BackupDir is where snapshots are written; empty disables scheduled
+	// backups entirely. It must be an absolute path.
+	BackupDir string
+	// BackupInterval is how often to take one. Zero disables the scheduler,
+	// which is the default: writing copies of the whole database somewhere on
+	// a timer is something to ask for, not to assume.
+	BackupInterval time.Duration
+	// BackupKeep is how many snapshots to retain. Zero keeps every snapshot
+	// ever taken, which is the safe default for a deletion routine pointed at
+	// the operator's backups. The newest is never removed regardless.
+	BackupKeep int
+
 	// BackendProbeInterval is how often every backend is re-probed for health.
 	// Probing costs one cheap inventory request per backend, and without it a
 	// backend's recorded status is frozen at the last manual refresh — a host
@@ -186,6 +205,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	probeInterval, err := envDuration("WINTERMUTE_BACKEND_PROBE_INTERVAL", time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	backupInterval, err := envDuration("WINTERMUTE_BACKUP_INTERVAL", 0)
+	if err != nil {
+		return nil, err
+	}
+	backupKeep, err := envInt("WINTERMUTE_BACKUP_KEEP", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +272,10 @@ func Load() (*Config, error) {
 		TwireAlertTo: strings.TrimSpace(os.Getenv("TWIRE_ALERT_TO")),
 
 		BackendProbeInterval: probeInterval,
+
+		BackupDir:      strings.TrimSpace(os.Getenv("WINTERMUTE_BACKUP_DIR")),
+		BackupInterval: backupInterval,
+		BackupKeep:     backupKeep,
 	}
 
 	if cfg.DefaultBackend == "" {
@@ -255,6 +286,15 @@ func Load() (*Config, error) {
 	}
 	if cfg.LLMMaxTokens < 1 {
 		return nil, errors.New("WINTERMUTE_LLM_MAX_TOKENS must be at least 1")
+	}
+	// Caught at startup rather than at the first tick: a backup destination
+	// that turns out to be unusable an hour later is discovered when the
+	// backup is needed, which is the worst possible moment.
+	if cfg.BackupDir != "" && !filepath.IsAbs(cfg.BackupDir) {
+		return nil, errors.New("WINTERMUTE_BACKUP_DIR must be an absolute path")
+	}
+	if cfg.BackupInterval > 0 && cfg.BackupDir == "" {
+		return nil, errors.New("WINTERMUTE_BACKUP_INTERVAL is set but WINTERMUTE_BACKUP_DIR is not")
 	}
 	return cfg, nil
 }
