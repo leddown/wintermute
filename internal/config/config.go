@@ -216,7 +216,16 @@ type Config struct {
 	// NodeRawRetention is how long full-resolution samples are kept before
 	// they are folded into buckets and deleted. Short on purpose: nothing
 	// outside this window should ever read a raw row.
+	//
+	// It is a floor rather than a promise: raw is never deleted past the point
+	// the minute tier has confirmed, so if folding stalls, raw accumulates
+	// until it recovers rather than being destroyed unsummarised.
 	NodeRawRetention time.Duration
+	// NodeMinuteRetention and NodeHourRetention bound the coarser tiers. Daily
+	// buckets are kept indefinitely: a row per host per day is nothing, and it
+	// is the tier that answers "was this box always like this".
+	NodeMinuteRetention time.Duration
+	NodeHourRetention   time.Duration
 
 	// BackendProbeInterval is how often every backend is re-probed for health.
 	// Probing costs one cheap inventory request per backend, and without it a
@@ -287,6 +296,14 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	rawRetention, err := envDuration("WINTERMUTE_NODE_RAW_RETENTION", 2*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	minuteRetention, err := envDuration("WINTERMUTE_NODE_MINUTE_RETENTION", 30*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	hourRetention, err := envDuration("WINTERMUTE_NODE_HOUR_RETENTION", 365*24*time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -362,6 +379,8 @@ func Load() (*Config, error) {
 
 		MetricsDatabasePath: strings.TrimSpace(os.Getenv("WINTERMUTE_METRICS_DB")),
 		NodeRawRetention:    rawRetention,
+		NodeMinuteRetention: minuteRetention,
+		NodeHourRetention:   hourRetention,
 	}
 
 	if cfg.DefaultBackend == "" {

@@ -387,7 +387,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		WithTwire(twireService).
 		WithUtilities(utilitiesService).
 		WithMemory(recallStore, indexer).
-		WithNodes(nodeStore).
+		WithNodes(nodeStore, cfg.NodeRawRetention).
 		WithBackendAdmin(func(ctx context.Context) error {
 			return reloadBackends(ctx, cfg, st, router, catalog, log)
 		})
@@ -599,14 +599,15 @@ func (a *App) Run(ctx context.Context) error {
 		go fintech.NewReviewScheduler(a.fintech, a.cfg.FintechReviewInterval).Run(ctx)
 	}
 
-	// Ageing raw telemetry out. Full-resolution samples live two hours; this
-	// is what keeps that window from quietly becoming a growing table.
-	//
-	// The sweep runs on a fraction of the retention period rather than on it,
-	// so a restart cannot leave rows sitting well past their window waiting
-	// for a tick that is an hour away.
-	if a.nodes != nil && a.cfg.NodeRawRetention > 0 {
-		go a.pruneRawTelemetry(ctx)
+	// Folding raw telemetry into buckets and ageing out what has been folded.
+	// Raw lives two hours; everything older is answered from summaries, so no
+	// query outside that window ever scans a raw row.
+	if a.nodes != nil {
+		go node.NewRoller(a.nodes, node.Retention{
+			Raw:    a.cfg.NodeRawRetention,
+			Minute: a.cfg.NodeMinuteRetention,
+			Hour:   a.cfg.NodeHourRetention,
+		}, a.log).Run(ctx, 0)
 	}
 
 	// Draining the measurement buffer. Started before anything can serve a
@@ -663,37 +664,6 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Close releases resources held by the app.
-// pruneRawTelemetry deletes raw samples past the retention window on a timer.
-//
-// A range delete against an index over time alone, so it costs the same whether
-// the table holds a thousand rows or a million — which is the property that
-// makes a two-hour window cheap to enforce rather than an expensive promise.
-func (a *App) pruneRawTelemetry(ctx context.Context) {
-	interval := a.cfg.NodeRawRetention / 4
-	if interval < time.Minute {
-		interval = time.Minute
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			cutoff := time.Now().UTC().Add(-a.cfg.NodeRawRetention)
-			n, err := a.nodes.PruneRaw(ctx, cutoff)
-			if err != nil {
-				a.log.Warn("could not age out raw telemetry", "error", err)
-				continue
-			}
-			if n > 0 {
-				a.log.Debug("raw telemetry aged out", "rows", n, "older_than", cutoff)
-			}
-		}
-	}
-}
-
 // Close releases both databases. The metrics file is closed first and its
 // error deliberately does not mask the main store's: telemetry failing to
 // close cleanly is a footnote, and the store holding the conversation memory

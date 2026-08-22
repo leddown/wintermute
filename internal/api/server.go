@@ -54,6 +54,9 @@ type Server struct {
 	memory *recall.Store
 	// nodes is the fleet telemetry store. Nil when it is not enabled.
 	nodes *node.Store
+	// rawWindow is how long full-resolution samples survive, which is what
+	// decides whether a requested span can be answered from them.
+	rawWindow time.Duration
 	// memoryIndexer rebuilds the index on request. Nil for the same reason.
 	memoryIndexer *recall.Indexer
 	// reloadBackends re-resolves the backend set and swaps it into the router

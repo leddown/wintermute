@@ -21,6 +21,15 @@ var migrationsFS embed.FS
 // not live beside the conversation memory.
 type Store struct{ db *sql.DB }
 
+// stamp renders a timestamp the way this database stores them.
+//
+// Explicit RFC3339 text rather than handing the driver a time.Time. The driver
+// stores a time.Time in a form SQLite's own date functions cannot read, which
+// makes strftime — and therefore the whole rollup, which groups by truncated
+// timestamp inside the query — silently return NULL. Storing text costs a few
+// bytes per row and keeps every date function working.
+func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+
 // Open opens (creating if needed) the metrics database and applies migrations.
 //
 // The pragmas match the main store's, minus secure_delete: that one exists
@@ -129,7 +138,7 @@ func (s *Store) Ingest(ctx context.Context, nodeName string, report Report) (int
 		   cores = excluded.cores,
 		   agent_version = excluded.agent_version,
 		   last_seen_at = excluded.last_seen_at`,
-		nodeName, f.Hostname, f.OS, f.Kernel, f.Cores, f.AgentVersion, now, now); err != nil {
+		nodeName, f.Hostname, f.OS, f.Kernel, f.Cores, f.AgentVersion, stamp(now), stamp(now)); err != nil {
 		return 0, fmt.Errorf("record node: %w", err)
 	}
 
@@ -146,7 +155,7 @@ func (s *Store) Ingest(ctx context.Context, nodeName string, report Report) (int
 	var stored int
 	for _, sample := range report.Samples {
 		res, err := stmt.ExecContext(ctx,
-			nodeName, sample.At.UTC(), sample.CPUPercent,
+			nodeName, stamp(sample.At), sample.CPUPercent,
 			sample.Load1, sample.Load5, sample.Load15,
 			sample.MemTotal, sample.MemUsed, sample.SwapUsed,
 			sample.DiskReadBPS, sample.DiskWriteBPS,
@@ -192,10 +201,12 @@ func (s *Store) Nodes(ctx context.Context) ([]Node, error) {
 	out := []Node{}
 	for rows.Next() {
 		var n Node
+		var firstSeen, lastSeen string
 		if err := rows.Scan(&n.Name, &n.Hostname, &n.OS, &n.Kernel, &n.Cores,
-			&n.AgentVersion, &n.FirstSeenAt, &n.LastSeenAt); err != nil {
+			&n.AgentVersion, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
+		n.FirstSeenAt, n.LastSeenAt = parseTime(firstSeen), parseTime(lastSeen)
 		out = append(out, n)
 	}
 	if err := rows.Err(); err != nil {
@@ -215,11 +226,12 @@ func (s *Store) Nodes(ctx context.Context) ([]Node, error) {
 // LatestSample returns a node's newest reading, or nil if it has sent none.
 func (s *Store) LatestSample(ctx context.Context, nodeName string) (*Sample, error) {
 	var sample Sample
+	var at string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT at, cpu_percent, load_1, load_5, load_15, mem_total, mem_used, swap_used,
 		        disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds
 		 FROM node_samples WHERE node = ? ORDER BY at DESC LIMIT 1`, nodeName).
-		Scan(&sample.At, &sample.CPUPercent, &sample.Load1, &sample.Load5, &sample.Load15,
+		Scan(&at, &sample.CPUPercent, &sample.Load1, &sample.Load5, &sample.Load15,
 			&sample.MemTotal, &sample.MemUsed, &sample.SwapUsed,
 			&sample.DiskReadBPS, &sample.DiskWriteBPS,
 			&sample.NetRxBPS, &sample.NetTxBPS, &sample.UptimeSeconds)
@@ -229,6 +241,7 @@ func (s *Store) LatestSample(ctx context.Context, nodeName string) (*Sample, err
 	if err != nil {
 		return nil, fmt.Errorf("read latest sample: %w", err)
 	}
+	sample.At = parseTime(at)
 	return &sample, nil
 }
 
@@ -240,7 +253,7 @@ func (s *Store) SamplesSince(ctx context.Context, nodeName string, since time.Ti
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT at, cpu_percent, load_1, load_5, load_15, mem_total, mem_used, swap_used,
 		        disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds
-		 FROM node_samples WHERE node = ? AND at >= ? ORDER BY at`, nodeName, since.UTC())
+		 FROM node_samples WHERE node = ? AND at >= ? ORDER BY at`, nodeName, stamp(since))
 	if err != nil {
 		return nil, fmt.Errorf("read samples: %w", err)
 	}
@@ -249,12 +262,14 @@ func (s *Store) SamplesSince(ctx context.Context, nodeName string, since time.Ti
 	out := []Sample{}
 	for rows.Next() {
 		var sample Sample
-		if err := rows.Scan(&sample.At, &sample.CPUPercent, &sample.Load1, &sample.Load5,
+		var at string
+		if err := rows.Scan(&at, &sample.CPUPercent, &sample.Load1, &sample.Load5,
 			&sample.Load15, &sample.MemTotal, &sample.MemUsed, &sample.SwapUsed,
 			&sample.DiskReadBPS, &sample.DiskWriteBPS,
 			&sample.NetRxBPS, &sample.NetTxBPS, &sample.UptimeSeconds); err != nil {
 			return nil, fmt.Errorf("scan sample: %w", err)
 		}
+		sample.At = parseTime(at)
 		out = append(out, sample)
 	}
 	return out, rows.Err()
@@ -283,7 +298,7 @@ func (s *Store) Forget(ctx context.Context, nodeName string) error {
 // the table holds a thousand rows or a million. This is what keeps the two-hour
 // window from becoming a growing table nobody noticed.
 func (s *Store) PruneRaw(ctx context.Context, olderThan time.Time) (int64, error) {
-	res, err := s.db.ExecContext(ctx, `DELETE FROM node_samples WHERE at < ?`, olderThan.UTC())
+	res, err := s.db.ExecContext(ctx, `DELETE FROM node_samples WHERE at < ?`, stamp(olderThan))
 	if err != nil {
 		return 0, fmt.Errorf("prune raw samples: %w", err)
 	}
@@ -292,4 +307,126 @@ func (s *Store) PruneRaw(ctx context.Context, olderThan time.Time) (int64, error
 		return 0, fmt.Errorf("prune raw samples: %w", err)
 	}
 	return n, nil
+}
+
+// ---- reading a window ------------------------------------------------------
+
+// Point is one plotted value, whatever tier it came from.
+//
+// Means are recovered here by dividing a stored sum by its stored count, which
+// is correct at every tier precisely because no tier stored a mean. Peaks come
+// through untouched, because a peak cannot be recovered from an average and is
+// usually the thing worth seeing.
+type Point struct {
+	At      time.Time `json:"at"`
+	Samples int       `json:"samples"`
+
+	CPUPercent   float64 `json:"cpu_percent"`
+	CPUMax       float64 `json:"cpu_max"`
+	Load1        float64 `json:"load_1"`
+	Load1Max     float64 `json:"load_1_max"`
+	MemUsed      float64 `json:"mem_used_bytes"`
+	MemUsedMax   int64   `json:"mem_used_max_bytes"`
+	MemTotal     int64   `json:"mem_total_bytes"`
+	SwapUsedMax  int64   `json:"swap_used_max_bytes"`
+	DiskReadBPS  float64 `json:"disk_read_bps"`
+	DiskWriteBPS float64 `json:"disk_write_bps"`
+	NetRxBPS     float64 `json:"net_rx_bps"`
+	NetTxBPS     float64 `json:"net_tx_bps"`
+}
+
+// Series is a node's history over a window, at whatever resolution suits it.
+type Series struct {
+	Node string `json:"node"`
+	// Bucket names the resolution actually used: "raw", "minute", "hour" or
+	// "day". Reported rather than implied, so a chart can say what it is
+	// showing instead of letting the reader assume full resolution.
+	Bucket string  `json:"bucket"`
+	Points []Point `json:"points"`
+}
+
+// bucketFor picks the resolution that answers a window without scanning.
+//
+// This function is where "no query outside the raw window ever touches a raw
+// row" stops being a comment and becomes true. Every window gets a few hundred
+// points: a day at minute resolution is 1,440 rows, a month at hourly is 720, a
+// decade at daily is 3,650. The alternative — reading raw and downsampling in
+// the caller — is what makes a monitoring page get slower every week, and it is
+// avoided by never being reachable.
+func bucketFor(window time.Duration, rawWindow time.Duration) string {
+	switch {
+	case window <= rawWindow:
+		return "raw"
+	case window <= 36*time.Hour:
+		return BucketMinute
+	case window <= 90*24*time.Hour:
+		return BucketHour
+	default:
+		return BucketDay
+	}
+}
+
+// SeriesSince returns a node's history from `since` until now, choosing the
+// coarsest resolution that still has enough points to be worth plotting.
+func (s *Store) SeriesSince(ctx context.Context, nodeName string, since time.Time, rawWindow time.Duration) (Series, error) {
+	if rawWindow <= 0 {
+		rawWindow = 2 * time.Hour
+	}
+	bucket := bucketFor(time.Since(since), rawWindow)
+	out := Series{Node: nodeName, Bucket: bucket, Points: []Point{}}
+
+	if bucket == "raw" {
+		samples, err := s.SamplesSince(ctx, nodeName, since)
+		if err != nil {
+			return out, err
+		}
+		for _, sample := range samples {
+			out.Points = append(out.Points, Point{
+				At: sample.At, Samples: 1,
+				CPUPercent: sample.CPUPercent, CPUMax: sample.CPUPercent,
+				Load1: sample.Load1, Load1Max: sample.Load1,
+				MemUsed: float64(sample.MemUsed), MemUsedMax: int64(sample.MemUsed),
+				MemTotal: int64(sample.MemTotal), SwapUsedMax: int64(sample.SwapUsed),
+				DiskReadBPS: sample.DiskReadBPS, DiskWriteBPS: sample.DiskWriteBPS,
+				NetRxBPS: sample.NetRxBPS, NetTxBPS: sample.NetTxBPS,
+			})
+		}
+		return out, nil
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT at, samples, cpu_sum, cpu_max, load1_sum, load1_max,
+		        mem_used_sum, mem_used_max, mem_total_max, swap_used_max,
+		        disk_read_sum, disk_write_sum, net_rx_sum, net_tx_sum
+		 FROM node_rollup
+		 WHERE node = ? AND bucket = ? AND at >= ?
+		 ORDER BY at`, nodeName, bucket, stamp(since))
+	if err != nil {
+		return out, fmt.Errorf("read series: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var p Point
+		var at string
+		var cpuSum, load1Sum, memUsedSum, diskReadSum, diskWriteSum, netRxSum, netTxSum float64
+		if err := rows.Scan(&at, &p.Samples, &cpuSum, &p.CPUMax, &load1Sum, &p.Load1Max,
+			&memUsedSum, &p.MemUsedMax, &p.MemTotal, &p.SwapUsedMax,
+			&diskReadSum, &diskWriteSum, &netRxSum, &netTxSum); err != nil {
+			return out, fmt.Errorf("scan series point: %w", err)
+		}
+		p.At = parseTime(at)
+		if p.Samples > 0 {
+			n := float64(p.Samples)
+			p.CPUPercent = cpuSum / n
+			p.Load1 = load1Sum / n
+			p.MemUsed = memUsedSum / n
+			p.DiskReadBPS = diskReadSum / n
+			p.DiskWriteBPS = diskWriteSum / n
+			p.NetRxBPS = netRxSum / n
+			p.NetTxBPS = netTxSum / n
+		}
+		out.Points = append(out.Points, p)
+	}
+	return out, rows.Err()
 }

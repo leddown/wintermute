@@ -19,8 +19,9 @@ import (
 // WithNodes attaches the fleet store, enabling the endpoints below. Without it
 // the server runs exactly as it did before the fleet existed and the endpoints
 // say so.
-func (s *Server) WithNodes(store *node.Store) *Server {
+func (s *Server) WithNodes(store *node.Store, rawWindow time.Duration) *Server {
 	s.nodes = store
+	s.rawWindow = rawWindow
 	return s
 }
 
@@ -28,6 +29,7 @@ func (s *Server) registerNodeRoutes(authed func(string, http.HandlerFunc)) {
 	authed("POST /api/v1/nodes/report", s.handleNodeReport)
 	authed("GET /api/v1/nodes", s.handleListNodes)
 	authed("GET /api/v1/nodes/{name}/samples", s.handleNodeSamples)
+	authed("GET /api/v1/nodes/{name}/series", s.handleNodeSeries)
 	authed("DELETE /api/v1/nodes/{name}", s.handleForgetNode)
 }
 
@@ -132,6 +134,37 @@ func (s *Server) handleNodeSamples(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"node": r.PathValue("name"), "minutes": minutes, "samples": samples,
 	})
+}
+
+// handleNodeSeries returns a node's history over any window, at whatever
+// resolution suits it.
+//
+// The caller asks for a span of time, not a resolution: picking the tier is the
+// store's job, and leaving it to the caller is how a dashboard ends up scanning
+// raw rows for a month-long chart. The answer says which tier it used, so a
+// chart can be honest about what it is showing.
+func (s *Server) handleNodeSeries(w http.ResponseWriter, r *http.Request) {
+	if s.nodes == nil {
+		s.nodesUnavailable(w)
+		return
+	}
+	hours := queryInt(r, "hours", 1)
+	if hours < 1 {
+		hours = 1
+	}
+	// Ten years, which at daily resolution is 3,650 points — still a small
+	// answer, which is the whole point of the tiering.
+	if hours > 24*365*10 {
+		hours = 24 * 365 * 10
+	}
+	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
+
+	series, err := s.nodes.SeriesSince(r.Context(), r.PathValue("name"), since, s.rawWindow)
+	if err != nil {
+		s.fail(w, "read node series", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, series)
 }
 
 // handleForgetNode removes a host and everything it reported. Decommissioning a

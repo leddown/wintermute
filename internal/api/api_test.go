@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"wintermute/internal/agent"
 	"wintermute/internal/llm"
@@ -499,7 +500,7 @@ func TestOnlyNodeClientsMayReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { nodeStore.Close() })
-	srv = srv.WithNodes(nodeStore)
+	srv = srv.WithNodes(nodeStore, 2*time.Hour)
 	handler := srv.Handler()
 
 	_, browserToken, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
@@ -549,7 +550,7 @@ func TestReportRejectsAnUnknownFormatVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { nodeStore.Close() })
-	srv = srv.WithNodes(nodeStore)
+	srv = srv.WithNodes(nodeStore, 2*time.Hour)
 
 	_, token, err := st.CreateClient(t.Context(), "rig", store.KindNode)
 	if err != nil {
