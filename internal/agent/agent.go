@@ -70,6 +70,9 @@ type Agent struct {
 	// set and system prompt. It is optional so the loop still runs — unscoped,
 	// as it did before agents existed — in a deployment that has none.
 	scope Scoper
+	// ephemeral holds the transcripts of conversations that are not being
+	// written down. See transcript.go.
+	ephemeral *Ephemeral
 }
 
 // Scoper narrows a turn to the profile the session belongs to: which knowledge
@@ -105,6 +108,7 @@ func New(router *llm.Router, pool *llm.Pool, s *store.Store, serverTools *tool.R
 		log:           log,
 		maxIterations: maxIterations,
 		system:        SystemPrompt,
+		ephemeral:     NewEphemeral(0, 0),
 	}
 }
 
@@ -145,7 +149,11 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 	// is resolved to a concrete backend and model here, at the moment it is
 	// true, rather than left for a later reader to guess at.
 	inBackend, inModel := a.resolve(sess)
-	if err := a.store.AppendMessages(ctx, sess.ID, stamp(incoming, inBackend, inModel, 0)...); err != nil {
+	// Where this conversation's history lives. For a recorded session this is
+	// the store, exactly as before; for one that is off the record it is
+	// memory, and nothing below can tell the difference.
+	transcript := a.transcriptFor(sess)
+	if err := transcript.Append(ctx, sess.ID, stamp(incoming, inBackend, inModel, 0)...); err != nil {
 		return nil, err
 	}
 
@@ -168,7 +176,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 	var lastFailure string
 	var repeats int
 	for i := 0; i < a.maxIterations; i++ {
-		history, err := a.store.Messages(ctx, sess.ID)
+		history, err := transcript.Messages(ctx, sess.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -200,7 +208,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		resp.Message.Backend = res.Backend
 		resp.Message.Model = res.Model
 		resp.Message.TokenCount = resp.Usage.CompletionTokens
-		if err := a.store.AppendMessages(ctx, sess.ID, resp.Message); err != nil {
+		if err := transcript.Append(ctx, sess.ID, resp.Message); err != nil {
 			return nil, err
 		}
 
@@ -216,7 +224,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		// the error back rather than failing the turn — it usually recovers.
 		for _, call := range unknown {
 			res := tool.Errorf(call.ID, "unknown tool %q; use one of the tools provided", call.Name)
-			if err := a.store.AppendMessages(ctx, sess.ID,
+			if err := transcript.Append(ctx, sess.ID,
 				stamp([]llm.Message{llm.ToolMessage(res)}, turn.Backend, turn.Model, 0)...); err != nil {
 				return nil, err
 			}
@@ -224,7 +232,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 
 		for _, call := range serverCalls {
 			res := a.runServerTool(ctx, registry, sess, call, call.ID)
-			if err := a.store.AppendMessages(ctx, sess.ID,
+			if err := transcript.Append(ctx, sess.ID,
 				stamp([]llm.Message{llm.ToolMessage(res)}, turn.Backend, turn.Model, 0)...); err != nil {
 				return nil, err
 			}
@@ -327,6 +335,12 @@ func (a *Agent) runServerTool(ctx context.Context, registry *tool.Registry, sess
 		Outcome:   res.Content,
 		IsError:   res.IsError,
 	}
+	// Deliberately unconditional, including for off-the-record conversations.
+	// Muninn records what was *done* — a call proposed against the operator's
+	// filesystem, and whether it was allowed — not what was said. A rename is
+	// no less real for having been discussed privately, and an audit trail
+	// with holes in it wherever the conversation was confidential is not an
+	// audit trail. What the transcript held is gone; what it caused remains.
 	if err := a.store.RecordTool(ctx, entry); err != nil {
 		a.log.Error("audit write failed", "tool", call.Name, "session", sess.ID, "error", err)
 	}

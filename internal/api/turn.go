@@ -155,6 +155,13 @@ func (s *Server) handleTurnProgress(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// An off-the-record conversation has no rows to count, so the row-based
+	// progress read would report a turn that never starts. Its length comes
+	// from the in-memory transcript instead.
+	if !sess.Record {
+		writeJSON(w, http.StatusOK, store.TurnProgress{Count: s.agent.EphemeralLen(sess.ID)})
+		return
+	}
 	progress, err := s.store.TurnProgress(r.Context(), sess.ID)
 	if err != nil {
 		s.fail(w, "turn progress", err)

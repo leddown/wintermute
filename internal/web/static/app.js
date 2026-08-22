@@ -21,6 +21,12 @@ const state = {
   // has to invent a name for it. `backends` is the catalogue with health, so
   // the picker can say which ones are actually answering.
   chatBackend: null, backends: [], defaultBackend: '',
+  // Whether the open conversation is being written down, and whether it draws
+  // on prior ones. Two independent switches, mirroring the session row: a chat
+  // that reads the full history but leaves no trace of itself is a valid and
+  // useful combination. Both default to on; going off the record is always an
+  // explicit act.
+  record: true, recall: true,
 };
 
 function api(path, options = {}) {
@@ -541,6 +547,23 @@ async function newSession() {
   // An agent can pin its own backend, so the session comes back naming what it
   // actually got, which is not always what was asked for. Follow the answer.
   state.chatBackend = sess.backend || null;
+  // A new session is always created on the record. If the operator asked for
+  // something else before there was a session to ask it of, apply it now —
+  // otherwise the choice they made would silently not take effect on the very
+  // first message, which is the worst possible moment for this setting to be
+  // wrong.
+  const wantRecord = state.record;
+  const wantRecall = state.recall;
+  state.record = sess.record !== false;
+  state.recall = sess.recall !== false;
+  if (wantRecord !== state.record || wantRecall !== state.recall) {
+    const updated = await api(`/api/v1/sessions/${sess.id}/memory`, {
+      method: 'PATCH',
+      body: JSON.stringify({ record: wantRecord, recall: wantRecall }),
+    });
+    state.record = updated.record !== false;
+    state.recall = updated.recall !== false;
+  }
   renderChatControls();
   $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
   await loadSessions();
@@ -561,6 +584,9 @@ async function openSession(id) {
   const known = (state.agents || []).find((a) => a.id === agentOfSession(id));
   state.chatAgent = known ? known.id : agentOfSession(id);
   state.chatBackend = backendOfSession(id);
+  const opened = sessionIndex.find((x) => x.id === id);
+  state.record = !opened || opened.record !== false;
+  state.recall = !opened || opened.recall !== false;
   renderChatControls();
   const { messages } = await api(`/api/v1/sessions/${id}/messages`);
   $('messages').innerHTML = '';
@@ -700,10 +726,85 @@ function renderChatControls() {
   if (state.backends.length) {
     parts.push(el('span', { class: 'muted', text: 'Backend' }), chatBackendSelect());
   }
+  parts.push(memoryControls());
   holder.replaceChildren(...parts);
+  // The whole chat pane is marked, not just the badge. Whether this
+  // conversation is being kept is the kind of thing that is bad to be wrong
+  // about in either direction, so it changes the look of the room rather than
+  // hiding in a control strip.
+  const chat = $('chat');
+  if (chat) chat.classList.toggle('off-the-record', !state.record);
   // The strip and the cloud answer the same question — which model is this
   // going to — so they are rebuilt together whenever the backend changes.
   renderWordCloud();
+}
+
+// The recording state, shown as a word rather than a checkbox.
+//
+// A checkbox says what will happen when you click it; this has to say what is
+// true right now, at a glance, without being read carefully. "Recording" and
+// "Off the record" are unambiguous in a way that a ticked or unticked box next
+// to the word "ephemeral" is not.
+function memoryControls() {
+  const recording = state.record;
+  const badge = el('button', {
+    class: `memory-badge ${recording ? 'on' : 'off'}`,
+    type: 'button',
+    title: recording
+      ? 'This conversation is being saved. Click to go off the record — the turns already saved will be deleted.'
+      : 'This conversation is not being saved and will be lost when the server restarts. Click to start recording from here on.',
+    onclick: () => toggleRecording().catch(showError),
+  }, [
+    el('span', { class: 'memory-dot', text: recording ? '\u25cf' : '\u25cb' }),
+    el('span', { text: recording ? 'Recording' : 'Off the record' }),
+  ]);
+
+  const recall = el('label', {
+    class: 'memory-recall',
+    title: 'Whether this conversation can draw on what was said in earlier ones.',
+  }, [
+    el('input', {
+      type: 'checkbox',
+      checked: state.recall,
+      onchange: (e) => setMemory(state.record, e.target.checked).catch(showError),
+    }),
+    el('span', { text: 'Use past chats' }),
+  ]);
+
+  return el('span', { class: 'memory-controls' }, [badge, recall]);
+}
+
+// Going off the record deletes what has already been written for this
+// conversation, so it asks first. Going back on the record does not, because
+// it destroys nothing — it only starts keeping what comes next.
+async function toggleRecording() {
+  if (state.record) {
+    const ok = window.confirm(
+      'Go off the record?\n\n' +
+      'The turns already saved for this conversation will be deleted, and nothing ' +
+      'said from here on will be written down. The chat itself keeps working, but ' +
+      'it will be lost when the server restarts.\n\nThis cannot be undone.');
+    if (!ok) return;
+  }
+  await setMemory(!state.record, state.recall);
+}
+
+async function setMemory(record, recall) {
+  if (!state.sessionId) {
+    // No session yet: remember the choice for the one the next message opens.
+    state.record = record;
+    state.recall = recall;
+    renderChatControls();
+    return;
+  }
+  const sess = await api(`/api/v1/sessions/${state.sessionId}/memory`, {
+    method: 'PATCH',
+    body: JSON.stringify({ record, recall }),
+  });
+  state.record = sess.record !== false;
+  state.recall = sess.recall !== false;
+  renderChatControls();
+  await loadSessions();
 }
 
 // The agent picker. Changing it affects the *next* session rather than the

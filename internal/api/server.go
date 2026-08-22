@@ -14,6 +14,7 @@ import (
 
 	"wintermute/internal/agent"
 	"wintermute/internal/knowledge"
+	"wintermute/internal/llm"
 	"wintermute/internal/models"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
@@ -117,6 +118,7 @@ func (s *Server) Handler() http.Handler {
 	authed("GET /api/v1/sessions/{id}/audit", s.handleAudit)
 	authed("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 	authed("PATCH /api/v1/sessions/{id}/model", s.handleSetSessionModel)
+	authed("PATCH /api/v1/sessions/{id}/memory", s.handleSetSessionMemory)
 
 	// Model awareness: hardware, backends, catalog, discovery and planning.
 	authed("GET /api/v1/system", s.handleSystem)
@@ -245,6 +247,45 @@ func (s *Server) handleSetSessionModel(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sess)
 }
 
+// setSessionMemoryRequest carries the two switches. Both are required rather
+// than optional: this endpoint sets the conversation's memory state, and a
+// partial update whose omitted field silently keeps its old value is the wrong
+// shape for a setting the operator must be able to be certain about.
+type setSessionMemoryRequest struct {
+	Record *bool `json:"record"`
+	Recall *bool `json:"recall"`
+}
+
+// handleSetSessionMemory turns recording and recall on or off for one
+// conversation.
+//
+// Turning recording off deletes the turns already written for this session, so
+// this is not a reversible preference toggle — it destroys data on purpose,
+// which is the whole point of it. The conversation itself keeps working from
+// memory.
+func (s *Server) handleSetSessionMemory(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var req setSessionMemoryRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Record == nil || req.Recall == nil {
+		writeError(w, http.StatusBadRequest,
+			"both record and recall are required, so the resulting state is never inferred")
+		return
+	}
+
+	if err := s.agent.SetMemory(r.Context(), sess, *req.Record, *req.Recall); err != nil {
+		s.fail(w, "set session memory", err)
+		return
+	}
+	sess.Record, sess.Recall = *req.Record, *req.Recall
+	writeJSON(w, http.StatusOK, sess)
+}
+
 // checkBackend rejects an unknown backend name up front, so the failure lands
 // on the request that chose it rather than on the next turn.
 func (s *Server) checkBackend(name string) error {
@@ -291,6 +332,21 @@ func (s *Server) handleDeleteSession(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	sess, ok := s.session(w, r)
 	if !ok {
+		return
+	}
+	// A conversation that is off the record has no rows; its transcript lives
+	// in memory for as long as the process does, and the browser still has to
+	// be able to display what is being said.
+	if !sess.Record {
+		msgs, err := s.agent.EphemeralMessages(r.Context(), sess.ID)
+		if err != nil {
+			s.fail(w, "list messages", err)
+			return
+		}
+		if msgs == nil {
+			msgs = []llm.Message{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"messages": msgs})
 		return
 	}
 	msgs, err := s.store.Messages(r.Context(), sess.ID)

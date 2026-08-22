@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"wintermute/internal/agent"
@@ -254,6 +255,86 @@ func TestValidateDecision(t *testing.T) {
 	for _, bad := range []string{"", "yes", "APPROVED", "trusted"} {
 		if _, err := validateDecision(bad); err == nil {
 			t.Errorf("validateDecision(%q) = nil, want error", bad)
+		}
+	}
+}
+
+// The memory endpoint must not accept a partial update. A setting the operator
+// has to be certain about should never end up in a state that was inferred
+// from an omitted field.
+func TestSetSessionMemoryRequiresBothSwitches(t *testing.T) {
+	srv, st := newTestServer(t)
+	client, token, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(t.Context(), client.ID, "chat", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := srv.Handler()
+
+	send := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch,
+			"/api/v1/sessions/"+sess.ID+"/memory", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := send(`{"record": false}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("partial update status = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+	// And it did not take effect.
+	got, err := st.Session(t.Context(), sess.ID, client.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Record {
+		t.Error("a rejected request changed the recording state")
+	}
+
+	rec := send(`{"record": false, "recall": true}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("full update status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	got, err = st.Session(t.Context(), sess.ID, client.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Record || !got.Recall {
+		t.Errorf("record/recall = %v/%v, want false/true", got.Record, got.Recall)
+	}
+}
+
+// The switches have to be on the wire even when false, or a client cannot tell
+// "not recording" from "the server did not say".
+func TestSessionJSONAlwaysStatesItsMemoryState(t *testing.T) {
+	_, st := newTestServer(t)
+	client, _, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(t.Context(), client.ID, "chat", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionMemory(t.Context(), sess.ID, client.ID, false, false); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Session(t.Context(), sess.ID, client.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{`"record":false`, `"recall":false`} {
+		if !strings.Contains(string(buf), field) {
+			t.Errorf("session JSON is missing %s: %s", field, buf)
 		}
 	}
 }

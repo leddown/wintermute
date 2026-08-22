@@ -825,6 +825,40 @@ dialog h3 { margin: 0; font-size: 15px; }
   background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
   padding: 4px 8px; color: inherit; font: inherit; max-width: 320px;
 }
+/* Whether the open conversation is being written down.
+   
+   This is deliberately louder than a setting normally deserves. Being wrong
+   about it is bad in both directions — believing a private conversation is
+   private when it is being saved, or losing one that was meant to be kept — so
+   the state is a word, not a checkbox, and going off the record changes the
+   whole chat pane rather than one badge in a strip. */
+.memory-controls { display: flex; align-items: center; gap: 10px; margin-left: auto; }
+
+.memory-badge {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 999px;
+  padding: 3px 10px; color: inherit; font: inherit; font-size: 12px; cursor: pointer;
+}
+.memory-badge:hover { border-color: var(--accent, #6ea8fe); }
+.memory-dot { font-size: 10px; line-height: 1; }
+.memory-badge.on .memory-dot { color: #3fb950; }
+.memory-badge.off { border-color: #d29922; color: #d29922; }
+.memory-badge.off .memory-dot { color: #d29922; }
+
+.memory-recall { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; opacity: 0.8; }
+.memory-recall input { margin: 0; }
+
+/* An off-the-record chat is marked along its whole edge. The dashed rule reads
+   as "not written down" at a glance, from across the room, without anyone
+   having to find and read a badge. */
+.chat.off-the-record { border-left: 2px dashed #d29922; }
+.chat.off-the-record .messages::before {
+  content: 'Off the record — nothing in this conversation is being saved';
+  display: block; margin: 0 0 10px; padding: 6px 10px;
+  border: 1px dashed #d29922; border-radius: 8px;
+  color: #d29922; font-size: 12px;
+}
+
 ul.plain { list-style: none; margin: 10px 0 0; padding: 0; }
 ul.plain li {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
