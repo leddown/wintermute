@@ -610,3 +610,155 @@ func newTestSession(t *testing.T, st *Store) *Session {
 	}
 	return sess
 }
+
+// Notes and champions are the operator's own judgements, and the whole reason
+// they are separate tables is that the catalog is a probe cache. This is the
+// property that matters: a refresh must not wipe an opinion.
+func TestModelJudgementsSurviveACatalogRefresh(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.UpsertBackend(ctx, BackendRow{Name: "local", Kind: "ollama", Status: BackendOK}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ReplaceCatalog(ctx, "local", []CatalogRow{
+		{Backend: "local", ModelID: "qwen3:8b", ParamsB: 8},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := st.SetModelNote(ctx, "qwen3:8b", "Current best coding."); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetChampion(ctx, "coding", "qwen3:8b"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A probe sweep rewrites every catalog row.
+	if err := st.ReplaceCatalog(ctx, "local", []CatalogRow{
+		{Backend: "local", ModelID: "qwen3:8b", ParamsB: 8, Loaded: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	notes, err := st.ModelNotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := notes["qwen3:8b"].Note; got != "Current best coding." {
+		t.Errorf("note after a refresh = %q, want it intact", got)
+	}
+	champions, err := st.Champions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(champions) != 1 || champions[0].ModelID != "qwen3:8b" {
+		t.Errorf("champions after a refresh = %+v", champions)
+	}
+}
+
+// Naming a new champion replaces the old one rather than adding a second, so
+// there is never a moment with two and never a stale pointer left behind.
+func TestChampionIsAMovingPointer(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SetChampion(ctx, "coding", "qwen3:8b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetChampion(ctx, "coding", "devstral:24b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetChampion(ctx, "general", "qwen3:8b"); err != nil {
+		t.Fatal(err)
+	}
+
+	champions, err := st.Champions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(champions) != 2 {
+		t.Fatalf("got %d champions, want 2 (one per task): %+v", len(champions), champions)
+	}
+	byTask := map[string]string{}
+	for _, c := range champions {
+		byTask[c.Task] = c.ModelID
+	}
+	if byTask["coding"] != "devstral:24b" {
+		t.Errorf("coding champion = %q, want the model that replaced it", byTask["coding"])
+	}
+	if byTask["general"] != "qwen3:8b" {
+		t.Errorf("general champion = %q", byTask["general"])
+	}
+
+	// A model can hold more than one title at once.
+	if err := st.SetChampion(ctx, "coding", "qwen3:8b"); err != nil {
+		t.Fatal(err)
+	}
+	champions, err = st.Champions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(champions) != 2 {
+		t.Errorf("got %d champions, want 2", len(champions))
+	}
+}
+
+// Clearing is expressed as an empty value rather than a separate verb, so
+// "no note" and "no champion" are one state each.
+func TestEmptyValueClearsAJudgement(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SetModelNote(ctx, "qwen3:8b", "temporary"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetModelNote(ctx, "qwen3:8b", "   "); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := st.ModelNotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := notes["qwen3:8b"]; ok {
+		t.Error("a blank note was stored instead of clearing the row")
+	}
+
+	if err := st.SetChampion(ctx, "coding", "qwen3:8b"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetChampion(ctx, "coding", ""); err != nil {
+		t.Fatal(err)
+	}
+	champions, err := st.Champions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(champions) != 0 {
+		t.Errorf("clearing left %+v", champions)
+	}
+}
+
+// The same model on several hosts reports the same id, so one note covers all
+// of them — and case differences must not split it in two.
+func TestNoteKeyFoldsCase(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	if err := st.SetModelNote(ctx, "Qwen3:8B", "first"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetModelNote(ctx, "qwen3:8b", "second"); err != nil {
+		t.Fatal(err)
+	}
+	notes, err := st.ModelNotes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 {
+		t.Fatalf("case difference created %d notes, want 1: %+v", len(notes), notes)
+	}
+	if notes["qwen3:8b"].Note != "second" {
+		t.Errorf("note = %q, want the later write to have won", notes["qwen3:8b"].Note)
+	}
+}

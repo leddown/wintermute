@@ -110,6 +110,17 @@ type Model struct {
 	// Fit is the estimate of running this model on the detected hardware. It
 	// is attached at query time, not stored, because free VRAM moves.
 	Fit *Fit `json:"fit,omitempty"`
+
+	// Note is what the operator wrote about this model, and ChampionOf lists
+	// the tasks they named it best at.
+	//
+	// Both are attached at query time like Fit, but for the opposite reason:
+	// Fit is transient because free VRAM moves, while these are durable and
+	// the catalog row is not — Catalog.Refresh rewrites every model row on
+	// each probe, so a judgement stored there would survive until the next
+	// sweep and no longer.
+	Note       string `json:"note,omitempty"`
+	ChampionOf []Task `json:"champion_of,omitempty"`
 }
 
 // Has reports whether the model declares a capability.

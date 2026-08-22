@@ -254,6 +254,102 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"models": list})
 }
 
+// The operator's own judgements about models.
+//
+// The model id travels in the body rather than the path. Model ids routinely
+// contain both slashes and colons — "qwen3:8b", "meta-llama/Llama-3.1-8B" —
+// and putting one in a path segment means every caller has to agree on how it
+// was escaped. The body sidesteps it.
+
+type modelNoteRequest struct {
+	ModelID string `json:"model_id"`
+	Note    string `json:"note"`
+}
+
+// handleSetModelNote records what the operator thinks of a model. An empty note
+// clears it.
+func (s *Server) handleSetModelNote(w http.ResponseWriter, r *http.Request) {
+	var req modelNoteRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.ModelID) == "" {
+		writeError(w, http.StatusBadRequest, "model_id is required")
+		return
+	}
+	const maxNote = 4000
+	if len(req.Note) > maxNote {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("a note is at most %d characters", maxNote))
+		return
+	}
+	if err := s.store.SetModelNote(r.Context(), req.ModelID, req.Note); err != nil {
+		s.fail(w, "set model note", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"model_id": store.NoteKey(req.ModelID),
+		"note":     strings.TrimSpace(req.Note),
+	})
+}
+
+type championRequest struct {
+	Task    string `json:"task"`
+	ModelID string `json:"model_id"`
+}
+
+// handleSetChampion names the model to reach for at one task, replacing
+// whatever held the title before. An empty model id clears the task.
+func (s *Server) handleSetChampion(w http.ResponseWriter, r *http.Request) {
+	var req championRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	// The task must be one this server knows, or a typo would create a
+	// champion for a task nothing ever asks about — stored, displayed nowhere,
+	// and silently useless.
+	if !knownTask(req.Task) {
+		writeError(w, http.StatusBadRequest,
+			fmt.Sprintf("unknown task %q; known tasks are %s", req.Task, taskNames()))
+		return
+	}
+	if err := s.store.SetChampion(r.Context(), req.Task, req.ModelID); err != nil {
+		s.fail(w, "set champion", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"task":     req.Task,
+		"model_id": store.NoteKey(req.ModelID),
+	})
+}
+
+// handleChampions lists every task's champion.
+func (s *Server) handleChampions(w http.ResponseWriter, r *http.Request) {
+	list, err := s.store.Champions(r.Context())
+	if err != nil {
+		s.fail(w, "list champions", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"champions": list})
+}
+
+func knownTask(task string) bool {
+	for _, t := range models.AllTasks {
+		if string(t) == task {
+			return true
+		}
+	}
+	return false
+}
+
+func taskNames() string {
+	names := make([]string, 0, len(models.AllTasks))
+	for _, t := range models.AllTasks {
+		names = append(names, string(t))
+	}
+	return strings.Join(names, ", ")
+}
+
 // handleModelSearch proxies a Hugging Face Hub search.
 //
 // It is proxied rather than called from the browser because the Hub token, if

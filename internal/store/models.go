@@ -218,3 +218,127 @@ func (s *Store) DeleteBackendConfig(ctx context.Context, name string) error {
 	}
 	return nil
 }
+
+// ---- operator judgements ---------------------------------------------------
+//
+// The catalog above is a cache of what backends report and is rewritten on
+// every probe. These are the operator's own annotations, which nothing
+// refreshes. See 0016_model_notes.sql for why they are separate tables.
+
+// ModelNote is what the operator wrote about a model.
+type ModelNote struct {
+	ModelID   string    `json:"model_id"`
+	Note      string    `json:"note"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Champion is the model the operator reaches for at one task.
+type Champion struct {
+	Task      string    `json:"task"`
+	ModelID   string    `json:"model_id"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// NoteKey normalises a model id into the key these tables use.
+//
+// Lowercasing only, deliberately. Merging engine-specific names — Ollama's
+// "qwen3:8b" against vLLM's "Qwen3-8B-Instruct" — needs heuristics, and a
+// heuristic that merges wrongly attaches a judgement to a model it was never
+// about. Two notes is a far better failure than one misattributed one. The
+// common case still collapses: the same model on four Ollama hosts reports the
+// same id, so it shares one note.
+func NoteKey(modelID string) string {
+	return strings.ToLower(strings.TrimSpace(modelID))
+}
+
+// SetModelNote writes the operator's note for a model. An empty note deletes
+// the row rather than storing a blank one, so "no note" is one state.
+func (s *Store) SetModelNote(ctx context.Context, modelID, note string) error {
+	key := NoteKey(modelID)
+	if key == "" {
+		return fmt.Errorf("set model note: a model id is required")
+	}
+	note = strings.TrimSpace(note)
+	if note == "" {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM model_notes WHERE model_id = ?`, key); err != nil {
+			return fmt.Errorf("clear model note: %w", err)
+		}
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO model_notes (model_id, note, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(model_id) DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at`,
+		key, note, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("set model note: %w", err)
+	}
+	return nil
+}
+
+// ModelNotes returns every note, keyed by model id, for attaching to a catalog
+// listing in one read rather than one query per model.
+func (s *Store) ModelNotes(ctx context.Context) (map[string]ModelNote, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT model_id, note, updated_at FROM model_notes`)
+	if err != nil {
+		return nil, fmt.Errorf("list model notes: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string]ModelNote{}
+	for rows.Next() {
+		var n ModelNote
+		if err := rows.Scan(&n.ModelID, &n.Note, &n.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan model note: %w", err)
+		}
+		out[n.ModelID] = n
+	}
+	return out, rows.Err()
+}
+
+// SetChampion names the model to reach for at a task, replacing whatever held
+// the title before. An empty model id clears the task.
+//
+// One statement, so there is never an instant with two champions for a task and
+// never a stale pointer left behind on a superseded model.
+func (s *Store) SetChampion(ctx context.Context, task, modelID string) error {
+	task = strings.TrimSpace(task)
+	if task == "" {
+		return fmt.Errorf("set champion: a task is required")
+	}
+	key := NoteKey(modelID)
+	if key == "" {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM model_champions WHERE task = ?`, task); err != nil {
+			return fmt.Errorf("clear champion: %w", err)
+		}
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO model_champions (task, model_id, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(task) DO UPDATE SET model_id = excluded.model_id, updated_at = excluded.updated_at`,
+		task, key, time.Now().UTC())
+	if err != nil {
+		return fmt.Errorf("set champion: %w", err)
+	}
+	return nil
+}
+
+// Champions returns every task's champion, newest assignment first.
+func (s *Store) Champions(ctx context.Context) ([]Champion, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT task, model_id, updated_at FROM model_champions ORDER BY task`)
+	if err != nil {
+		return nil, fmt.Errorf("list champions: %w", err)
+	}
+	defer rows.Close()
+
+	out := []Champion{}
+	for rows.Next() {
+		var c Champion
+		if err := rows.Scan(&c.Task, &c.ModelID, &c.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan champion: %w", err)
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}

@@ -258,6 +258,25 @@ func (c *Catalog) Models(ctx context.Context, contextTokens int) ([]Model, error
 		cloud[b.Name] = b.Cloud
 	}
 
+	// The operator's own annotations, read once for the whole listing rather
+	// than per model. Both failures are non-fatal: a missing note is a missing
+	// note, and a catalog that refuses to list because an annotation table
+	// could not be read would be worse than one listing without opinions.
+	notes, err := c.store.ModelNotes(ctx)
+	if err != nil {
+		c.log.Warn("could not read model notes", "error", err)
+		notes = nil
+	}
+	champions, err := c.store.Champions(ctx)
+	if err != nil {
+		c.log.Warn("could not read model champions", "error", err)
+		champions = nil
+	}
+	championsByModel := map[string][]Task{}
+	for _, ch := range champions {
+		championsByModel[ch.ModelID] = append(championsByModel[ch.ModelID], Task(ch.Task))
+	}
+
 	out := make([]Model, 0, len(rows))
 	for _, r := range rows {
 		m := Model{
@@ -294,6 +313,12 @@ func (c *Catalog) Models(ctx context.Context, contextTokens int) ([]Model, error
 			}, hw)
 			m.Fit = &fit
 		}
+		key := store.NoteKey(m.ID)
+		if n, ok := notes[key]; ok {
+			m.Note = n.Note
+		}
+		m.ChampionOf = championsByModel[key]
+
 		out = append(out, m)
 	}
 	return out, nil

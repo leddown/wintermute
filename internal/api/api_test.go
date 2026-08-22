@@ -416,3 +416,74 @@ func TestMemoryStatusWithoutAnEmbedder(t *testing.T) {
 		t.Errorf("configured = %v, want false", body["configured"])
 	}
 }
+
+// A champion for a task nothing knows about would be stored, displayed
+// nowhere, and silently useless — so a typo is refused at the edge.
+func TestChampionRejectsUnknownTask(t *testing.T) {
+	srv, st := newTestServer(t)
+	_, token, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := srv.Handler()
+
+	post := func(path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	rec := post("/api/v1/models/champions", `{"task":"vibes","model_id":"qwen3:8b"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("unknown task gave %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "coding") {
+		t.Errorf("the error should list the known tasks, got: %s", rec.Body.String())
+	}
+
+	if rec := post("/api/v1/models/champions", `{"task":"coding","model_id":"qwen3:8b"}`); rec.Code != http.StatusOK {
+		t.Fatalf("known task gave %d: %s", rec.Code, rec.Body.String())
+	}
+	champions, err := st.Champions(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(champions) != 1 || champions[0].Task != "coding" {
+		t.Errorf("champions = %+v", champions)
+	}
+}
+
+// A note travels in the body because model ids contain slashes and colons, and
+// it must survive that round trip exactly.
+func TestModelNoteRoundTripsThroughTheAPI(t *testing.T) {
+	srv, st := newTestServer(t)
+	_, token, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"model_id":"meta-llama/Llama-3.1-8B:Q4_K_M","note":"Current best coding."}`
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/models/note", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	notes, err := st.ModelNotes(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := notes["meta-llama/llama-3.1-8b:q4_k_m"]
+	if !ok {
+		t.Fatalf("note not stored under the folded id: %+v", notes)
+	}
+	if got.Note != "Current best coding." {
+		t.Errorf("note = %q", got.Note)
+	}
+}

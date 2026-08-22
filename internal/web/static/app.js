@@ -2742,7 +2742,7 @@ async function renderAdmin() {
   const titles = {
     status: 'Status', config: 'Configuration', backends: 'Backends',
     hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
-    memory: 'Memory', appearance: 'Appearance',
+    models: 'Models', memory: 'Memory', appearance: 'Appearance',
   };
   $('admin-title').textContent = titles[admin.tab];
   body.innerHTML = '';
@@ -2752,11 +2752,148 @@ async function renderAdmin() {
   if (admin.tab === 'backends') return renderAdminBackends(body);
   if (admin.tab === 'hardware') return renderAdminHardware(body);
   if (admin.tab === 'tools') return renderAdminTools(body);
+  if (admin.tab === 'models') return renderAdminModels(body);
   if (admin.tab === 'memory') return renderAdminMemory(body);
   // Purely local, unlike every other tab here: it reads and writes
   // localStorage and asks the server nothing.
   if (admin.tab === 'appearance') return renderAdminAppearance(body);
   return renderAdminClients(body);
+}
+
+// The model registry: which model sits on which machine, and what you think of
+// it.
+//
+// Grouped by model rather than by backend, which is the inversion that makes it
+// useful. The catalog stores one row per backend-and-model pair, so a model on
+// four hosts is four rows — but a judgement about it is one judgement, and
+// showing it four times would invite four contradictory notes. Each model
+// appears once, with the machines carrying it listed beside it.
+async function renderAdminModels(body) {
+  const [{ models: list }, { champions }, { tasks }] = await Promise.all([
+    api('/api/v1/models'),
+    api('/api/v1/models/champions'),
+    api('/api/v1/tasks'),
+  ]);
+
+  if (!list || !list.length) {
+    body.append(el('p', { class: 'muted', text:
+      'No models found. Check the Backends tab — a backend that is unreachable reports nothing.' }));
+    return;
+  }
+
+  // Fold the per-backend rows into one row per model.
+  const byModel = new Map();
+  for (const m of list) {
+    const key = (m.id || '').toLowerCase();
+    if (!byModel.has(key)) byModel.set(key, { model: m, hosts: [] });
+    const entry = byModel.get(key);
+    entry.hosts.push({ backend: m.backend, loaded: m.loaded, vram: m.vram_bytes });
+    // Prefer a loaded copy as the representative row: its VRAM figure is real
+    // rather than an estimate.
+    if (m.loaded && !entry.model.loaded) entry.model = m;
+  }
+
+  const championTask = new Map();
+  for (const c of champions || []) championTask.set(c.model_id, [...(championTask.get(c.model_id) || []), c.task]);
+
+  const taskLabel = new Map((tasks || []).map((t) => [t.task, t.label]));
+
+  body.append(el('p', { class: 'muted', text:
+    `${byModel.size} models across ${new Set(list.map((m) => m.backend)).size} backends. `
+    + 'Notes and champions are yours — nothing overwrites them when a backend is re-probed.' }));
+
+  const rows = [...byModel.entries()].sort((a, b) => {
+    // Champions first, then models you have written about, then the rest.
+    const ca = (championTask.get(a[0]) || []).length;
+    const cb = (championTask.get(b[0]) || []).length;
+    if (ca !== cb) return cb - ca;
+    const na = a[1].model.note ? 1 : 0;
+    const nb = b[1].model.note ? 1 : 0;
+    if (na !== nb) return nb - na;
+    return a[0].localeCompare(b[0]);
+  });
+
+  for (const [key, entry] of rows) {
+    body.append(modelCard(key, entry, championTask.get(key) || [], tasks || [], taskLabel));
+  }
+}
+
+function modelCard(key, entry, titles, tasks, taskLabel) {
+  const m = entry.model;
+  const resident = entry.hosts.filter((h) => h.loaded);
+
+  const hostChips = entry.hosts.map((h) => el('span', {
+    class: `host-chip ${h.loaded ? 'resident' : ''}`,
+    title: h.loaded ? 'Resident in memory on this machine' : 'Present on this machine, not loaded',
+    text: h.backend,
+  }));
+
+  const titleChips = titles.map((t) => el('span', {
+    class: 'title-chip',
+    text: `Best for ${taskLabel.get(t) || t}`,
+  }));
+
+  const facts = [
+    m.params_b ? `${m.params_b}B` : null,
+    m.quant || null,
+    m.ctx_len ? `${(m.ctx_len / 1024).toFixed(0)}k ctx` : null,
+    resident.length ? `resident on ${resident.length} of ${entry.hosts.length}` : null,
+  ].filter(Boolean).join(' · ');
+
+  const noteBox = el('textarea', {
+    class: 'model-note',
+    rows: 2,
+    placeholder: 'What do you make of it? e.g. "Current best coding."',
+    value: m.note || '',
+  });
+  noteBox.addEventListener('change', () => {
+    saveModelNote(m.id, noteBox.value).catch(showError);
+  });
+
+  const taskSelect = el('select', { class: 'champion-select' }, [
+    el('option', { value: '', text: 'Name it best at…' }),
+    ...tasks.map((t) => el('option', { value: t.task, text: t.label })),
+  ]);
+  taskSelect.addEventListener('change', (e) => {
+    if (!e.target.value) return;
+    setChampion(e.target.value, m.id).catch(showError);
+  });
+
+  return el('div', { class: `model-card ${titles.length ? 'is-champion' : ''}` }, [
+    el('div', { class: 'model-head' }, [
+      el('span', { class: 'model-id', text: m.id }),
+      ...titleChips,
+    ]),
+    el('div', { class: 'model-facts', text: facts }),
+    el('div', { class: 'model-hosts' }, hostChips),
+    noteBox,
+    el('div', { class: 'model-actions' }, [
+      taskSelect,
+      ...titles.map((t) => el('button', {
+        class: 'link-btn', type: 'button',
+        text: `Drop "${taskLabel.get(t) || t}"`,
+        onclick: () => setChampion(t, '').catch(showError),
+      })),
+    ]),
+  ]);
+}
+
+async function saveModelNote(modelID, note) {
+  await api('/api/v1/models/note', {
+    method: 'POST',
+    body: JSON.stringify({ model_id: modelID, note }),
+  });
+  toast(note.trim() ? 'Note saved.' : 'Note cleared.');
+}
+
+// Naming a champion moves the title: whichever model held it for this task
+// loses it in the same write, so the UI reloads rather than guessing.
+async function setChampion(task, modelID) {
+  await api('/api/v1/models/champions', {
+    method: 'POST',
+    body: JSON.stringify({ task, model_id: modelID }),
+  });
+  await renderAdmin();
 }
 
 // Shared memory: the master switch, and the two ways to throw things away.

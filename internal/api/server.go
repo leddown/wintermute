@@ -143,6 +143,11 @@ func (s *Server) Handler() http.Handler {
 	authed("POST /api/v1/models/plan", s.handlePlan)
 	authed("POST /api/v1/models/fit", s.handleFit)
 	authed("GET /api/v1/tasks", s.handleTasks)
+	// What the operator thinks of a model, as opposed to what it reports about
+	// itself — see models.go.
+	authed("POST /api/v1/models/note", s.handleSetModelNote)
+	authed("GET /api/v1/models/champions", s.handleChampions)
+	authed("POST /api/v1/models/champions", s.handleSetChampion)
 
 	// Model Context Protocol. Same bearer token as everything else, so an MCP
 	// client is registered with `wintermuted -add-client` like any other.

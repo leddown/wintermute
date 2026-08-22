@@ -31,7 +31,7 @@ func Register(reg *tool.Registry, cat *Catalog) error {
 		{
 			def: tool.Definition{
 				Name:        "list_models",
-				Description: "List the models currently available across all configured backends, with their size, quantization, capabilities, whether they are loaded, and an estimate of whether each fits in free VRAM.",
+				Description: "List the models currently available across all configured backends, with their size, quantization, capabilities, whether they are loaded, and an estimate of whether each fits in free VRAM. Each model may also carry the operator's own note about it and the tasks they have named it best at (champion_of) — prefer those judgements over your own impression of a model, since they come from actually using it on this hardware.",
 				Risk:        tool.RiskRead,
 			},
 			handler: listModels(cat),
