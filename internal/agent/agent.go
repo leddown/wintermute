@@ -139,7 +139,13 @@ const repeatedToolFailureLimit = 3
 // clientTools are the tools the calling client declared it can execute. A
 // browser passes none, and the model simply won't see filesystem tools.
 func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []tool.Definition, incoming ...llm.Message) (*Turn, error) {
-	if err := a.store.AppendMessages(ctx, sess.ID, incoming...); err != nil {
+	// Stamp the incoming messages with the model that is about to see them.
+	// The session's pin can be empty, meaning "the server default", which is
+	// not a name anyone reading the transcript in a year could resolve — so it
+	// is resolved to a concrete backend and model here, at the moment it is
+	// true, rather than left for a later reader to guess at.
+	inBackend, inModel := a.resolve(sess)
+	if err := a.store.AppendMessages(ctx, sess.ID, stamp(incoming, inBackend, inModel, 0)...); err != nil {
 		return nil, err
 	}
 
@@ -188,6 +194,12 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		turn.Usage.CompletionTokens += resp.Usage.CompletionTokens
 		turn.Usage.TotalTokens += resp.Usage.TotalTokens
 
+		// The assistant message records what actually served it, which is not
+		// always what was asked for: a failed local backend is retried against
+		// the fallback, and the transcript should say so.
+		resp.Message.Backend = res.Backend
+		resp.Message.Model = res.Model
+		resp.Message.TokenCount = resp.Usage.CompletionTokens
 		if err := a.store.AppendMessages(ctx, sess.ID, resp.Message); err != nil {
 			return nil, err
 		}
@@ -204,14 +216,16 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		// the error back rather than failing the turn — it usually recovers.
 		for _, call := range unknown {
 			res := tool.Errorf(call.ID, "unknown tool %q; use one of the tools provided", call.Name)
-			if err := a.store.AppendMessages(ctx, sess.ID, llm.ToolMessage(res)); err != nil {
+			if err := a.store.AppendMessages(ctx, sess.ID,
+				stamp([]llm.Message{llm.ToolMessage(res)}, turn.Backend, turn.Model, 0)...); err != nil {
 				return nil, err
 			}
 		}
 
 		for _, call := range serverCalls {
 			res := a.runServerTool(ctx, registry, sess, call, call.ID)
-			if err := a.store.AppendMessages(ctx, sess.ID, llm.ToolMessage(res)); err != nil {
+			if err := a.store.AppendMessages(ctx, sess.ID,
+				stamp([]llm.Message{llm.ToolMessage(res)}, turn.Backend, turn.Model, 0)...); err != nil {
 				return nil, err
 			}
 			// A result is still written for a repeated failure before the turn
@@ -342,6 +356,36 @@ func partition(registry *tool.Registry, calls []tool.Call) (server, client, unkn
 		}
 	}
 	return server, client, unknown
+}
+
+// resolve turns a session's backend/model pin into concrete names, filling in
+// the router's default where the session names none.
+func (a *Agent) resolve(sess *store.Session) (backend, model string) {
+	backend, model = sess.Backend, sess.Model
+	b, ok := a.router.Backend(backend)
+	if !ok {
+		return backend, model
+	}
+	if backend == "" {
+		backend = b.Name
+	}
+	if model == "" {
+		model = b.Model
+	}
+	return backend, model
+}
+
+// stamp records which model a batch of messages passed through. It is the one
+// piece of provenance the transcript cannot reconstruct later: a session can be
+// repointed at another backend at any time, so "which model wrote this line"
+// has to be answered when the line is written.
+func stamp(msgs []llm.Message, backend, model string, tokens int) []llm.Message {
+	out := make([]llm.Message, len(msgs))
+	for i, m := range msgs {
+		m.Backend, m.Model, m.TokenCount = backend, model, tokens
+		out[i] = m
+	}
+	return out
 }
 
 // Title derives a short session title from the first user message.

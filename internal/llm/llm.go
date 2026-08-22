@@ -42,6 +42,27 @@ type Message struct {
 	// dropped the thinking that produced the call — so these have to survive
 	// the round trip through the transcript, unedited.
 	Thinking []json.RawMessage `json:"thinking,omitempty"`
+
+	// Backend and Model record which model this message passed through: the
+	// one that produced an assistant message, or the one serving the session
+	// when a user message arrived.
+	//
+	// This is provenance for the memory layer rather than anything a provider
+	// reads — every provider builds its own wire format from the fields above
+	// and ignores these. A transcript meant to outlive the models that wrote
+	// it has to say, per message, which model that was; the session's current
+	// pin cannot answer it, because a session can be repointed at another
+	// backend without losing its transcript.
+	Backend string `json:"backend,omitempty"`
+	Model   string `json:"model,omitempty"`
+
+	// TokenCount is the provider's own count for this message where it
+	// reported one, and 0 where it did not — "not reported" rather than
+	// "empty". Only assistant messages come back with usage attached, so user
+	// and tool rows carry 0 and are estimated when a retrieval budget is
+	// computed. Writing an estimate here would leave a guess indistinguishable
+	// from a measurement once the conversation is a year old.
+	TokenCount int `json:"token_count,omitempty"`
 }
 
 // UserMessage builds a user-authored message.

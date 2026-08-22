@@ -450,3 +450,163 @@ func TestMuninnRenamePreservesAuditTrail(t *testing.T) {
 		t.Errorf("audit rows after a new write = %d, want 2", len(entriesOut))
 	}
 }
+
+// Provenance has to survive the round trip, or the archive cannot say which
+// model wrote which line — the one thing it can never reconstruct later.
+func TestMessageProvenanceRoundTrip(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess := newTestSession(t, st)
+
+	want := []llm.Message{
+		{Role: llm.RoleUser, Content: "which model am I talking to?",
+			Backend: "local", Model: "qwen3:8b"},
+		{Role: llm.RoleAssistant, Content: "a local one",
+			Backend: "local", Model: "qwen3:8b", TokenCount: 42},
+		// The same conversation continued against a different model, which is
+		// exactly what SetSessionModel exists to allow.
+		{Role: llm.RoleAssistant, Content: "and now a cloud one",
+			Backend: "claude", Model: "claude-opus-5", TokenCount: 17},
+	}
+	if err := st.AppendMessages(ctx, sess.ID, want...); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.Messages(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("read %d messages, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Backend != want[i].Backend || got[i].Model != want[i].Model ||
+			got[i].TokenCount != want[i].TokenCount {
+			t.Errorf("message %d provenance = %q/%q/%d, want %q/%q/%d", i,
+				got[i].Backend, got[i].Model, got[i].TokenCount,
+				want[i].Backend, want[i].Model, want[i].TokenCount)
+		}
+	}
+}
+
+// A new conversation is on the record and recalling. Ephemeral is never a
+// state a session arrives in.
+func TestNewSessionIsOnTheRecord(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess := newTestSession(t, st)
+
+	if !sess.Record || !sess.Recall {
+		t.Errorf("new session record/recall = %v/%v, want true/true", sess.Record, sess.Recall)
+	}
+	// And as persisted, not just as returned.
+	reread, err := st.Session(ctx, sess.ID, sess.ClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reread.Record || !reread.Recall {
+		t.Errorf("stored record/recall = %v/%v, want true/true", reread.Record, reread.Recall)
+	}
+}
+
+// The switches are independent: drawing on history while leaving no trace is a
+// combination the operator is entitled to ask for.
+func TestMemorySwitchesAreIndependent(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess := newTestSession(t, st)
+
+	if err := st.SetSessionMemory(ctx, sess.ID, sess.ClientID, false, true); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Session(ctx, sess.ID, sess.ClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Record || !got.Recall {
+		t.Errorf("record/recall = %v/%v, want false/true", got.Record, got.Recall)
+	}
+}
+
+// Flipping a conversation off the record mid-stream has to take the turns
+// already written with it. A partial transcript of a conversation the operator
+// has just declared private is the failure this switch exists to prevent.
+func TestFlipToEphemeralPurgesWhatWasWritten(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess := newTestSession(t, st)
+
+	if err := st.AppendMessages(ctx, sess.ID,
+		llm.UserMessage("my NHS number is 943 476 5919"),
+		llm.Message{Role: llm.RoleAssistant, Content: "noted"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if n := countMessages(t, st, sess.ID); n != 2 {
+		t.Fatalf("setup wrote %d messages, want 2", n)
+	}
+
+	if err := st.SetSessionMemory(ctx, sess.ID, sess.ClientID, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := countMessages(t, st, sess.ID); n != 0 {
+		t.Errorf("after going off the record %d messages remain, want 0", n)
+	}
+
+	// Flipping back must not resurrect them: turns exchanged off the record
+	// stay unrecorded rather than being retroactively committed.
+	if err := st.SetSessionMemory(ctx, sess.ID, sess.ClientID, true, true); err != nil {
+		t.Fatal(err)
+	}
+	if n := countMessages(t, st, sess.ID); n != 0 {
+		t.Errorf("flipping back restored %d messages, want 0", n)
+	}
+}
+
+// The switches are session state, so they answer to the same client scoping as
+// everything else: one client must not be able to flip another's conversation.
+func TestSetSessionMemoryIsScopedToOwner(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	sess := newTestSession(t, st)
+
+	other, _, err := st.CreateClient(ctx, "intruder", "desktop")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionMemory(ctx, sess.ID, other.ID, false, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-client flip = %v, want ErrNotFound", err)
+	}
+	got, err := st.Session(ctx, sess.ID, sess.ClientID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Record {
+		t.Error("another client's flip took effect")
+	}
+}
+
+func countMessages(t *testing.T, st *Store, sessionID string) int {
+	t.Helper()
+	var n int
+	if err := st.DB().QueryRow(`SELECT count(*) FROM messages WHERE session_id = ?`, sessionID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// newTestSession makes a client and one session it owns, which is the setup
+// every memory test needs before it can say anything interesting.
+func newTestSession(t *testing.T, st *Store) *Session {
+	t.Helper()
+	ctx := context.Background()
+	client, _, err := st.CreateClient(ctx, "owner-"+t.Name(), KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(ctx, client.ID, "test", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sess
+}

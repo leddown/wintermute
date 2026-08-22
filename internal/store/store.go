@@ -34,7 +34,17 @@ type Store struct {
 func Open(path string) (*Store, error) {
 	// WAL keeps the browser UI's reads from blocking the harness's writes;
 	// busy_timeout avoids spurious SQLITE_BUSY under concurrent turns.
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	//
+	// secure_delete makes a DELETE overwrite the row's content with zeros
+	// instead of only unlinking it. It is off by default in SQLite, which
+	// means deleted records survive in freeblocks and are routinely recovered
+	// forensically — so without it, "delete this conversation" would leave the
+	// text sitting in the file, and an off-the-record conversation whose
+	// already-written turns are deleted would not actually be off the record.
+	// It costs a little write throughput, which is not the scarce resource on
+	// a single-operator server.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
+		"&_pragma=foreign_keys(ON)&_pragma=secure_delete(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)

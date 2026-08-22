@@ -29,19 +29,32 @@ type Session struct {
 	// decides the documents and external sources it may reach. Empty is the
 	// unscoped assistant — what every session was before agents existed, and
 	// what a session keeps working as if its agent is later deleted.
-	AgentID   string    `json:"agent_id,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
+	// Record and Recall are the two memory switches, kept independent on
+	// purpose. Record decides whether this conversation is written to the
+	// store at all; Recall decides whether prior context is retrieved into it.
+	// Drawing on the full history while leaving no trace of the present
+	// conversation is a valid combination, and so is the reverse.
+	//
+	// Neither is omitempty. Whether a conversation is being recorded is
+	// exactly the kind of state that is bad to be wrong about in either
+	// direction, so the field is always on the wire rather than absent when
+	// false and inferred by whatever is reading it.
+	Record bool `json:"record"`
+	Recall bool `json:"recall"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // sessionColumns is the shared SELECT list, so the scan order below cannot
 // drift from the query.
-const sessionColumns = `id, client_id, title, backend, model, agent_id, created_at, updated_at`
+const sessionColumns = `id, client_id, title, backend, model, agent_id, record, recall, created_at, updated_at`
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	err := row.Scan(&sess.ID, &sess.ClientID, &sess.Title, &sess.Backend, &sess.Model,
-		&sess.AgentID, &sess.CreatedAt, &sess.UpdatedAt)
+		&sess.AgentID, &sess.Record, &sess.Recall, &sess.CreatedAt, &sess.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -63,9 +76,12 @@ func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backen
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
+	// A new conversation is on the record and recalling. Ephemeral is always
+	// something the operator turns on, never a state a session arrives in.
 	return &Session{
 		ID: id, ClientID: clientID, Title: title,
-		Backend: backend, Model: model, AgentID: agentID, CreatedAt: now, UpdatedAt: now,
+		Backend: backend, Model: model, AgentID: agentID,
+		Record: true, Recall: true, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 
@@ -104,6 +120,51 @@ func (s *Store) DeleteSession(ctx context.Context, id string, clientID int64) er
 		return ErrNotFound
 	}
 	return nil
+}
+
+// SetSessionMemory flips a conversation's two memory switches.
+//
+// Turning `record` off mid-conversation deletes the turns already written for
+// it, in the same transaction as the flag change. That is the whole point of
+// the switch: a conversation the operator has just declared off the record
+// must not keep a partial transcript of everything said before they reached
+// for the toggle. Vectors derived from those messages go with them by
+// ON DELETE CASCADE, and secure_delete (see Open) means the text is
+// overwritten rather than merely unlinked.
+//
+// Turning it back on does not retroactively commit anything. Turns exchanged
+// while off the record stay unrecorded — they were never written, so there is
+// nothing to restore, and reconstructing them from the live session would
+// record words the operator said in confidence.
+//
+// Scoped to the owning client, like every other session lookup here.
+func (s *Store) SetSessionMemory(ctx context.Context, id string, clientID int64, record, recall bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin set memory: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE sessions SET record = ?, recall = ?, updated_at = ? WHERE id = ? AND client_id = ?`,
+		record, recall, time.Now().UTC(), id, clientID)
+	if err != nil {
+		return fmt.Errorf("set session memory: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set session memory: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+
+	if !record {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM messages WHERE session_id = ?`, id); err != nil {
+			return fmt.Errorf("purge transcript: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // Session fetches a session scoped to its owning client. Callers pass the
@@ -196,9 +257,11 @@ func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...ll
 			thinking = string(buf)
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, is_error, thinking, created_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			sessionID, seq, string(m.Role), m.Content, calls, m.ToolCallID, m.IsError, thinking, now)
+			`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, is_error,
+			                       thinking, backend, model, token_count, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sessionID, seq, string(m.Role), m.Content, calls, m.ToolCallID, m.IsError, thinking,
+			m.Backend, m.Model, m.TokenCount, now)
 		if err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -290,8 +353,8 @@ func (s *Store) TurnProgress(ctx context.Context, sessionID string) (TurnProgres
 
 func (s *Store) Messages(ctx context.Context, sessionID string) ([]llm.Message, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT role, content, tool_calls, tool_call_id, is_error, thinking FROM messages
-		 WHERE session_id = ? ORDER BY seq`, sessionID)
+		`SELECT role, content, tool_calls, tool_call_id, is_error, thinking, backend, model, token_count
+		 FROM messages WHERE session_id = ? ORDER BY seq`, sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("list messages: %w", err)
 	}
@@ -301,7 +364,8 @@ func (s *Store) Messages(ctx context.Context, sessionID string) ([]llm.Message, 
 	for rows.Next() {
 		var m llm.Message
 		var role, calls, thinking string
-		if err := rows.Scan(&role, &m.Content, &calls, &m.ToolCallID, &m.IsError, &thinking); err != nil {
+		if err := rows.Scan(&role, &m.Content, &calls, &m.ToolCallID, &m.IsError, &thinking,
+			&m.Backend, &m.Model, &m.TokenCount); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		m.Role = llm.Role(role)
