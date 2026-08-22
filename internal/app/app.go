@@ -26,6 +26,7 @@ import (
 	"wintermute/internal/llm"
 	"wintermute/internal/lookup"
 	"wintermute/internal/models"
+	"wintermute/internal/recall"
 	"wintermute/internal/store"
 	"wintermute/internal/todo"
 	"wintermute/internal/tool"
@@ -51,6 +52,9 @@ type App struct {
 	// service the API exposes, so a scheduled backup and one triggered from
 	// the UI are the same operation with the same verification.
 	utilities *utilities.Service
+	// indexer is held so Run can start the retrieval indexer. Nil when no
+	// embedder is configured.
+	indexer *recall.Indexer
 }
 
 // buildRouter turns the configured backends into live providers.
@@ -289,6 +293,40 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 
 	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations).
 		WithScope(&agentScope{knowledge: knowledgeService, grc: grcClient, web: webClient})
+
+	// Memory. Configured only when an embedder is, so a deployment without one
+	// runs exactly as it did before this existed.
+	var indexer *recall.Indexer
+	if cfg.EmbedURL != "" {
+		embedder := llm.NewOpenAIEmbedder(cfg.EmbedURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.LLMTimeout)
+		recallStore := recall.NewStore(st.DB())
+
+		// Refuse to start on a mismatch rather than retrieving against vectors
+		// from another model's space. Distances between two models' embeddings
+		// are arithmetically valid and semantically meaningless, so nothing
+		// would error — retrieval would just quietly start returning nonsense,
+		// and it can be months before anyone notices.
+		checkCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		err := recallStore.CheckPin(checkCtx, embedder)
+		cancel()
+		if err != nil {
+			st.Close()
+			return nil, err
+		}
+
+		indexer = recall.NewIndexer(st.DB(), recallStore, embedder, log)
+		searcher := recall.NewSearcher(st.DB(), recallStore, embedder)
+		ag = ag.WithIndexer(indexer).WithRecall(&memoryLayer{
+			searcher:    searcher,
+			store:       st,
+			log:         log,
+			topK:        cfg.RecallTopK,
+			recentTurns: cfg.RecallRecentTurns,
+			fraction:    cfg.RecallContextFraction,
+			budget:      cfg.RecallTokenBudget,
+		})
+		log.Info("memory enabled", "embedder", cfg.EmbedModel, "top_k", cfg.RecallTopK)
+	}
 	// A snapshot of what the server is actually running with, for the admin
 	// screen. Assembled here because this is the only package that sees the
 	// whole configuration, and deliberately carrying no secret values.
@@ -333,6 +371,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		fintech:   fintechService,
 		twire:     twireService,
 		utilities: utilitiesService,
+		indexer:   indexer,
 		http: &http.Server{
 			Addr:    cfg.Addr,
 			Handler: srv.Handler(),
@@ -527,6 +566,13 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	if a.fintech != nil && a.cfg.FintechReviewInterval > 0 {
 		go fintech.NewReviewScheduler(a.fintech, a.cfg.FintechReviewInterval).Run(ctx)
+	}
+
+	// The retrieval indexer works behind the write path: a message is committed
+	// first and embedded afterwards, so a slow or absent embedder can never
+	// delay or fail a conversation.
+	if a.indexer != nil {
+		go a.indexer.Run(ctx, a.cfg.RecallIndexInterval)
 	}
 
 	// Verified snapshots on a timer, when a destination and interval are

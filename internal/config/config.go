@@ -168,6 +168,42 @@ type Config struct {
 	// the operator's backups. The newest is never removed regardless.
 	BackupKeep int
 
+	// Memory. The embedding model is configured separately from the chat
+	// models and is not one of them: the chat model changes constantly and
+	// costs nothing to change, while the embedder defines the space every
+	// stored vector lives in, so changing it invalidates the whole index and
+	// is a deliberate migration. See internal/recall.
+	//
+	// EmbedURL is an OpenAI-compatible API root, e.g. an Ollama instance at
+	// http://127.0.0.1:11434/v1. Empty disables memory entirely, and the
+	// server runs exactly as it did before memory existed.
+	EmbedURL string
+	// EmbedModel is pinned into the index on first write and checked against
+	// it at every startup. Prefer a local, open-weights model: a hosted one
+	// can be deprecated by somebody else's roadmap, and when it is, the
+	// existing index can never be extended in the same space again.
+	EmbedModel string
+	// EmbedAPIKey is optional, for a server started with one.
+	EmbedAPIKey string
+	// RecallTopK is how many prior exchanges survive fusion and reach the
+	// prompt.
+	RecallTopK int
+	// RecallRecentTurns is how many of the newest exchanges are pulled in
+	// regardless of similarity, so recency competes with relevance.
+	RecallRecentTurns int
+	// RecallContextFraction is the share of the answering model's context
+	// window that injected memory may occupy. Deliberately small: long inputs
+	// measurably degrade every current model, and worst when the distractors
+	// resemble the answer, which is exactly what a semantic retriever returns.
+	RecallContextFraction float64
+	// RecallTokenBudget is the budget used when the model's context length is
+	// unknown, rather than guessing a fraction of nothing.
+	RecallTokenBudget int
+	// RecallIndexInterval is how often the indexer sweeps its backlog. It is
+	// also nudged directly whenever a message is written, so this is the
+	// catch-up pass rather than the main path.
+	RecallIndexInterval time.Duration
+
 	// BackendProbeInterval is how often every backend is re-probed for health.
 	// Probing costs one cheap inventory request per backend, and without it a
 	// backend's recorded status is frozen at the last manual refresh — a host
@@ -213,6 +249,26 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	backupKeep, err := envInt("WINTERMUTE_BACKUP_KEEP", 0)
+	if err != nil {
+		return nil, err
+	}
+	recallTopK, err := envInt("WINTERMUTE_RECALL_TOP_K", 6)
+	if err != nil {
+		return nil, err
+	}
+	recallRecent, err := envInt("WINTERMUTE_RECALL_RECENT_TURNS", 4)
+	if err != nil {
+		return nil, err
+	}
+	recallBudget, err := envInt("WINTERMUTE_RECALL_TOKEN_BUDGET", 1500)
+	if err != nil {
+		return nil, err
+	}
+	recallFraction, err := envFloat("WINTERMUTE_RECALL_CONTEXT_FRACTION", 0.12)
+	if err != nil {
+		return nil, err
+	}
+	recallInterval, err := envDuration("WINTERMUTE_RECALL_INDEX_INTERVAL", 30*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -276,6 +332,15 @@ func Load() (*Config, error) {
 		BackupDir:      strings.TrimSpace(os.Getenv("WINTERMUTE_BACKUP_DIR")),
 		BackupInterval: backupInterval,
 		BackupKeep:     backupKeep,
+
+		EmbedURL:              strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_URL")),
+		EmbedModel:            strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_MODEL")),
+		EmbedAPIKey:           strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_API_KEY")),
+		RecallTopK:            recallTopK,
+		RecallRecentTurns:     recallRecent,
+		RecallContextFraction: recallFraction,
+		RecallTokenBudget:     recallBudget,
+		RecallIndexInterval:   recallInterval,
 	}
 
 	if cfg.DefaultBackend == "" {
@@ -295,6 +360,17 @@ func Load() (*Config, error) {
 	}
 	if cfg.BackupInterval > 0 && cfg.BackupDir == "" {
 		return nil, errors.New("WINTERMUTE_BACKUP_INTERVAL is set but WINTERMUTE_BACKUP_DIR is not")
+	}
+	// Half a memory configuration is worse than none: an embedder URL with no
+	// model name would pin the index to an empty name.
+	if (cfg.EmbedURL == "") != (cfg.EmbedModel == "") {
+		return nil, errors.New(
+			"WINTERMUTE_EMBED_URL and WINTERMUTE_EMBED_MODEL must be set together, or neither")
+	}
+	if cfg.RecallContextFraction <= 0 || cfg.RecallContextFraction > 0.5 {
+		return nil, errors.New(
+			"WINTERMUTE_RECALL_CONTEXT_FRACTION must be between 0 and 0.5; " +
+				"injected memory that fills the context window makes the model worse, not better")
 	}
 	return cfg, nil
 }
@@ -333,6 +409,18 @@ func envInt(key string, fallback int) (int, error) {
 		return 0, fmt.Errorf("%s: %w", key, err)
 	}
 	return n, nil
+}
+
+func envFloat(key string, fallback float64) (float64, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return f, nil
 }
 
 func envDuration(key string, fallback time.Duration) (time.Duration, error) {

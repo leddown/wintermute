@@ -159,7 +159,7 @@ func TestDeleteSessionIsScopedAndCascades(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.AppendMessages(ctx, sess.ID, llm.UserMessage("hello")); err != nil {
+	if _, err := st.AppendMessages(ctx, sess.ID, llm.UserMessage("hello")); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.RecordTool(ctx, AuditEntry{
@@ -225,7 +225,7 @@ func TestTranscriptRoundTrip(t *testing.T) {
 		},
 		llm.ToolMessage(tool.Result{CallID: "call_1", Content: "no matches", IsError: true}),
 	}
-	if err := st.AppendMessages(ctx, sess.ID, want...); err != nil {
+	if _, err := st.AppendMessages(ctx, sess.ID, want...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -468,7 +468,7 @@ func TestMessageProvenanceRoundTrip(t *testing.T) {
 		{Role: llm.RoleAssistant, Content: "and now a cloud one",
 			Backend: "claude", Model: "claude-opus-5", TokenCount: 17},
 	}
-	if err := st.AppendMessages(ctx, sess.ID, want...); err != nil {
+	if _, err := st.AppendMessages(ctx, sess.ID, want...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -536,7 +536,7 @@ func TestFlipToEphemeralPurgesWhatWasWritten(t *testing.T) {
 	ctx := context.Background()
 	sess := newTestSession(t, st)
 
-	if err := st.AppendMessages(ctx, sess.ID,
+	if _, err := st.AppendMessages(ctx, sess.ID,
 		llm.UserMessage("my NHS number is 943 476 5919"),
 		llm.Message{Role: llm.RoleAssistant, Content: "noted"},
 	); err != nil {

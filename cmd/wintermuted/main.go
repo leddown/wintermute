@@ -19,6 +19,8 @@ import (
 
 	"wintermute/internal/app"
 	"wintermute/internal/config"
+	"wintermute/internal/llm"
+	"wintermute/internal/recall"
 	"wintermute/internal/store"
 	"wintermute/internal/utilities"
 )
@@ -48,6 +50,10 @@ func run() error {
 			"export the conversation history as portable JSON Lines into this absolute directory and exit")
 		importMemory = flag.String("import-memory", "",
 			"merge a memory export directory into this database and exit")
+		backfill = flag.Bool("backfill-memory", false,
+			"index any conversation history that is not in the retrieval index yet, and exit")
+		reindex = flag.Bool("reindex-memory", false,
+			"erase the retrieval index and rebuild it with the configured embedder, and exit")
 	)
 	flag.Parse()
 
@@ -71,6 +77,16 @@ func run() error {
 		return archive(*backupTo, *exportMemory, *importMemory)
 	}
 
+	// Index maintenance needs the embedder from the configuration, so unlike
+	// the archive commands it loads config first.
+	if *backfill || *reindex {
+		cfg, err := config.Load()
+		if err != nil {
+			return err
+		}
+		return maintainIndex(context.Background(), cfg, log, *reindex)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -86,6 +102,74 @@ func run() error {
 	defer stop()
 
 	return application.Run(ctx)
+}
+
+// maintainIndex runs the backfill or a deliberate reindex.
+//
+// Backfill is additive and safe to run at any time: it queues whatever is not
+// indexed yet — history from before memory existed, or messages written while
+// the embedder was unreachable — and embeds it.
+//
+// Reindex is the deliberate migration for changing the embedding model. It
+// erases the index first, because vectors from the old model cannot be
+// compared with vectors from the new one and a half-migrated index is worse
+// than either. It never touches `messages`: the index is derived, and
+// rebuilding it must not be able to cost the operator the thing it is derived
+// from.
+func maintainIndex(ctx context.Context, cfg *config.Config, log *slog.Logger, reindex bool) error {
+	if cfg.EmbedURL == "" {
+		return errors.New("no embedder configured: set WINTERMUTE_EMBED_URL and WINTERMUTE_EMBED_MODEL")
+	}
+
+	st, err := store.Open(cfg.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+
+	embedder := llm.NewOpenAIEmbedder(cfg.EmbedURL, cfg.EmbedAPIKey, cfg.EmbedModel, cfg.LLMTimeout)
+	rs := recall.NewStore(st.DB())
+
+	if reindex {
+		pin, err := rs.Pin(ctx)
+		if err != nil {
+			return err
+		}
+		if pin != nil && pin.Model != cfg.EmbedModel {
+			fmt.Printf("rebuilding index: %s (%d dimensions) -> %s\n",
+				pin.Model, pin.Dimension, cfg.EmbedModel)
+		}
+		if err := rs.ClearIndex(ctx); err != nil {
+			return err
+		}
+		fmt.Println("existing index erased (messages untouched)")
+	} else if err := rs.CheckPin(ctx, embedder); err != nil {
+		// Backfilling with the wrong embedder would mix two vector spaces in
+		// one index, which is the exact failure the pin exists to prevent.
+		return err
+	}
+
+	ix := recall.NewIndexer(st.DB(), rs, embedder, log)
+	queued, err := ix.QueueEverything(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("queued %d messages for indexing\n", queued)
+
+	indexed, err := ix.DrainFully(ctx)
+	if err != nil {
+		return fmt.Errorf("indexed %d before failing: %w", indexed, err)
+	}
+	remaining, err := ix.Backlog(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("indexed %d messages", indexed)
+	if remaining > 0 {
+		fmt.Printf("; %d still queued (run again once the embedder is reachable)", remaining)
+	}
+	fmt.Println()
+	return nil
 }
 
 // archive handles the snapshot and portability subcommands. Like manage, it

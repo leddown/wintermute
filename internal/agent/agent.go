@@ -73,6 +73,36 @@ type Agent struct {
 	// ephemeral holds the transcripts of conversations that are not being
 	// written down. See transcript.go.
 	ephemeral *Ephemeral
+	// indexer, when set, is told about messages that were durably written so
+	// they can be embedded for retrieval. Optional: without an embedder
+	// configured the loop behaves exactly as it did before memory existed.
+	indexer Indexer
+	// recaller, when set, supplies prior context for a new turn.
+	recaller Recaller
+}
+
+// Recaller retrieves prior context for a turn and renders it as a block to put
+// in front of the user's message.
+//
+// It returns a string rather than an error on purpose. Retrieval is an
+// enhancement to a conversation that works without it, so a failed or empty
+// recall must be indistinguishable from having found nothing: the turn
+// proceeds on its own transcript. An interface here keeps the loop from
+// importing the recall package.
+type Recaller interface {
+	Recall(ctx context.Context, sess *store.Session, query string) string
+	// Framing is the static instruction describing how to read a prior-context
+	// block. It lives with the code that renders the block rather than being
+	// duplicated here, and it is added to the system prompt only on turns that
+	// actually carry one — it never varies, so it does not disturb the cached
+	// prefix on the turns that do.
+	Framing() string
+}
+
+// WithRecall attaches the memory layer.
+func (a *Agent) WithRecall(r Recaller) *Agent {
+	a.recaller = r
+	return a
 }
 
 // Scoper narrows a turn to the profile the session belongs to: which knowledge
@@ -168,6 +198,27 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		system += "\n\n" + extraPrompt
 	}
 
+	// Prior context, retrieved once for this turn rather than once per
+	// iteration: the question does not change while the model works through
+	// its tool calls, and re-running retrieval each time would pay for the
+	// same answer repeatedly.
+	//
+	// It is deliberately not appended to the system prompt. The system prompt
+	// is the cached prefix of every request — Anthropic's cache hierarchy and
+	// a local backend's KV cache both key on it — and retrieved memory changes
+	// every turn, so putting it there would invalidate the whole prefix each
+	// time and make local models reprocess the entire transcript. See
+	// recall.Render.
+	var priorContext string
+	if a.recaller != nil && sess.Recall {
+		if query := lastUserText(incoming); query != "" {
+			priorContext = a.recaller.Recall(ctx, sess, query)
+		}
+	}
+	if priorContext != "" {
+		system += "\n\n" + a.recaller.Framing()
+	}
+
 	turn := &Turn{SessionID: sess.ID}
 	// The last tool failure, and how many times running it has repeated
 	// unchanged. Both are reported if the turn ends badly: "budget exhausted"
@@ -180,6 +231,14 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		if err != nil {
 			return nil, err
 		}
+		// The block goes in front of the user's own words, inside their
+		// message, rather than as a message of its own: providers differ on
+		// whether two consecutive user messages are acceptable, and this needs
+		// no structural change to the conversation at all. It is applied to
+		// the copy being sent, never written to the transcript — it is derived
+		// from the store and re-deriving it is free, while storing it would
+		// both duplicate the content and feed it back into future retrieval.
+		history = withPriorContext(history, priorContext)
 
 		res, err := a.router.Complete(ctx, sess.Backend, llm.Request{
 			System:   system,
@@ -370,6 +429,41 @@ func partition(registry *tool.Registry, calls []tool.Call) (server, client, unkn
 		}
 	}
 	return server, client, unknown
+}
+
+// lastUserText finds the newest user message in a batch, which is the query a
+// turn is retrieved against. Tool results arriving from a client carry no
+// question, so a resumed turn retrieves nothing new — the context fetched when
+// the user actually spoke is still in front of them.
+func lastUserText(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleUser && strings.TrimSpace(msgs[i].Content) != "" {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+// withPriorContext returns a copy of the history with the retrieved block
+// placed immediately before the most recent user message's text.
+//
+// A copy: the caller's slice is the transcript as stored, and mutating it
+// would persist the block on the next append and feed the model's own injected
+// context back into the index.
+func withPriorContext(history []llm.Message, block string) []llm.Message {
+	if block == "" {
+		return history
+	}
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role != llm.RoleUser {
+			continue
+		}
+		out := make([]llm.Message, len(history))
+		copy(out, history)
+		out[i].Content = block + "\n\n" + out[i].Content
+		return out
+	}
+	return history
 }
 
 // resolve turns a session's backend/model pin into concrete names, filling in

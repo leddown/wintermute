@@ -32,11 +32,42 @@ type Transcript interface {
 	Messages(ctx context.Context, sessionID string) ([]llm.Message, error)
 }
 
+// Indexer is told which messages have been durably written, so they can be
+// embedded for retrieval afterwards.
+//
+// It is an interface so the loop does not import the recall package, and it is
+// optional: a deployment with no embedder configured runs the loop exactly as
+// it did before memory existed.
+//
+// Enqueue returns nothing. Indexing is downstream of the conversation and must
+// never be able to fail it — the message is already committed, and an
+// embedding that did not happen can be recomputed from it later by the
+// backfill command.
+type Indexer interface {
+	Enqueue(ctx context.Context, messageIDs []int64)
+}
+
+// WithIndexer attaches the retrieval indexer.
+func (a *Agent) WithIndexer(ix Indexer) *Agent {
+	a.indexer = ix
+	return a
+}
+
 // storeTranscript is the ordinary path: straight through to SQLite.
-type storeTranscript struct{ store *store.Store }
+type storeTranscript struct {
+	store   *store.Store
+	indexer Indexer
+}
 
 func (t storeTranscript) Append(ctx context.Context, sessionID string, msgs ...llm.Message) error {
-	return t.store.AppendMessages(ctx, sessionID, msgs...)
+	ids, err := t.store.AppendMessages(ctx, sessionID, msgs...)
+	if err != nil {
+		return err
+	}
+	if t.indexer != nil {
+		t.indexer.Enqueue(ctx, ids)
+	}
+	return nil
 }
 
 func (t storeTranscript) Messages(ctx context.Context, sessionID string) ([]llm.Message, error) {
@@ -195,16 +226,17 @@ func (e *Ephemeral) evictLocked() {
 // everything said while off it, which is worse than either state.
 func (a *Agent) transcriptFor(sess *store.Session) Transcript {
 	if a.ephemeral == nil {
-		return storeTranscript{store: a.store}
+		return storeTranscript{store: a.store, indexer: a.indexer}
 	}
 	if !sess.Record || a.ephemeral.Has(sess.ID) {
 		return dualTranscript{
 			memory:  a.ephemeral,
 			store:   a.store,
+			indexer: a.indexer,
 			persist: sess.Record,
 		}
 	}
-	return storeTranscript{store: a.store}
+	return storeTranscript{store: a.store, indexer: a.indexer}
 }
 
 // dualTranscript reads from memory and writes to memory, additionally writing
@@ -218,6 +250,7 @@ func (a *Agent) transcriptFor(sess *store.Session) Transcript {
 type dualTranscript struct {
 	memory  *Ephemeral
 	store   *store.Store
+	indexer Indexer
 	persist bool
 }
 
@@ -228,7 +261,14 @@ func (t dualTranscript) Append(ctx context.Context, sessionID string, msgs ...ll
 	if !t.persist {
 		return nil
 	}
-	return t.store.AppendMessages(ctx, sessionID, msgs...)
+	ids, err := t.store.AppendMessages(ctx, sessionID, msgs...)
+	if err != nil {
+		return err
+	}
+	if t.indexer != nil {
+		t.indexer.Enqueue(ctx, ids)
+	}
+	return nil
 }
 
 func (t dualTranscript) Messages(ctx context.Context, sessionID string) ([]llm.Message, error) {

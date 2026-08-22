@@ -221,22 +221,28 @@ func (s *Store) SetTitle(ctx context.Context, id, title string) error {
 
 // AppendMessages adds messages to a transcript in order, within one
 // transaction so a partially written turn can never be replayed to the model.
-func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...llm.Message) error {
+//
+// It returns the row ids of what it wrote, in the order given, which is what
+// the retrieval indexer needs to queue them. They are returned rather than
+// looked up afterwards because the caller has just committed them and a second
+// query could race with anything else writing to the same session.
+func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...llm.Message) ([]int64, error) {
 	if len(msgs) == 0 {
-		return nil
+		return nil, nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin append: %w", err)
+		return nil, fmt.Errorf("begin append: %w", err)
 	}
 	defer tx.Rollback()
 
 	var seq int
 	err = tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = ?`, sessionID).Scan(&seq)
 	if err != nil {
-		return fmt.Errorf("next seq: %w", err)
+		return nil, fmt.Errorf("next seq: %w", err)
 	}
 
+	ids := make([]int64, 0, len(msgs))
 	now := time.Now().UTC()
 	for _, m := range msgs {
 		seq++
@@ -244,7 +250,7 @@ func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...ll
 		if len(m.ToolCalls) > 0 {
 			buf, err := json.Marshal(m.ToolCalls)
 			if err != nil {
-				return fmt.Errorf("encode tool calls: %w", err)
+				return nil, fmt.Errorf("encode tool calls: %w", err)
 			}
 			calls = string(buf)
 		}
@@ -252,25 +258,33 @@ func (s *Store) AppendMessages(ctx context.Context, sessionID string, msgs ...ll
 		if len(m.Thinking) > 0 {
 			buf, err := json.Marshal(m.Thinking)
 			if err != nil {
-				return fmt.Errorf("encode thinking: %w", err)
+				return nil, fmt.Errorf("encode thinking: %w", err)
 			}
 			thinking = string(buf)
 		}
-		_, err = tx.ExecContext(ctx,
+		res, err := tx.ExecContext(ctx,
 			`INSERT INTO messages (session_id, seq, role, content, tool_calls, tool_call_id, is_error,
 			                       thinking, backend, model, token_count, created_at)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			sessionID, seq, string(m.Role), m.Content, calls, m.ToolCallID, m.IsError, thinking,
 			m.Backend, m.Model, m.TokenCount, now)
 		if err != nil {
-			return fmt.Errorf("insert message: %w", err)
+			return nil, fmt.Errorf("insert message: %w", err)
 		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("insert message: %w", err)
+		}
+		ids = append(ids, id)
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at = ? WHERE id = ?`, now, sessionID); err != nil {
-		return fmt.Errorf("touch session: %w", err)
+		return nil, fmt.Errorf("touch session: %w", err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // Messages returns a session's full transcript in order.

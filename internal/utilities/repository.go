@@ -105,6 +105,11 @@ func (r *Repository) TableStats(ctx context.Context) ([]TableStat, error) {
 // tableNames lists the application's tables, excluding SQLite's internal ones
 // (sqlite_sequence, sqlite_stat1, and the rest of the sqlite_ prefix).
 func (r *Repository) tableNames(ctx context.Context) ([]string, error) {
+	virtual, err := r.virtualTables(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT name FROM sqlite_master
 		WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -119,9 +124,48 @@ func (r *Repository) tableNames(ctx context.Context) ([]string, error) {
 		if err := rows.Scan(&name); err != nil {
 			return nil, fmt.Errorf("utilities: scan table name: %w", err)
 		}
+		// A virtual table's storage lives in shadow tables it creates for
+		// itself — recall_fts_data, recall_fts_idx and so on. Listing those
+		// beside the real tables fills the diagnostics with names nobody
+		// recognises, so they are folded into their parent instead, the same
+		// way indexes already are.
+		if shadowOf(name, virtual) != "" {
+			continue
+		}
 		out = append(out, name)
 	}
 	return out, rows.Err()
+}
+
+// virtualTables names the virtual tables in the schema.
+func (r *Repository) virtualTables(ctx context.Context) ([]string, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT name FROM sqlite_master
+		WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'`)
+	if err != nil {
+		return nil, fmt.Errorf("utilities: list virtual tables: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("utilities: scan virtual table name: %w", err)
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
+// shadowOf reports which virtual table a shadow table belongs to, or "" when
+// the name is not a shadow of any of them.
+func shadowOf(name string, virtual []string) string {
+	for _, v := range virtual {
+		if strings.HasPrefix(name, v+"_") {
+			return v
+		}
+	}
+	return ""
 }
 
 // tableSizes reads per-table byte totals from dbstat, which accounts for the
@@ -151,6 +195,20 @@ func (r *Repository) tableSizes(ctx context.Context) (map[string]int64, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("utilities: read table sizes: %w", err)
 	}
+
+	// Fold each virtual table's shadow storage onto the virtual table itself,
+	// which otherwise reports zero bytes while its shadows report all of them.
+	virtual, err := r.virtualTables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for name, size := range out {
+		if parent := shadowOf(name, virtual); parent != "" {
+			out[parent] += size
+			delete(out, name)
+		}
+	}
+
 	return r.foldIndexSizes(ctx, out)
 }
 
