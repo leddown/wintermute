@@ -145,16 +145,39 @@
   --bg: #0a0806;
   --surface: #12100c;
   --surface-2: #1c1811;
-  --border: #4a3a1c;
+  --border: #6b5528;
   --text: #e4d3a6;
-  --muted: #a08a5c;
+  /* Secondary text is the pale green of a failing indicator lamp rather than
+     the brass it used to be.
+     
+     Two reasons. The brass (#a08a5c) sat at 5.98:1 on the background and 5.29
+     against a panel — legible in the sense that a test passes, muddy in the
+     sense that anyone actually reading a hint had to work at it, because it
+     was a dark warm colour on a dark warm ground with nothing separating them
+     but lightness. Moving to a cool green separates it by hue as well, so it
+     reads as a different *kind* of text rather than as dimmer text.
+     
+     And it belongs here: this theme already paints a failing-CRT layer over
+     the whole shell (see .fritz below), so a sickly phosphor green for the
+     machine's own annotations is the register it was already speaking in. The
+     parchment and gold stay for what the operator writes and what the machine
+     calls itself; the green is everything the cogitator mutters underneath.
+     
+     10.91:1 on the background, 9.65:1 on a panel — comfortably AAA, and still
+     clearly subordinate to the parchment above it. */
+  --muted: #b3c69a;
   --accent: #d8a730;
-  --error: #c1272d;
+  /* The old red failed outright: 3.42:1 on the background, under even the AA
+     floor of 4.5, on the one colour reserved for the things that must not be
+     missed — errors, and the control that deletes every conversation. This one
+     clears 6.69:1 and still reads as a warning lamp rather than a tomato. */
+  --error: #ff5f56;
   /* A gain is weathered field green rather than the palette's gold, which is
      already spent on emphasis; a loss stays the same red as an error, because
-     a red number on a P&L has to survive any change of palette. */
-  --gain: #8a9a4a;
-  --loss: #c1272d;
+     a red number on a P&L has to survive any change of palette. Lifted into
+     the same family as the indicator green above, and from 6.48:1 to 9.48:1. */
+  --gain: #a8bb63;
+  --loss: #ff5f56;
 }
 
 /* Everything on this screen is output from a machine that only has one face. */
