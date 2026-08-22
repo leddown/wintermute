@@ -2775,6 +2775,13 @@ async function renderAdminModels(body) {
     api('/api/v1/tasks'),
   ]);
 
+  // Only Ollama backends can load and unload on demand. Knowing which before
+  // rendering means a host that cannot be controlled is shown as a plain label
+  // rather than a button that would fail.
+  const controllableBackends = new Set(
+    (state.backends || []).filter((b) => b.kind === 'ollama' || b.kind === 'hailo').map((b) => b.name),
+  );
+
   if (!list || !list.length) {
     body.append(el('p', { class: 'muted', text:
       'No models found. Check the Backends tab — a backend that is unreachable reports nothing.' }));
@@ -2787,7 +2794,12 @@ async function renderAdminModels(body) {
     const key = (m.id || '').toLowerCase();
     if (!byModel.has(key)) byModel.set(key, { model: m, hosts: [] });
     const entry = byModel.get(key);
-    entry.hosts.push({ backend: m.backend, loaded: m.loaded, vram: m.vram_bytes });
+    entry.hosts.push({
+      backend: m.backend,
+      loaded: m.loaded,
+      vram: m.vram_bytes,
+      controllable: controllableBackends.has(m.backend),
+    });
     // Prefer a loaded copy as the representative row: its VRAM figure is real
     // rather than an estimate.
     if (m.loaded && !entry.model.loaded) entry.model = m;
@@ -2822,11 +2834,30 @@ function modelCard(key, entry, titles, tasks, taskLabel) {
   const m = entry.model;
   const resident = entry.hosts.filter((h) => h.loaded);
 
-  const hostChips = entry.hosts.map((h) => el('span', {
-    class: `host-chip ${h.loaded ? 'resident' : ''}`,
-    title: h.loaded ? 'Resident in memory on this machine' : 'Present on this machine, not loaded',
-    text: h.backend,
-  }));
+  // Each host is a chip that is also the control for that host's copy:
+  // clicking it loads or unloads there. The chip already says which machine
+  // and whether it is resident, so making it the button avoids a second row of
+  // controls repeating the same names.
+  const hostChips = entry.hosts.map((h) => {
+    if (!h.controllable) {
+      return el('span', {
+        class: `host-chip ${h.loaded ? 'resident' : ''}`,
+        title: `${h.backend} serves whatever it was started with — it cannot load or unload on demand`,
+        text: h.backend,
+      });
+    }
+    return el('button', {
+      class: `host-chip control ${h.loaded ? 'resident' : ''}`,
+      type: 'button',
+      title: h.loaded
+        ? `Resident on ${h.backend}. Click to unload and free its VRAM.`
+        : `Present on ${h.backend}, not loaded. Click to load it into memory.`,
+      onclick: () => controlModel(h.backend, m.id, !h.loaded).catch(showError),
+    }, [
+      el('span', { class: 'host-dot', text: h.loaded ? '\u25cf' : '\u25cb' }),
+      el('span', { text: h.backend }),
+    ]);
+  });
 
   const titleChips = titles.map((t) => el('span', {
     class: 'title-chip',
@@ -2876,6 +2907,32 @@ function modelCard(key, entry, titles, tasks, taskLabel) {
       })),
     ]),
   ]);
+}
+
+// Unloading frees VRAM that a conversation may be mid-turn on, so it asks
+// first. Loading takes memory but interrupts nothing, so it does not.
+async function controlModel(backend, modelID, load) {
+  if (!load && !window.confirm(
+    `Unload ${modelID} from ${backend}?\n\n`
+    + 'It frees the VRAM immediately. Any turn currently running on that model '
+    + 'will have to load it again, which takes seconds to a minute.')) return;
+
+  toast(load ? `Loading ${modelID} on ${backend}…` : `Unloading ${modelID}…`);
+  const res = await api(`/api/v1/models/${load ? 'load' : 'unload'}`, {
+    method: 'POST',
+    body: JSON.stringify({ backend, model_id: modelID }),
+  });
+  // The cached backend list carries the kinds this screen filters on, and the
+  // health it shows elsewhere; refresh it so a backend that went away during
+  // the operation is not still offered as controllable.
+  await api('/api/v1/backends')
+    .then((data) => { state.backends = data.backends || []; })
+    .catch(() => { /* the models list is still worth rendering */ });
+  await renderAdmin();
+  const held = (res.resident || []).length;
+  toast(load
+    ? `${modelID} loaded on ${backend}. ${held} model${held === 1 ? '' : 's'} resident there.`
+    : `${modelID} unloaded from ${backend}.`);
 }
 
 async function saveModelNote(modelID, note) {

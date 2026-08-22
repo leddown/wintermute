@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
@@ -28,6 +29,11 @@ type Catalog struct {
 	store    *store.Store
 	log      *slog.Logger
 
+	// control loads and unloads models on backends that support it. It is
+	// separate from prober because it is the one thing here that changes a
+	// backend's state rather than reading it.
+	control *Controller
+
 	mu       sync.Mutex
 	hardware *Hardware
 	probedAt time.Time
@@ -53,6 +59,57 @@ func (c *Catalog) Backends() []Backend {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.backends
+}
+
+// Backend looks up one configured backend by name.
+func (c *Catalog) Backend(name string) (Backend, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, b := range c.backends {
+		if b.Name == name {
+			return b, true
+		}
+	}
+	return Backend{}, false
+}
+
+// Control exposes the loader for the API. It is nil-safe: a catalog built
+// before this existed still answers, it just cannot control anything.
+func (c *Catalog) Control() *Controller {
+	if c.control == nil {
+		c.control = NewController()
+	}
+	return c.control
+}
+
+// RefreshBackend re-probes one backend and rewrites its catalog rows.
+//
+// Loading or unloading a model changes what that backend is holding, and the
+// operator expects to see it immediately rather than at the next sweep. This
+// re-probes the one backend that changed rather than the whole set, which on a
+// fleet is the difference between a moment and a stall.
+func (c *Catalog) RefreshBackend(ctx context.Context, name string) error {
+	b, ok := c.Backend(name)
+	if !ok {
+		return fmt.Errorf("unknown backend %q", name)
+	}
+	found, err := c.prober.Probe(ctx, b)
+	row := store.BackendRow{
+		Name: b.Name, Kind: string(b.Kind), BaseURL: b.BaseURL,
+		Model: b.Model, Cloud: b.Cloud, Status: store.BackendOK,
+	}
+	now := time.Now().UTC()
+	row.ProbedAt = &now
+	if err != nil {
+		row.Status, row.StatusNote = store.BackendUnreachable, err.Error()
+	}
+	if upErr := c.store.UpsertBackend(ctx, row); upErr != nil {
+		return upErr
+	}
+	if err != nil {
+		return err
+	}
+	return c.store.ReplaceCatalog(ctx, b.Name, toCatalogRows(found))
 }
 
 // SetBackends replaces the set this catalog probes and reports on, so a
@@ -178,30 +235,37 @@ func (c *Catalog) Refresh(ctx context.Context) error {
 			return err
 		}
 
-		rows := make([]store.CatalogRow, 0, len(found))
-		for _, m := range found {
-			caps := make([]string, 0, len(m.Capabilities))
-			for _, cap := range m.Capabilities {
-				caps = append(caps, string(cap))
-			}
-			rows = append(rows, store.CatalogRow{
-				Backend:      b.Name,
-				ModelID:      m.ID,
-				Family:       m.Family,
-				ParamsB:      m.ParamsB,
-				Quant:        m.Quant,
-				CtxLen:       m.CtxLen,
-				SizeBytes:    m.SizeBytes,
-				Capabilities: caps,
-				Loaded:       m.Loaded,
-				VRAMBytes:    m.VRAMBytes,
-			})
-		}
-		if err := c.store.ReplaceCatalog(ctx, b.Name, rows); err != nil {
+		if err := c.store.ReplaceCatalog(ctx, b.Name, toCatalogRows(found)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// toCatalogRows converts probe results into stored rows. Shared by the full
+// sweep and the single-backend refresh so the two cannot drift into recording
+// different things about the same model.
+func toCatalogRows(found []Model) []store.CatalogRow {
+	rows := make([]store.CatalogRow, 0, len(found))
+	for _, m := range found {
+		caps := make([]string, 0, len(m.Capabilities))
+		for _, capability := range m.Capabilities {
+			caps = append(caps, string(capability))
+		}
+		rows = append(rows, store.CatalogRow{
+			Backend:      m.Backend,
+			ModelID:      m.ID,
+			Family:       m.Family,
+			ParamsB:      m.ParamsB,
+			Quant:        m.Quant,
+			CtxLen:       m.CtxLen,
+			SizeBytes:    m.SizeBytes,
+			Capabilities: caps,
+			Loaded:       m.Loaded,
+			VRAMBytes:    m.VRAMBytes,
+		})
+	}
+	return rows
 }
 
 // Watch re-probes every backend on an interval until ctx is cancelled. A

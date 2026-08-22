@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"wintermute/internal/models"
 	"wintermute/internal/store"
@@ -348,6 +349,117 @@ func taskNames() string {
 		names = append(names, string(t))
 	}
 	return strings.Join(names, ", ")
+}
+
+// Loading and unloading models on a backend.
+//
+// Operator-driven only: there is no tool for this. Every server-side tool here
+// is read-only by construction, which is what lets the agent loop auto-approve
+// them; evicting a model can take VRAM out from under a turn another
+// conversation is mid-way through, so handing that to the assistant is a
+// separate decision from giving the operator a button.
+
+type modelControlRequest struct {
+	Backend string `json:"backend"`
+	ModelID string `json:"model_id"`
+	// Pin keeps the model resident indefinitely rather than letting the
+	// backend evict it on its idle timer. Loading a model by hand almost
+	// always means "and keep it there", so this defaults to true on load.
+	Pin *bool `json:"pin,omitempty"`
+}
+
+func (s *Server) handleLoadModel(w http.ResponseWriter, r *http.Request) {
+	s.controlModel(w, r, true)
+}
+
+func (s *Server) handleUnloadModel(w http.ResponseWriter, r *http.Request) {
+	s.controlModel(w, r, false)
+}
+
+func (s *Server) controlModel(w http.ResponseWriter, r *http.Request, load bool) {
+	var req modelControlRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Backend) == "" || strings.TrimSpace(req.ModelID) == "" {
+		writeError(w, http.StatusBadRequest, "backend and model_id are required")
+		return
+	}
+
+	backend, ok := s.catalog.Backend(req.Backend)
+	if !ok {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("unknown backend %q", req.Backend))
+		return
+	}
+	control := s.catalog.Control()
+	if !control.Supports(backend) {
+		// A clear refusal naming the reason, rather than a failed request the
+		// operator has to interpret. llama.cpp and vLLM serve what they were
+		// started with; this is a fact about the backend, not a fault.
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"%s is a %s backend, which serves whatever it was started with — "+
+				"only Ollama backends can load and unload on demand",
+			backend.Name, backend.Kind))
+		return
+	}
+
+	var err error
+	if load {
+		keepAlive := time.Duration(-1)
+		if req.Pin != nil && !*req.Pin {
+			keepAlive = 0
+		}
+		err = control.Load(r.Context(), backend, req.ModelID, keepAlive)
+	} else {
+		err = control.Unload(r.Context(), backend, req.ModelID)
+	}
+	if err != nil {
+		s.fail(w, "control model", err)
+		return
+	}
+
+	// Re-probe the one backend that changed so the catalog reflects reality
+	// now rather than at the next sweep. A failure here is logged rather than
+	// returned: the load or unload already happened, and reporting it as
+	// failed would be worse than a catalog that is a minute stale.
+	if err := s.catalog.RefreshBackend(r.Context(), backend.Name); err != nil {
+		s.log.Warn("could not refresh backend after model control",
+			"backend", backend.Name, "error", err)
+	}
+
+	resident, err := control.Resident(r.Context(), backend)
+	if err != nil {
+		s.log.Warn("could not read residency after model control",
+			"backend", backend.Name, "error", err)
+		resident = nil
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"backend":  backend.Name,
+		"model_id": req.ModelID,
+		"loaded":   load,
+		"resident": resident,
+	})
+}
+
+// handleResident reports what each controllable backend is holding in memory
+// right now, read live rather than from the probe cache.
+func (s *Server) handleResident(w http.ResponseWriter, r *http.Request) {
+	control := s.catalog.Control()
+	out := []models.Resident{}
+	for _, b := range s.catalog.Backends() {
+		if !control.Supports(b) {
+			continue
+		}
+		found, err := control.Resident(r.Context(), b)
+		if err != nil {
+			// One backend being off is an ordinary state on a home network,
+			// not a reason to fail the whole listing.
+			s.log.Debug("residency read failed", "backend", b.Name, "error", err)
+			continue
+		}
+		out = append(out, found...)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"resident": out})
 }
 
 // handleModelSearch proxies a Hugging Face Hub search.

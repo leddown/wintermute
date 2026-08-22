@@ -949,6 +949,12 @@ dialog h3 { margin: 0; font-size: 15px; }
   font-family: ui-monospace, "Courier New", monospace;
 }
 .host-chip.resident { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
+/* A host chip is also the control for that host's copy: click to load or
+   unload there. Hosts that cannot be controlled stay plain spans, so anything
+   that looks pressable is. */
+button.host-chip.control { cursor: pointer; background: var(--bg); }
+button.host-chip.control:hover { border-color: var(--accent); color: var(--accent); }
+.host-dot { font-size: 9px; line-height: 1; margin-right: 4px; }
 
 .model-note {
   width: 100%; resize: vertical; min-height: 44px;
