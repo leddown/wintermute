@@ -173,11 +173,23 @@ beside the conversation memory. It arrives constantly, is worth little within
 days, and would inflate every memory snapshot for data already past its
 usefulness.
 
-Raw samples live **two hours** and are then folded into buckets and deleted.
-The rule that follows: no query outside that window ever touches a raw row.
-Keep it true — the index is on time alone so ageing rows out is a range delete,
-and stored facts are additive (sums and counts, never averages) so a bucket can
-be built without revisiting what it summarised.
+Raw samples live **two hours** and are then folded into minute, hour and day
+buckets. The rule that follows is enforced in code, not by discipline:
+`node.bucketFor` picks the tier from the requested span, so a month-long chart
+cannot reach a raw row even by accident. Two invariants keep it true:
+
+- **Tiers store sums, counts and maxima — never averages.** That is what lets
+  hours be built from minutes and days from hours. An average has forgotten how
+  many readings it stood for and cannot be re-aggregated without lying. Means
+  are recovered at query time by dividing.
+- **Raw is never deleted past the minute tier's watermark**, whatever the
+  retention says. If folding stalls, raw accumulates until it recovers rather
+  than being destroyed unsummarised — the one failure here that loses data
+  permanently. There is a test for that ordering; keep it.
+
+Timestamps in the metrics database are stored as explicit RFC3339 **text**. The
+driver stores a `time.Time` in a form SQLite's own date functions cannot read,
+which makes `strftime` return NULL and the whole fold silently produce nothing.
 
 ## Backups
 

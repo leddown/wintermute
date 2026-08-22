@@ -2768,7 +2768,22 @@ async function renderAdmin() {
 // timestamp. Anything quiet for more than three report intervals is treated as
 // out of contact.
 async function renderAdminFleet(body) {
-  const data = await api('/api/v1/nodes');
+  // The fleet and the backends are shown together because they answer one
+  // question between them: this host is busy — is it busy *serving a model*?
+  // Neither list can say that alone.
+  const [data, models] = await Promise.all([
+    api('/api/v1/nodes'),
+    api('/api/v1/models').catch(() => ({ models: [] })),
+  ]);
+
+  // Resident models, grouped by the backend serving them. A node and a backend
+  // are matched by name, which is the convention worth stating rather than
+  // inferring: name the client after the backend it runs and the two line up.
+  const residentByBackend = new Map();
+  for (const m of models.models || []) {
+    if (!m.loaded) continue;
+    residentByBackend.set(m.backend, [...(residentByBackend.get(m.backend) || []), m]);
+  }
 
   if (!data.configured) {
     body.append(el('p', { class: 'muted', text:
@@ -2786,10 +2801,12 @@ async function renderAdminFleet(body) {
     return;
   }
 
-  for (const n of data.nodes) body.append(nodeCard(n));
+  for (const n of data.nodes) {
+    body.append(nodeCard(n, residentByBackend.get(n.name) || []));
+  }
 }
 
-function nodeCard(n) {
+function nodeCard(n, resident) {
   const s = n.latest;
   const seen = n.last_seen_at ? new Date(n.last_seen_at) : null;
   const ageMs = seen ? Date.now() - seen.getTime() : Infinity;
@@ -2804,14 +2821,45 @@ function nodeCard(n) {
     s && s.uptime_seconds ? `up ${formatDuration(s.uptime_seconds)}` : null,
   ].filter(Boolean).join(' · ');
 
-  const gauges = s ? el('div', { class: 'node-gauges' }, [
-    gauge('CPU', `${s.cpu_percent.toFixed(0)}%`, s.cpu_percent),
-    gauge('Memory', bytes(s.mem_used_bytes),
-      s.mem_total_bytes ? (s.mem_used_bytes / s.mem_total_bytes) * 100 : 0),
-    gauge('Load', s.load_1.toFixed(2), n.cores ? (s.load_1 / n.cores) * 100 : 0),
-    el('span', { class: 'node-rate', text:
-      `net ${bytes(s.net_rx_bps)}/s in · ${bytes(s.net_tx_bps)}/s out` }),
-  ]) : el('div', { class: 'muted', text: 'no readings yet' });
+  const gaugeRow = [
+    gauge('CPU', `${s ? s.cpu_percent.toFixed(0) : 0}%`, s ? s.cpu_percent : 0),
+    gauge('Memory', s ? bytes(s.mem_used_bytes) : '—',
+      s && s.mem_total_bytes ? (s.mem_used_bytes / s.mem_total_bytes) * 100 : 0),
+    gauge('Load', s ? s.load_1.toFixed(2) : '—', s && n.cores ? (s.load_1 / n.cores) * 100 : 0),
+  ];
+  // GPU gauges only on hosts that have one. A row of zeroes on a CPU-only box
+  // reads as a broken card rather than an absent one.
+  if (s && n.gpus && n.gpus.length) {
+    gaugeRow.push(gauge('GPU', `${s.gpu_util_percent.toFixed(0)}%`, s.gpu_util_percent));
+    gaugeRow.push(gauge('VRAM', bytes(s.gpu_mem_used_bytes),
+      s.gpu_mem_total_bytes ? (s.gpu_mem_used_bytes / s.gpu_mem_total_bytes) * 100 : 0));
+    if (s.gpu_temp_c) {
+      // 83C is where consumer NVIDIA cards begin throttling, so the bar is
+      // scaled to that rather than to some abstract maximum.
+      gaugeRow.push(gauge('Temp', `${s.gpu_temp_c.toFixed(0)}\u00b0C`, (s.gpu_temp_c / 83) * 100));
+    }
+  }
+  if (s) {
+    gaugeRow.push(el('span', { class: 'node-rate', text:
+      `net ${bytes(s.net_rx_bps)}/s in · ${bytes(s.net_tx_bps)}/s out` }));
+  }
+  const gauges = s
+    ? el('div', { class: 'node-gauges' }, gaugeRow)
+    : el('div', { class: 'muted', text: 'no readings yet' });
+
+  const cards = (n.gpus || []).length
+    ? el('div', { class: 'node-cards', text:
+        n.gpus.map((g) => `${g.name} (${bytes(g.mem_total_bytes)})`).join(' · ') })
+    : null;
+
+  // What this host is actually holding in memory — the reason to care that its
+  // GPU is warm.
+  const models = resident.length
+    ? el('div', { class: 'node-models' }, [
+        el('span', { class: 'muted', text: 'serving' }),
+        ...resident.map((m) => el('span', { class: 'host-chip resident', text: m.id })),
+      ])
+    : null;
 
   return el('div', { class: `node-card ${stale ? 'stale' : ''}` }, [
     el('div', { class: 'node-head' }, [
@@ -2821,7 +2869,9 @@ function nodeCard(n) {
         : el('span', { class: 'node-state ok', text: 'reporting' }),
     ]),
     el('div', { class: 'model-facts', text: facts }),
+    cards,
     gauges,
+    models,
   ]);
 }
 

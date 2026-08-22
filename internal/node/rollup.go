@@ -171,7 +171,9 @@ func (r *Roller) foldRawToMinutes(ctx context.Context) error {
 		  cpu_sum, cpu_max, load1_sum, load1_max,
 		  mem_used_sum, mem_used_max, mem_total_max, swap_used_max,
 		  disk_read_sum, disk_read_max, disk_write_sum, disk_write_max,
-		  net_rx_sum, net_rx_max, net_tx_sum, net_tx_max)
+		  net_rx_sum, net_rx_max, net_tx_sum, net_tx_max,
+		  gpu_util_sum, gpu_util_max, gpu_mem_used_max, gpu_mem_total_max,
+		  gpu_temp_max, gpu_power_sum)
 		 SELECT node, ?, strftime(?, at), COUNT(*),
 		        SUM(cpu_percent), MAX(cpu_percent),
 		        SUM(load_1), MAX(load_1),
@@ -179,7 +181,9 @@ func (r *Roller) foldRawToMinutes(ctx context.Context) error {
 		        SUM(disk_read_bps), MAX(disk_read_bps),
 		        SUM(disk_write_bps), MAX(disk_write_bps),
 		        SUM(net_rx_bps), MAX(net_rx_bps),
-		        SUM(net_tx_bps), MAX(net_tx_bps)
+		        SUM(net_tx_bps), MAX(net_tx_bps),
+		        SUM(gpu_util), MAX(gpu_util), MAX(gpu_mem_used), MAX(gpu_mem_total),
+		        MAX(gpu_temp), SUM(gpu_power)
 		 FROM node_samples
 		 WHERE at >= ? AND at < ?
 		 GROUP BY node, strftime(?, at)`,
@@ -225,7 +229,9 @@ func (r *Roller) foldUp(ctx context.Context, from, to string, size time.Duration
 		  cpu_sum, cpu_max, load1_sum, load1_max,
 		  mem_used_sum, mem_used_max, mem_total_max, swap_used_max,
 		  disk_read_sum, disk_read_max, disk_write_sum, disk_write_max,
-		  net_rx_sum, net_rx_max, net_tx_sum, net_tx_max)
+		  net_rx_sum, net_rx_max, net_tx_sum, net_tx_max,
+		  gpu_util_sum, gpu_util_max, gpu_mem_used_max, gpu_mem_total_max,
+		  gpu_temp_max, gpu_power_sum)
 		 SELECT node, ?, strftime(?, at), SUM(samples),
 		        SUM(cpu_sum), MAX(cpu_max),
 		        SUM(load1_sum), MAX(load1_max),
@@ -233,7 +239,9 @@ func (r *Roller) foldUp(ctx context.Context, from, to string, size time.Duration
 		        SUM(disk_read_sum), MAX(disk_read_max),
 		        SUM(disk_write_sum), MAX(disk_write_max),
 		        SUM(net_rx_sum), MAX(net_rx_max),
-		        SUM(net_tx_sum), MAX(net_tx_max)
+		        SUM(net_tx_sum), MAX(net_tx_max),
+		        SUM(gpu_util_sum), MAX(gpu_util_max), MAX(gpu_mem_used_max),
+		        MAX(gpu_mem_total_max), MAX(gpu_temp_max), SUM(gpu_power_sum)
 		 FROM node_rollup
 		 WHERE bucket = ? AND at >= ? AND at < ?
 		 GROUP BY node, strftime(?, at)`,

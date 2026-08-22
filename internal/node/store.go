@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"sort"
@@ -128,25 +129,36 @@ func (s *Store) Ingest(ctx context.Context, nodeName string, report Report) (int
 
 	now := time.Now().UTC()
 	f := report.Facts
+	// The card list is stored as JSON: it is read whole, written whole, and has
+	// no queryable structure worth a second table.
+	var gpuJSON string
+	if len(f.GPUs) > 0 {
+		if raw, err := json.Marshal(f.GPUs); err == nil {
+			gpuJSON = string(raw)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO nodes (name, hostname, os, kernel, cores, agent_version, first_seen_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO nodes (name, hostname, os, kernel, cores, agent_version, gpus, first_seen_at, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   hostname = excluded.hostname,
 		   os = excluded.os,
 		   kernel = excluded.kernel,
 		   cores = excluded.cores,
 		   agent_version = excluded.agent_version,
+		   gpus = excluded.gpus,
 		   last_seen_at = excluded.last_seen_at`,
-		nodeName, f.Hostname, f.OS, f.Kernel, f.Cores, f.AgentVersion, stamp(now), stamp(now)); err != nil {
+		nodeName, f.Hostname, f.OS, f.Kernel, f.Cores, f.AgentVersion, gpuJSON,
+		stamp(now), stamp(now)); err != nil {
 		return 0, fmt.Errorf("record node: %w", err)
 	}
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT OR IGNORE INTO node_samples
 		 (node, at, cpu_percent, load_1, load_5, load_15, mem_total, mem_used, swap_used,
-		  disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		  disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds,
+		  gpu_util, gpu_mem_used, gpu_mem_total, gpu_temp, gpu_power)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return 0, fmt.Errorf("prepare ingest: %w", err)
 	}
@@ -159,7 +171,9 @@ func (s *Store) Ingest(ctx context.Context, nodeName string, report Report) (int
 			sample.Load1, sample.Load5, sample.Load15,
 			sample.MemTotal, sample.MemUsed, sample.SwapUsed,
 			sample.DiskReadBPS, sample.DiskWriteBPS,
-			sample.NetRxBPS, sample.NetTxBPS, sample.UptimeSeconds)
+			sample.NetRxBPS, sample.NetTxBPS, sample.UptimeSeconds,
+			sample.GPUUtilPercent, sample.GPUMemUsed, sample.GPUMemTotal,
+			sample.GPUTempC, sample.GPUPowerWatts)
 		if err != nil {
 			return 0, fmt.Errorf("insert sample: %w", err)
 		}
@@ -181,6 +195,7 @@ type Node struct {
 	Kernel       string    `json:"kernel,omitempty"`
 	Cores        int       `json:"cores,omitempty"`
 	AgentVersion string    `json:"agent_version,omitempty"`
+	GPUs         []GPUCard `json:"gpus,omitempty"`
 	FirstSeenAt  time.Time `json:"first_seen_at"`
 	LastSeenAt   time.Time `json:"last_seen_at"`
 	// Latest is the newest sample, so a listing can show current state without
@@ -191,7 +206,7 @@ type Node struct {
 // Nodes lists every known host with its most recent sample.
 func (s *Store) Nodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT name, hostname, os, kernel, cores, agent_version, first_seen_at, last_seen_at
+		`SELECT name, hostname, os, kernel, cores, agent_version, gpus, first_seen_at, last_seen_at
 		 FROM nodes ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -201,10 +216,15 @@ func (s *Store) Nodes(ctx context.Context) ([]Node, error) {
 	out := []Node{}
 	for rows.Next() {
 		var n Node
-		var firstSeen, lastSeen string
+		var firstSeen, lastSeen, gpuJSON string
 		if err := rows.Scan(&n.Name, &n.Hostname, &n.OS, &n.Kernel, &n.Cores,
-			&n.AgentVersion, &firstSeen, &lastSeen); err != nil {
+			&n.AgentVersion, &gpuJSON, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
+		}
+		if gpuJSON != "" {
+			// A card list that will not decode is not worth failing the whole
+			// fleet listing over; the node is still real and still reporting.
+			_ = json.Unmarshal([]byte(gpuJSON), &n.GPUs)
 		}
 		n.FirstSeenAt, n.LastSeenAt = parseTime(firstSeen), parseTime(lastSeen)
 		out = append(out, n)
@@ -229,12 +249,15 @@ func (s *Store) LatestSample(ctx context.Context, nodeName string) (*Sample, err
 	var at string
 	err := s.db.QueryRowContext(ctx,
 		`SELECT at, cpu_percent, load_1, load_5, load_15, mem_total, mem_used, swap_used,
-		        disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds
+		        disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds,
+		        gpu_util, gpu_mem_used, gpu_mem_total, gpu_temp, gpu_power
 		 FROM node_samples WHERE node = ? ORDER BY at DESC LIMIT 1`, nodeName).
 		Scan(&at, &sample.CPUPercent, &sample.Load1, &sample.Load5, &sample.Load15,
 			&sample.MemTotal, &sample.MemUsed, &sample.SwapUsed,
 			&sample.DiskReadBPS, &sample.DiskWriteBPS,
-			&sample.NetRxBPS, &sample.NetTxBPS, &sample.UptimeSeconds)
+			&sample.NetRxBPS, &sample.NetTxBPS, &sample.UptimeSeconds,
+			&sample.GPUUtilPercent, &sample.GPUMemUsed, &sample.GPUMemTotal,
+			&sample.GPUTempC, &sample.GPUPowerWatts)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -252,7 +275,8 @@ func (s *Store) LatestSample(ctx context.Context, nodeName string) (*Sample, err
 func (s *Store) SamplesSince(ctx context.Context, nodeName string, since time.Time) ([]Sample, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT at, cpu_percent, load_1, load_5, load_15, mem_total, mem_used, swap_used,
-		        disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds
+		        disk_read_bps, disk_write_bps, net_rx_bps, net_tx_bps, uptime_seconds,
+		        gpu_util, gpu_mem_used, gpu_mem_total, gpu_temp, gpu_power
 		 FROM node_samples WHERE node = ? AND at >= ? ORDER BY at`, nodeName, stamp(since))
 	if err != nil {
 		return nil, fmt.Errorf("read samples: %w", err)
@@ -266,7 +290,9 @@ func (s *Store) SamplesSince(ctx context.Context, nodeName string, since time.Ti
 		if err := rows.Scan(&at, &sample.CPUPercent, &sample.Load1, &sample.Load5,
 			&sample.Load15, &sample.MemTotal, &sample.MemUsed, &sample.SwapUsed,
 			&sample.DiskReadBPS, &sample.DiskWriteBPS,
-			&sample.NetRxBPS, &sample.NetTxBPS, &sample.UptimeSeconds); err != nil {
+			&sample.NetRxBPS, &sample.NetTxBPS, &sample.UptimeSeconds,
+			&sample.GPUUtilPercent, &sample.GPUMemUsed, &sample.GPUMemTotal,
+			&sample.GPUTempC, &sample.GPUPowerWatts); err != nil {
 			return nil, fmt.Errorf("scan sample: %w", err)
 		}
 		sample.At = parseTime(at)
@@ -333,6 +359,14 @@ type Point struct {
 	DiskWriteBPS float64 `json:"disk_write_bps"`
 	NetRxBPS     float64 `json:"net_rx_bps"`
 	NetTxBPS     float64 `json:"net_tx_bps"`
+
+	// GPU figures, aggregated across the host's cards. Zero throughout on a
+	// machine with no NVIDIA driver, which is most of them.
+	GPUUtilPercent float64 `json:"gpu_util_percent"`
+	GPUUtilMax     float64 `json:"gpu_util_max"`
+	GPUMemUsedMax  int64   `json:"gpu_mem_used_max_bytes"`
+	GPUMemTotal    int64   `json:"gpu_mem_total_bytes"`
+	GPUTempMax     float64 `json:"gpu_temp_max_c"`
 }
 
 // Series is a node's history over a window, at whatever resolution suits it.
@@ -389,6 +423,9 @@ func (s *Store) SeriesSince(ctx context.Context, nodeName string, since time.Tim
 				MemTotal: int64(sample.MemTotal), SwapUsedMax: int64(sample.SwapUsed),
 				DiskReadBPS: sample.DiskReadBPS, DiskWriteBPS: sample.DiskWriteBPS,
 				NetRxBPS: sample.NetRxBPS, NetTxBPS: sample.NetTxBPS,
+				GPUUtilPercent: sample.GPUUtilPercent, GPUUtilMax: sample.GPUUtilPercent,
+				GPUMemUsedMax: sample.GPUMemUsed, GPUMemTotal: sample.GPUMemTotal,
+				GPUTempMax: sample.GPUTempC,
 			})
 		}
 		return out, nil
@@ -397,7 +434,8 @@ func (s *Store) SeriesSince(ctx context.Context, nodeName string, since time.Tim
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT at, samples, cpu_sum, cpu_max, load1_sum, load1_max,
 		        mem_used_sum, mem_used_max, mem_total_max, swap_used_max,
-		        disk_read_sum, disk_write_sum, net_rx_sum, net_tx_sum
+		        disk_read_sum, disk_write_sum, net_rx_sum, net_tx_sum,
+		        gpu_util_sum, gpu_util_max, gpu_mem_used_max, gpu_mem_total_max, gpu_temp_max
 		 FROM node_rollup
 		 WHERE node = ? AND bucket = ? AND at >= ?
 		 ORDER BY at`, nodeName, bucket, stamp(since))
@@ -410,9 +448,11 @@ func (s *Store) SeriesSince(ctx context.Context, nodeName string, since time.Tim
 		var p Point
 		var at string
 		var cpuSum, load1Sum, memUsedSum, diskReadSum, diskWriteSum, netRxSum, netTxSum float64
+		var gpuUtilSum float64
 		if err := rows.Scan(&at, &p.Samples, &cpuSum, &p.CPUMax, &load1Sum, &p.Load1Max,
 			&memUsedSum, &p.MemUsedMax, &p.MemTotal, &p.SwapUsedMax,
-			&diskReadSum, &diskWriteSum, &netRxSum, &netTxSum); err != nil {
+			&diskReadSum, &diskWriteSum, &netRxSum, &netTxSum,
+			&gpuUtilSum, &p.GPUUtilMax, &p.GPUMemUsedMax, &p.GPUMemTotal, &p.GPUTempMax); err != nil {
 			return out, fmt.Errorf("scan series point: %w", err)
 		}
 		p.At = parseTime(at)
@@ -425,6 +465,7 @@ func (s *Store) SeriesSince(ctx context.Context, nodeName string, since time.Tim
 			p.DiskWriteBPS = diskWriteSum / n
 			p.NetRxBPS = netRxSum / n
 			p.NetTxBPS = netTxSum / n
+			p.GPUUtilPercent = gpuUtilSum / n
 		}
 		out.Points = append(out.Points, p)
 	}

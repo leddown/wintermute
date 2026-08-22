@@ -183,6 +183,7 @@ func (a *agent) collect() (node.Sample, error) {
 	}
 	mem := hostmetrics.ReadMemory()
 	load := hostmetrics.ReadLoadAverage()
+	gpus := hostmetrics.ReadGPUs(context.Background())
 
 	sample := node.Sample{
 		At:            time.Now().UTC(),
@@ -193,6 +194,22 @@ func (a *agent) collect() (node.Sample, error) {
 		MemUsed:       mem.UsedBytes,
 		SwapUsed:      mem.SwapUsedBytes,
 		UptimeSeconds: int64(hostmetrics.ReadUptime().Seconds()),
+	}
+
+	if len(gpus) > 0 {
+		util, temp, power, used, total := hostmetrics.SummariseGPUs(gpus)
+		sample.GPUUtilPercent, sample.GPUTempC, sample.GPUPowerWatts = util, temp, power
+		sample.GPUMemUsed, sample.GPUMemTotal = used, total
+
+		// The card list is a fact about the machine, refreshed here so a GPU
+		// added or removed is noticed without restarting the agent.
+		cards := make([]node.GPUCard, 0, len(gpus))
+		for _, g := range gpus {
+			cards = append(cards, node.GPUCard{
+				Index: g.Index, Name: g.Name, MemTotalBytes: g.MemTotalBytes,
+			})
+		}
+		a.facts.GPUs = cards
 	}
 
 	if a.prev != nil {

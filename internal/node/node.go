@@ -46,6 +46,18 @@ type Facts struct {
 	Kernel       string `json:"kernel,omitempty"`
 	Cores        int    `json:"cores,omitempty"`
 	AgentVersion string `json:"agent_version,omitempty"`
+	// GPUs names the cards this host has. A fact about the machine rather than
+	// a measurement, so it travels with the other facts and is re-sent every
+	// report — a card added or removed then shows up without a separate step.
+	GPUs []GPUCard `json:"gpus,omitempty"`
+}
+
+// GPUCard identifies one device. Its live state is in the sample; this is what
+// does not change between readings.
+type GPUCard struct {
+	Index         int    `json:"index"`
+	Name          string `json:"name"`
+	MemTotalBytes int64  `json:"mem_total_bytes"`
 }
 
 // Sample is one moment of a host's working state.
@@ -72,6 +84,17 @@ type Sample struct {
 	NetTxBPS     float64 `json:"net_tx_bps"`
 
 	UptimeSeconds int64 `json:"uptime_seconds"`
+
+	// GPU figures are aggregates across every card on the host. Utilisation
+	// and temperature are maxima rather than means: with one card saturated
+	// and another idle, an average says the machine is half busy, which is
+	// true of nothing and hides the card that is the constraint. Memory and
+	// power are sums, because those really are totals for the box.
+	GPUUtilPercent float64 `json:"gpu_util_percent,omitempty"`
+	GPUMemUsed     int64   `json:"gpu_mem_used_bytes,omitempty"`
+	GPUMemTotal    int64   `json:"gpu_mem_total_bytes,omitempty"`
+	GPUTempC       float64 `json:"gpu_temp_c,omitempty"`
+	GPUPowerWatts  float64 `json:"gpu_power_watts,omitempty"`
 }
 
 // Report is one push from an agent.
