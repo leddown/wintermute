@@ -979,6 +979,38 @@ button.host-chip.control:hover { border-color: var(--accent); color: var(--accen
   padding: 4px 8px; color: inherit; font: inherit; font-size: 12px;
 }
 
+/* The fleet. A host that has stopped reporting is the thing worth seeing
+   first, so staleness changes the card rather than hiding in a timestamp. */
+.node-card {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 10px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.node-card.stale { border-color: var(--error, #ff5f56); opacity: 0.85; }
+
+.node-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.node-name { font-family: ui-monospace, "Courier New", monospace; font-weight: 600; }
+.node-state { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid; }
+.node-state.ok { color: var(--gain, #3fb950); border-color: var(--gain, #3fb950); }
+.node-state.out { color: var(--error, #ff5f56); border-color: var(--error, #ff5f56); }
+
+.node-gauges { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+.node-gauge { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.gauge-label { color: var(--muted); min-width: 48px; }
+/* A bar as well as a number, so a machine in trouble reads at a glance. */
+.gauge-track {
+  width: 68px; height: 5px; border-radius: 3px;
+  background: var(--surface-2); overflow: hidden;
+}
+.gauge-fill { display: block; height: 100%; background: var(--gain, #3fb950); }
+.gauge-fill.warm { background: var(--accent, #d29922); }
+.gauge-fill.hot { background: var(--error, #ff5f56); }
+.gauge-value {
+  font-family: ui-monospace, "Courier New", monospace;
+  font-variant-numeric: tabular-nums; min-width: 56px;
+}
+.node-rate { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
 ul.plain { list-style: none; margin: 10px 0 0; padding: 0; }
 ul.plain li {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;

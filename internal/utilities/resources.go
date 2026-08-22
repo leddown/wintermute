@@ -1,13 +1,10 @@
 package utilities
 
 import (
-	"bufio"
-	"fmt"
-	"os"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
+
+	"wintermute/internal/hostmetrics"
 )
 
 // Live resource sampling for the Utilities view's activity gauges.
@@ -22,13 +19,14 @@ import (
 // Deliberately not the same thing as internal/models/hardware.go: that reports
 // what the machine *is* (cores, memory, GPUs), this reports what it is *doing*.
 //
+// The /proc reading itself lives in internal/hostmetrics, shared with the node
+// agent that reports the same numbers from a remote box. Two implementations of
+// "how busy is this machine" would eventually disagree about the same
+// condition, which is worse than either being slightly wrong.
+//
 // Everything is read from /proc, which costs a few file reads per poll and
 // needs no privileges. On a system without /proc the fields stay zero rather
 // than erroring: a missing gauge shouldn't fail the page.
-
-// sectorSize is the unit /proc/diskstats counts transfers in. It is fixed at
-// 512 bytes regardless of the device's real sector size.
-const sectorSize = 512
 
 // minSampleInterval guards against two polls landing close enough together
 // that the deltas are dominated by rounding. Below this the previous result
@@ -58,18 +56,6 @@ type ResourceSample struct {
 	Warming bool `json:"warming"`
 }
 
-// rawCounters are the cumulative values /proc exposes. Rates come from the
-// difference between two of these.
-type rawCounters struct {
-	at        time.Time
-	cpuTotal  uint64
-	cpuIdle   uint64
-	netRx     uint64
-	netTx     uint64
-	diskRead  uint64
-	diskWrite uint64
-}
-
 // resourceSampler turns successive /proc readings into rates, averaged over
 // sampleWindow. One instance is shared by every caller; the history it keeps
 // is what decouples the reported average from how often the UI happens to
@@ -78,7 +64,7 @@ type resourceSampler struct {
 	mu sync.Mutex
 	// history is ordered oldest-first and pruned to sampleWindow, so its
 	// first entry is the furthest back a rate can be measured from.
-	history []rawCounters
+	history []hostmetrics.Counters
 	last    ResourceSample
 }
 
@@ -89,7 +75,7 @@ func (s *resourceSampler) Sample() ResourceSample {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now, err := readCounters()
+	now, err := hostmetrics.ReadCounters()
 	if err != nil {
 		return s.last // keep showing the last good values rather than blanking
 	}
@@ -97,10 +83,10 @@ func (s *resourceSampler) Sample() ResourceSample {
 	// Drop readings that have fallen out of the window. A gap in polling
 	// (nobody watching the page) clears the history entirely, so the gauges
 	// warm up again rather than reporting an average over the idle period.
-	cutoff := now.at.Add(-sampleWindow)
+	cutoff := now.At.Add(-sampleWindow)
 	kept := s.history[:0]
 	for _, c := range s.history {
-		if c.at.After(cutoff) {
+		if c.At.After(cutoff) {
 			kept = append(kept, c)
 		}
 	}
@@ -113,7 +99,7 @@ func (s *resourceSampler) Sample() ResourceSample {
 	}
 
 	prev := s.history[0]
-	elapsed := now.at.Sub(prev.at)
+	elapsed := now.At.Sub(prev.At)
 	if elapsed < minSampleInterval {
 		return s.last
 	}
@@ -121,145 +107,15 @@ func (s *resourceSampler) Sample() ResourceSample {
 	secs := elapsed.Seconds()
 
 	out := ResourceSample{
-		NetRxBytesPerSec:     perSec(now.netRx, prev.netRx, secs),
-		NetTxBytesPerSec:     perSec(now.netTx, prev.netTx, secs),
-		DiskReadBytesPerSec:  perSec(now.diskRead, prev.diskRead, secs),
-		DiskWriteBytesPerSec: perSec(now.diskWrite, prev.diskWrite, secs),
-	}
-	// CPU is a ratio of jiffies, not a rate per second: the busy share of all
-	// the time that passed across every core.
-	if totalDelta := now.cpuTotal - prev.cpuTotal; totalDelta > 0 && now.cpuTotal >= prev.cpuTotal {
-		idleDelta := now.cpuIdle - prev.cpuIdle
-		if idleDelta > totalDelta {
-			idleDelta = totalDelta
-		}
-		out.CPUPercent = float64(totalDelta-idleDelta) / float64(totalDelta) * 100
+		NetRxBytesPerSec:     hostmetrics.PerSecond(now.NetRx, prev.NetRx, secs),
+		NetTxBytesPerSec:     hostmetrics.PerSecond(now.NetTx, prev.NetTx, secs),
+		DiskReadBytesPerSec:  hostmetrics.PerSecond(now.DiskRead, prev.DiskRead, secs),
+		DiskWriteBytesPerSec: hostmetrics.PerSecond(now.DiskWrite, prev.DiskWrite, secs),
+		// CPU is a ratio of jiffies, not a rate per second: the busy share of
+		// all the time that passed across every core.
+		CPUPercent: hostmetrics.BusyPercent(*now, prev),
 	}
 
 	s.last = out
 	return out
-}
-
-// perSec converts a pair of cumulative counter readings into a rate.
-// Counters only climb, so a decrease means a wrap or a device that went
-// away; report zero rather than a negative or absurd spike.
-func perSec(now, prev uint64, secs float64) float64 {
-	if now < prev || secs <= 0 {
-		return 0
-	}
-	return float64(now-prev) / secs
-}
-
-// readCounters takes one reading of all three subsystems.
-func readCounters() (*rawCounters, error) {
-	c := &rawCounters{at: time.Now()}
-	var err error
-	if c.cpuTotal, c.cpuIdle, err = readCPU(); err != nil {
-		return nil, err
-	}
-	c.netRx, c.netTx = readNet()
-	c.diskRead, c.diskWrite = readDisk()
-	return c, nil
-}
-
-// readCPU sums the aggregate "cpu" line of /proc/stat. idle includes iowait:
-// a process blocked on the disk is not consuming CPU, and counting it as
-// busy would make every large file copy look CPU-bound.
-func readCPU() (total, idle uint64, err error) {
-	data, err := os.ReadFile("/proc/stat")
-	if err != nil {
-		return 0, 0, fmt.Errorf("utilities: read /proc/stat: %w", err)
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 5 || fields[0] != "cpu" {
-			continue
-		}
-		for i, f := range fields[1:] {
-			v, convErr := strconv.ParseUint(f, 10, 64)
-			if convErr != nil {
-				continue
-			}
-			total += v
-			// Fields after "cpu" are user, nice, system, idle, iowait, …
-			if i == 3 || i == 4 {
-				idle += v
-			}
-		}
-		return total, idle, nil
-	}
-	return 0, 0, fmt.Errorf("utilities: no cpu line in /proc/stat")
-}
-
-// readNet sums received and transmitted bytes across every real interface.
-// Loopback is excluded: it carries the app's own database traffic, which
-// would otherwise show up as network load that never touches the wire.
-func readNet() (rx, tx uint64) {
-	f, err := os.Open("/proc/net/dev")
-	if err != nil {
-		return 0, 0
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Text()
-		name, rest, found := strings.Cut(line, ":")
-		if !found {
-			continue // the two header lines
-		}
-		name = strings.TrimSpace(name)
-		if name == "lo" || strings.HasPrefix(name, "veth") || strings.HasPrefix(name, "docker") {
-			continue
-		}
-		fields := strings.Fields(rest)
-		// Receive columns come first (bytes is 0), transmit bytes is 8.
-		if len(fields) < 9 {
-			continue
-		}
-		if v, err := strconv.ParseUint(fields[0], 10, 64); err == nil {
-			rx += v
-		}
-		if v, err := strconv.ParseUint(fields[8], 10, 64); err == nil {
-			tx += v
-		}
-	}
-	return rx, tx
-}
-
-// readDisk sums sectors read and written across whole disks.
-//
-// Only whole disks are counted, identified by having their own directory in
-// /sys/block. Partitions appear in /proc/diskstats too, and their I/O is
-// already included in the parent device's, so counting both would roughly
-// double every figure.
-func readDisk() (read, written uint64) {
-	f, err := os.Open("/proc/diskstats")
-	if err != nil {
-		return 0, 0
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		fields := strings.Fields(scanner.Text())
-		// major minor name reads merged sectors-read ms writes merged sectors-written …
-		if len(fields) < 10 {
-			continue
-		}
-		name := fields[2]
-		if strings.HasPrefix(name, "loop") || strings.HasPrefix(name, "ram") {
-			continue
-		}
-		if _, err := os.Stat("/sys/block/" + name); err != nil {
-			continue // a partition, or not a block device we should count
-		}
-		if v, err := strconv.ParseUint(fields[5], 10, 64); err == nil {
-			read += v * sectorSize
-		}
-		if v, err := strconv.ParseUint(fields[9], 10, 64); err == nil {
-			written += v * sectorSize
-		}
-	}
-	return read, written
 }

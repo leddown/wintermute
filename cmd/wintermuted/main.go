@@ -35,7 +35,7 @@ func main() {
 func run() error {
 	var (
 		addClient   = flag.String("add-client", "", "register a client with this name, print its token, and exit")
-		clientKind  = flag.String("kind", store.KindHarness, "client kind for -add-client: harness or browser")
+		clientKind  = flag.String("kind", store.KindHarness, "client kind for -add-client: harness, browser or node")
 		listClients = flag.Bool("list-clients", false, "list registered clients and exit")
 		revoke      = flag.String("revoke-client", "", "revoke the named client's token and exit")
 		migrateOnly = flag.Bool("migrate-only", false, "apply database migrations and exit")
@@ -259,8 +259,9 @@ func manage(log *slog.Logger, addClient, kind string, list bool, revoke string) 
 
 	switch {
 	case addClient != "":
-		if kind != store.KindHarness && kind != store.KindBrowser {
-			return fmt.Errorf("-kind must be %q or %q", store.KindHarness, store.KindBrowser)
+		if kind != store.KindHarness && kind != store.KindBrowser && kind != store.KindNode {
+			return fmt.Errorf("-kind must be %q, %q or %q",
+				store.KindHarness, store.KindBrowser, store.KindNode)
 		}
 		client, token, err := st.CreateClient(ctx, addClient, kind)
 		if err != nil {

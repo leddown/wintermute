@@ -17,6 +17,7 @@ import (
 	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
 	"wintermute/internal/models"
+	"wintermute/internal/node"
 	"wintermute/internal/recall"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
@@ -51,6 +52,8 @@ type Server struct {
 	// memory backs the shared-memory admin endpoints. Nil when no embedder is
 	// configured, and the endpoints say so rather than pretending.
 	memory *recall.Store
+	// nodes is the fleet telemetry store. Nil when it is not enabled.
+	nodes *node.Store
 	// memoryIndexer rebuilds the index on request. Nil for the same reason.
 	memoryIndexer *recall.Indexer
 	// reloadBackends re-resolves the backend set and swaps it into the router
@@ -157,6 +160,9 @@ func (s *Server) Handler() http.Handler {
 	// Model Context Protocol. Same bearer token as everything else, so an MCP
 	// client is registered with `wintermuted -add-client` like any other.
 	s.registerAdminRoutes(authed)
+
+	// Remote hosts reporting what they are doing — see nodes.go.
+	s.registerNodeRoutes(authed)
 
 	authed("POST /mcp", s.handleMCP)
 

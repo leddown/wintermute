@@ -2742,7 +2742,7 @@ async function renderAdmin() {
   const titles = {
     status: 'Status', config: 'Configuration', backends: 'Backends',
     hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
-    models: 'Models', memory: 'Memory', appearance: 'Appearance',
+    models: 'Models', fleet: 'Fleet', memory: 'Memory', appearance: 'Appearance',
   };
   $('admin-title').textContent = titles[admin.tab];
   body.innerHTML = '';
@@ -2753,11 +2753,106 @@ async function renderAdmin() {
   if (admin.tab === 'hardware') return renderAdminHardware(body);
   if (admin.tab === 'tools') return renderAdminTools(body);
   if (admin.tab === 'models') return renderAdminModels(body);
+  if (admin.tab === 'fleet') return renderAdminFleet(body);
   if (admin.tab === 'memory') return renderAdminMemory(body);
   // Purely local, unlike every other tab here: it reads and writes
   // localStorage and asks the server nothing.
   if (admin.tab === 'appearance') return renderAdminAppearance(body);
   return renderAdminClients(body);
+}
+
+// The fleet: remote hosts reporting what they are doing.
+//
+// A host that has stopped reporting is the thing worth seeing first, so
+// staleness is shown as a state rather than left to be worked out from a
+// timestamp. Anything quiet for more than three report intervals is treated as
+// out of contact.
+async function renderAdminFleet(body) {
+  const data = await api('/api/v1/nodes');
+
+  if (!data.configured) {
+    body.append(el('p', { class: 'muted', text:
+      'Fleet telemetry is off. Set WINTERMUTE_METRICS_DB to a file path to switch it on — '
+      + 'it is kept in its own database, apart from your conversations.' }));
+    return;
+  }
+  if (!data.nodes.length) {
+    body.append(
+      el('p', { class: 'muted', text: 'No hosts are reporting yet. On each machine:' }),
+      el('pre', { class: 'wrap', text:
+        'wintermuted -add-client rig -kind node      # on the server, once per host\n'
+        + 'wintermute-node -server https://…:8080 -token wm_…   # on the host' }),
+    );
+    return;
+  }
+
+  for (const n of data.nodes) body.append(nodeCard(n));
+}
+
+function nodeCard(n) {
+  const s = n.latest;
+  const seen = n.last_seen_at ? new Date(n.last_seen_at) : null;
+  const ageMs = seen ? Date.now() - seen.getTime() : Infinity;
+  // Three missed reports rather than one: a single late push is a busy
+  // network, not a machine that has gone away.
+  const stale = ageMs > 3 * 60 * 1000;
+
+  const facts = [
+    n.hostname && n.hostname !== n.name ? n.hostname : null,
+    n.cores ? `${n.cores} cores` : null,
+    n.kernel || null,
+    s && s.uptime_seconds ? `up ${formatDuration(s.uptime_seconds)}` : null,
+  ].filter(Boolean).join(' · ');
+
+  const gauges = s ? el('div', { class: 'node-gauges' }, [
+    gauge('CPU', `${s.cpu_percent.toFixed(0)}%`, s.cpu_percent),
+    gauge('Memory', bytes(s.mem_used_bytes),
+      s.mem_total_bytes ? (s.mem_used_bytes / s.mem_total_bytes) * 100 : 0),
+    gauge('Load', s.load_1.toFixed(2), n.cores ? (s.load_1 / n.cores) * 100 : 0),
+    el('span', { class: 'node-rate', text:
+      `net ${bytes(s.net_rx_bps)}/s in · ${bytes(s.net_tx_bps)}/s out` }),
+  ]) : el('div', { class: 'muted', text: 'no readings yet' });
+
+  return el('div', { class: `node-card ${stale ? 'stale' : ''}` }, [
+    el('div', { class: 'node-head' }, [
+      el('span', { class: 'node-name', text: n.name }),
+      stale
+        ? el('span', { class: 'node-state out', text: `out of contact · ${relativeTime(seen)}` })
+        : el('span', { class: 'node-state ok', text: 'reporting' }),
+    ]),
+    el('div', { class: 'model-facts', text: facts }),
+    gauges,
+  ]);
+}
+
+// A gauge reads as a bar as well as a number, so a machine in trouble is
+// visible without reading anything.
+function gauge(label, value, percent) {
+  const pct = Math.max(0, Math.min(100, percent || 0));
+  return el('span', { class: 'node-gauge', title: `${label}: ${value}` }, [
+    el('span', { class: 'gauge-label', text: label }),
+    el('span', { class: 'gauge-track' },
+      el('span', { class: `gauge-fill ${pct > 90 ? 'hot' : pct > 70 ? 'warm' : ''}`,
+        style: `width:${pct.toFixed(1)}%` })),
+    el('span', { class: 'gauge-value', text: value }),
+  ]);
+}
+
+function formatDuration(secs) {
+  const d = Math.floor(secs / 86400);
+  if (d > 0) return `${d}d`;
+  const h = Math.floor(secs / 3600);
+  if (h > 0) return `${h}h`;
+  return `${Math.floor(secs / 60)}m`;
+}
+
+function relativeTime(date) {
+  if (!date) return 'never';
+  const secs = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (secs < 90) return `${secs}s ago`;
+  if (secs < 5400) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 172800) return `${Math.floor(secs / 3600)}h ago`;
+  return `${Math.floor(secs / 86400)}d ago`;
 }
 
 // The model registry: which model sits on which machine, and what you think of

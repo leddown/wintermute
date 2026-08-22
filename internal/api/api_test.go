@@ -16,6 +16,7 @@ import (
 	"wintermute/internal/agent"
 	"wintermute/internal/llm"
 	"wintermute/internal/models"
+	"wintermute/internal/node"
 	"wintermute/internal/recall"
 	"wintermute/internal/store"
 	"wintermute/internal/tool"
@@ -485,5 +486,86 @@ func TestModelNoteRoundTripsThroughTheAPI(t *testing.T) {
 	}
 	if got.Note != "Current best coding." {
 		t.Errorf("note = %q", got.Note)
+	}
+}
+
+// A node is identified by the client its token belongs to, never by anything
+// in the body — and a client that is not registered as a node cannot report at
+// all. Otherwise anything holding a browser token could invent a machine.
+func TestOnlyNodeClientsMayReport(t *testing.T) {
+	srv, st := newTestServer(t)
+	nodeStore, err := node.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { nodeStore.Close() })
+	srv = srv.WithNodes(nodeStore)
+	handler := srv.Handler()
+
+	_, browserToken, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, nodeToken, err := st.CreateClient(t.Context(), "rig", store.KindNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := `{"format_version":1,"facts":{"hostname":"rig.lan"},` +
+		`"samples":[{"at":"2026-08-22T10:00:00Z","cpu_percent":42}]}`
+	post := func(token string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/report", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := post(browserToken); rec.Code != http.StatusForbidden {
+		t.Errorf("a browser client reporting gave %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if rec := post(nodeToken); rec.Code != http.StatusOK {
+		t.Fatalf("a node client reporting gave %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// The sample is attributed to the authenticated client, whatever the body
+	// claimed the hostname was.
+	nodes, err := nodeStore.Nodes(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Name != "rig" {
+		t.Errorf("nodes = %+v, want one named for the authenticated client", nodes)
+	}
+}
+
+// An agent left running across a server upgrade is told plainly rather than
+// having its fields silently misread.
+func TestReportRejectsAnUnknownFormatVersion(t *testing.T) {
+	srv, st := newTestServer(t)
+	nodeStore, err := node.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { nodeStore.Close() })
+	srv = srv.WithNodes(nodeStore)
+
+	_, token, err := st.CreateClient(t.Context(), "rig", store.KindNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/report",
+		strings.NewReader(`{"format_version":99,"samples":[]}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "upgrade the agent") {
+		t.Errorf("the error should say what to do, got: %s", rec.Body.String())
 	}
 }

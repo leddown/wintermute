@@ -204,6 +204,20 @@ type Config struct {
 	// catch-up pass rather than the main path.
 	RecallIndexInterval time.Duration
 
+	// MetricsDatabasePath is where fleet telemetry is kept. Empty disables the
+	// fleet entirely, and the server runs as it did before it existed.
+	//
+	// Its own file rather than a table in the main database. Host metrics
+	// arrive constantly, are worth little within days, and would outgrow the
+	// conversation memory by orders of magnitude within a year — and that
+	// memory is snapshotted on a schedule, so telemetry beside it would
+	// inflate every backup for data already past its usefulness.
+	MetricsDatabasePath string
+	// NodeRawRetention is how long full-resolution samples are kept before
+	// they are folded into buckets and deleted. Short on purpose: nothing
+	// outside this window should ever read a raw row.
+	NodeRawRetention time.Duration
+
 	// BackendProbeInterval is how often every backend is re-probed for health.
 	// Probing costs one cheap inventory request per backend, and without it a
 	// backend's recorded status is frozen at the last manual refresh — a host
@@ -269,6 +283,10 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	recallInterval, err := envDuration("WINTERMUTE_RECALL_INDEX_INTERVAL", 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	rawRetention, err := envDuration("WINTERMUTE_NODE_RAW_RETENTION", 2*time.Hour)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +359,9 @@ func Load() (*Config, error) {
 		RecallContextFraction: recallFraction,
 		RecallTokenBudget:     recallBudget,
 		RecallIndexInterval:   recallInterval,
+
+		MetricsDatabasePath: strings.TrimSpace(os.Getenv("WINTERMUTE_METRICS_DB")),
+		NodeRawRetention:    rawRetention,
 	}
 
 	if cfg.DefaultBackend == "" {

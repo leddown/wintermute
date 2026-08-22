@@ -19,6 +19,11 @@ import (
 const (
 	KindHarness = "harness"
 	KindBrowser = "browser"
+	// KindNode is a remote host running wintermute-node, reporting what it is
+	// doing. It reports and nothing else: it executes no tools and holds no
+	// session, so it is distinguished here mainly so the fleet can be told
+	// apart from the machines that talk.
+	KindNode = "node"
 )
 
 // Client is a device authorised to use the API.

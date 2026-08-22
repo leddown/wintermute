@@ -35,6 +35,7 @@ what lets the client cross-compile to a standalone Windows binary).
 ```
 cmd/wintermuted/    server entrypoint (flags, lifecycle)
 cmd/wintermute/     client harness entrypoint (flags, REPL)
+cmd/wintermute-node/ fleet agent: reports a remote Linux host's state
 internal/app/       composition root — the only package importing all others
 internal/agent/     the turn loop; partitions calls into server/client work
 internal/api/       JSON HTTP handlers + auth middleware
@@ -43,6 +44,8 @@ internal/tool/      shared vocabulary: Definition, Call, Result, Registry
 internal/lookup/    server-side tools: TMDB/TVDB/OMDb metadata lookup
 internal/store/     SQLite: clients, sessions, messages, muninn (audit)
 internal/recall/    memory: embedding index, hybrid retrieval, prior-context block
+internal/hostmetrics/ /proc readers, shared by the server and the node agent
+internal/node/      fleet: wire types and the separate telemetry database
 internal/client/    harness: config, transport, approval policy, prompting
 internal/client/actions/   tools that run on the user's machine (fs, roots)
 internal/config/    server config from env + .env
@@ -148,6 +151,33 @@ off-the-record conversation writes **no rows at all** — its transcript lives
 in memory in `internal/agent`, and turning recording off mid-conversation
 deletes what was already written in the same transaction. Muninn keeps
 recording throughout: it holds what was *done*, not what was said.
+
+## The fleet
+
+`cmd/wintermute-node` runs on remote Linux hosts and reports what they are
+doing. Three rules hold it in shape:
+
+- **The host pushes; the server never scrapes.** Hosts sit behind NAT and get
+  addresses from DHCP, and this keeps the property that the server never
+  reaches into a machine uninvited.
+- **The agent only reports.** It cannot be told to run anything. A fleet of
+  agents that execute commands is a fleet of remote shells; loading and
+  unloading models is done through the backend's own API instead, which needs
+  no host access at all (`internal/models/control.go`).
+- **A node is identified by the client it authenticates as**, never by a name
+  in the request body — otherwise any node could write samples attributed to
+  another. Register with `wintermuted -add-client <name> -kind node`.
+
+Telemetry lives in its **own database file** (`WINTERMUTE_METRICS_DB`), not
+beside the conversation memory. It arrives constantly, is worth little within
+days, and would inflate every memory snapshot for data already past its
+usefulness.
+
+Raw samples live **two hours** and are then folded into buckets and deleted.
+The rule that follows: no query outside that window ever touches a raw row.
+Keep it true — the index is on time alone so ageing rows out is a range delete,
+and stored facts are additive (sums and counts, never averages) so a bucket can
+be built without revisiting what it summarised.
 
 ## Backups
 

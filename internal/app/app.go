@@ -26,6 +26,7 @@ import (
 	"wintermute/internal/llm"
 	"wintermute/internal/lookup"
 	"wintermute/internal/models"
+	"wintermute/internal/node"
 	"wintermute/internal/recall"
 	"wintermute/internal/store"
 	"wintermute/internal/todo"
@@ -57,6 +58,9 @@ type App struct {
 	indexer *recall.Indexer
 	// inference buffers model-call measurements; Run drains it.
 	inference *inferenceRecorder
+	// nodes is the fleet telemetry store, held so Run can age its raw samples
+	// out and Close can release the file. Nil when the fleet is not enabled.
+	nodes *node.Store
 }
 
 // buildRouter turns the configured backends into live providers.
@@ -360,6 +364,19 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		info.PoolBackends = cfg.Pool.Backends
 	}
 
+	// Fleet telemetry, in its own database. Optional: without it the server
+	// runs exactly as it did before remote hosts existed.
+	var nodeStore *node.Store
+	if cfg.MetricsDatabasePath != "" {
+		nodeStore, err = node.Open(cfg.MetricsDatabasePath)
+		if err != nil {
+			st.Close()
+			return nil, err
+		}
+		log.Info("fleet telemetry enabled",
+			"database", cfg.MetricsDatabasePath, "raw_retention", cfg.NodeRawRetention)
+	}
+
 	// Housekeeping: backups, diagnostics, maintenance and pruning. It is given
 	// the database path as well as the handle, because a backup copies that
 	// file and the diagnostics measure the disk holding it.
@@ -370,6 +387,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		WithTwire(twireService).
 		WithUtilities(utilitiesService).
 		WithMemory(recallStore, indexer).
+		WithNodes(nodeStore).
 		WithBackendAdmin(func(ctx context.Context) error {
 			return reloadBackends(ctx, cfg, st, router, catalog, log)
 		})
@@ -384,6 +402,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		utilities: utilitiesService,
 		indexer:   indexer,
 		inference: inference,
+		nodes:     nodeStore,
 		http: &http.Server{
 			Addr:    cfg.Addr,
 			Handler: srv.Handler(),
@@ -580,6 +599,16 @@ func (a *App) Run(ctx context.Context) error {
 		go fintech.NewReviewScheduler(a.fintech, a.cfg.FintechReviewInterval).Run(ctx)
 	}
 
+	// Ageing raw telemetry out. Full-resolution samples live two hours; this
+	// is what keeps that window from quietly becoming a growing table.
+	//
+	// The sweep runs on a fraction of the retention period rather than on it,
+	// so a restart cannot leave rows sitting well past their window waiting
+	// for a tick that is an hour away.
+	if a.nodes != nil && a.cfg.NodeRawRetention > 0 {
+		go a.pruneRawTelemetry(ctx)
+	}
+
 	// Draining the measurement buffer. Started before anything can serve a
 	// turn, so the first call of the process is recorded like every other.
 	if a.inference != nil {
@@ -634,4 +663,46 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 // Close releases resources held by the app.
-func (a *App) Close() error { return a.store.Close() }
+// pruneRawTelemetry deletes raw samples past the retention window on a timer.
+//
+// A range delete against an index over time alone, so it costs the same whether
+// the table holds a thousand rows or a million — which is the property that
+// makes a two-hour window cheap to enforce rather than an expensive promise.
+func (a *App) pruneRawTelemetry(ctx context.Context) {
+	interval := a.cfg.NodeRawRetention / 4
+	if interval < time.Minute {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().UTC().Add(-a.cfg.NodeRawRetention)
+			n, err := a.nodes.PruneRaw(ctx, cutoff)
+			if err != nil {
+				a.log.Warn("could not age out raw telemetry", "error", err)
+				continue
+			}
+			if n > 0 {
+				a.log.Debug("raw telemetry aged out", "rows", n, "older_than", cutoff)
+			}
+		}
+	}
+}
+
+// Close releases both databases. The metrics file is closed first and its
+// error deliberately does not mask the main store's: telemetry failing to
+// close cleanly is a footnote, and the store holding the conversation memory
+// is the one whose error matters.
+func (a *App) Close() error {
+	if a.nodes != nil {
+		if err := a.nodes.Close(); err != nil {
+			a.log.Warn("closing the metrics database failed", "error", err)
+		}
+	}
+	return a.store.Close()
+}
