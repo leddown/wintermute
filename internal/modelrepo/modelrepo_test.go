@@ -615,3 +615,32 @@ func TestStubServesRanges(t *testing.T) {
 		t.Fatalf("range read = %q", got)
 	}
 }
+
+// A repository the server can see but cannot write to must be reported as the
+// operator's problem, not as an internal fault. This is the single most likely
+// first failure on a real deployment — a drive owned by another user, or
+// systemd's ProtectSystem=strict — and "internal error" is useless against it.
+func TestInitialiseReportsUnwritable(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root, which can write to anything")
+	}
+	repo, root := newTestRepo(t)
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Skipf("cannot make the directory read-only: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	err := repo.Initialise()
+	if !errors.Is(err, ErrNotWritable) {
+		t.Fatalf("want ErrNotWritable, got %v", err)
+	}
+	// It must name what to actually do, not merely that something was denied.
+	for _, want := range []string{"permission denied", "owned by uid", "ReadWritePaths", root} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message should mention %q:\n%v", want, err)
+		}
+	}
+	if errors.Is(err, ErrUnavailable) {
+		t.Error("unwritable is a different problem from absent and must not be conflated")
+	}
+}

@@ -1375,3 +1375,25 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
   border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
 }
 .doc-table th { background: var(--surface-2); font-weight: 600; }
+
+/* ---------- recent server errors ----------
+   Shown only when there are any. A permanent empty panel teaches people to
+   stop looking at the one place that should be noticed. */
+
+.err-list { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.err-row {
+  display: grid; grid-template-columns: auto auto 1fr; gap: 10px; align-items: baseline;
+  padding: 8px 10px; font-size: 12px;
+  background: var(--surface); border: 1px solid var(--error); border-radius: 8px;
+}
+.err-when { color: var(--muted); white-space: nowrap; }
+.err-op { font-weight: 600; white-space: nowrap; }
+.err-detail {
+  font-family: ui-monospace, "Courier New", monospace; color: var(--error);
+  /* Errors carry paths and quoted commands, and truncating one loses the half
+     that says what to do about it. */
+  word-break: break-word;
+}
+@media (max-width: 640px) {
+  .err-row { grid-template-columns: 1fr; gap: 3px; }
+}

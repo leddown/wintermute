@@ -1007,7 +1007,33 @@ function watchTurn(node, sessionId) {
 function showError(err) {
   if (chatVisible()) appendMessage({ role: 'tool', content: err.message, is_error: true });
   else toast(err.message, true);
+  // "internal error" is what the server says when it is refusing to leak
+  // detail, and on its own it is unactionable. The detail is kept server-side
+  // and readable — so fetch it rather than making the operator go and read
+  // journalctl over SSH to find out what they just did wrong.
+  if (/internal error/i.test(err.message || '')) revealServerError();
 }
+
+// Pulls the newest recorded failure and shows it. Best-effort throughout: this
+// runs while something has already gone wrong, and a failure to explain a
+// failure must not become a second error on screen.
+let lastRevealedError = 0;
+async function revealServerError() {
+  try {
+    const { errors } = await api('/api/v1/admin/errors?limit=1');
+    const newest = (errors || [])[0];
+    if (!newest || newest.id === lastRevealedError) return;
+    lastRevealedError = newest.id;
+
+    const detail = `${newest.op}: ${newest.error}`;
+    if (chatVisible()) appendMessage({ role: 'tool', content: detail, is_error: true });
+    else toast(detail, true);
+  } catch {
+    // Nothing to add. The original error is already on screen.
+  }
+}
+
+
 
 const input = $('input');
 input.addEventListener('input', () => {
@@ -3864,6 +3890,38 @@ function inlineMarkdown(text) {
   return nodes;
 }
 
+// Recent server failures, at the top of the Status page because when there are
+// any they are the most important thing on it.
+//
+// Absent entirely when nothing has failed, rather than an empty box: a
+// permanent "Errors (0)" heading trains people to stop seeing it, which is
+// exactly the wrong reflex for the one panel that should be noticed.
+async function renderServerErrors(body) {
+  let errors = [];
+  try {
+    ({ errors } = await api('/api/v1/admin/errors?limit=20'));
+  } catch {
+    return;
+  }
+  if (!errors || !errors.length) return;
+
+  body.append(el('div', { class: 'group-head', text: 'Recent errors' }));
+  body.append(el('p', { class: 'muted', text:
+    'What the server was doing when it answered "internal error". Kept in memory '
+    + 'and bounded, so this is what has failed recently rather than a history — '
+    + 'restarting the server clears it.' }));
+
+  const list = el('div', { class: 'err-list' });
+  for (const e of errors) {
+    list.append(el('div', { class: 'err-row' }, [
+      el('span', { class: 'err-when', text: relativeTime(new Date(e.at)) }),
+      el('span', { class: 'err-op', text: e.op }),
+      el('span', { class: 'err-detail', text: e.error }),
+    ]));
+  }
+  body.append(list);
+}
+
 // Shared memory: the master switch, and the two ways to throw things away.
 //
 // The two are kept visually apart on purpose. Clearing the index is
@@ -3983,6 +4041,7 @@ async function forgetEverything(sessions) {
 
 async function renderAdminStatus(body) {
   const s = await api('/api/v1/admin/status');
+  await renderServerErrors(body);
   body.append(el('div', { class: 'stats' },
     stat(s.uptime, 'Uptime'),
     stat(s.sessions, 'Sessions'),

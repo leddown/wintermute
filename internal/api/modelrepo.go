@@ -215,7 +215,8 @@ func (s *Server) failRepo(w http.ResponseWriter, what string, err error) {
 	case errors.Is(err, modelrepo.ErrNotConfigured),
 		errors.Is(err, modelrepo.ErrUnavailable),
 		errors.Is(err, modelrepo.ErrOutsideRepo),
-		errors.Is(err, modelrepo.ErrInvalidRequest):
+		errors.Is(err, modelrepo.ErrInvalidRequest),
+		errors.Is(err, modelrepo.ErrNotWritable):
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

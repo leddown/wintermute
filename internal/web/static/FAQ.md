@@ -32,6 +32,39 @@ This is the single most confusing failure in the whole setup, because the
 directory is plainly writable from a shell and only the service cannot touch it.
 If the drive is mounted by systemd, add `RequiresMountsFor=/mnt/usb-drive` too.
 
+### Initialise says the repository is not writable
+
+The server can see the directory but cannot write to it, and there are only two
+causes — both outside this server, and the message names which one applies by
+reporting the uid it runs as against the directory's owner and mode.
+
+Either the directory is not owned by the service user:
+
+```
+sudo chown -R wintermute:wintermute /mnt/usb-drive/wintermute
+```
+
+or systemd is making it read-only. The shipped unit uses `ProtectSystem=strict`,
+so anything outside `StateDirectory` has to be named explicitly:
+
+```
+ReadWritePaths=/mnt/usb-drive/wintermute
+```
+
+followed by `sudo systemctl daemon-reload` and a restart.
+
+### Something failed and all I get is "internal error"
+
+That is deliberate — the server never puts internal detail in an HTTP response.
+The detail is kept though, and **Admin → Status** shows a *Recent errors* panel
+with what the server was actually doing when it failed.
+
+You do not usually have to go looking: when a request comes back as "internal
+error", the UI fetches the recorded detail and shows that instead. The list is
+in memory and bounded to the last 50, so restarting the server clears it. It is
+a diagnostic aid, not an audit trail — the audit trail is muninn, in the
+database.
+
 ### Why does it refuse to write until I press Initialise?
 
 Because an unmounted drive leaves its mount point behind as an ordinary empty

@@ -49,6 +49,9 @@ func (s *Server) registerAdminRoutes(authed func(string, http.HandlerFunc)) {
 	authed("GET /api/v1/admin/clients", s.handleAdminClients)
 	authed("DELETE /api/v1/admin/clients/{name}", s.handleAdminRevokeClient)
 	authed("GET /api/v1/admin/tools", s.handleAdminTools)
+	// What went wrong, for the operator who just saw "internal error" in the
+	// UI and would otherwise have to read journalctl over SSH.
+	authed("GET /api/v1/admin/errors", s.handleAdminErrors)
 
 	// Shared memory: the master switch, and the two ways to throw things
 	// away. See memory.go.

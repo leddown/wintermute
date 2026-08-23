@@ -77,6 +77,16 @@ var ErrOutsideRepo = errors.New("path is outside the model repository")
 // .. in it" with "internal error" makes the whole feature undiagnosable.
 var ErrInvalidRequest = errors.New("invalid download request")
 
+// ErrNotWritable reports a repository the server can see but cannot write to.
+//
+// Distinct from ErrUnavailable, which means the path is not there at all. This
+// one is the harder failure to diagnose, because the directory is plainly
+// present and usually writable from a shell — the process simply is not the
+// user that owns it, or systemd has made the path read-only. Both are the
+// operator's to fix and neither is a fault in this server, so it must never be
+// reported as an internal error.
+var ErrNotWritable = errors.New("the model repository is not writable")
+
 // Repo is the model library rooted at one directory.
 type Repo struct {
 	// root is the configured path, exactly as the operator wrote it. It is
@@ -176,9 +186,36 @@ func (r *Repo) Initialise() error {
 		"Its presence is how the server tells a mounted drive from an empty mount point.\n" +
 		"Deleting it does not delete any weights; it stops the server writing here.\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		return fmt.Errorf("initialise repository: %w", err)
+		return writeFailure(root, err)
 	}
 	return nil
+}
+
+// writeFailure turns a refused write into something an operator can act on.
+//
+// A bare "permission denied" is the least useful true statement available here:
+// the operator is looking at a directory they can write to perfectly well from
+// their own shell, and nothing in that message hints at either of the two
+// things that are actually wrong. So both are named, along with the identity
+// the server is actually running as, which is the fact that resolves it.
+func writeFailure(root string, err error) error {
+	if !errors.Is(err, os.ErrPermission) {
+		return fmt.Errorf("%w: %s: %v", ErrNotWritable, root, err)
+	}
+
+	detail := fmt.Sprintf("%s: permission denied, writing as uid %d gid %d",
+		root, os.Getuid(), os.Getgid())
+	if info, statErr := os.Stat(root); statErr == nil {
+		if sys, ok := info.Sys().(*syscall.Stat_t); ok {
+			detail += fmt.Sprintf("; the directory is owned by uid %d gid %d with mode %v",
+				sys.Uid, sys.Gid, info.Mode().Perm())
+		}
+	}
+	return fmt.Errorf("%w: %s. Two things cause this and both are outside this "+
+		"server: the directory may not be owned by the user it runs as "+
+		"(chown it), or systemd's ProtectSystem=strict may be making it "+
+		"read-only (add ReadWritePaths=%s to the unit and reload)",
+		ErrNotWritable, detail, root)
 }
 
 // safeJoin resolves a repository-relative path against the root and verifies it

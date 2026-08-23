@@ -71,13 +71,16 @@ type Server struct {
 	reloadBackends func(context.Context) error
 	info           ServerInfo
 	log            *slog.Logger
+	// errors keeps the detail behind the generic 5xx bodies this server
+	// returns, so an operator can read it in the browser rather than over SSH.
+	errors *errorLog
 }
 
 // New builds a Server. A zero Workspace disables those routes rather than
 // registering handlers that would nil-panic on the first request.
 func New(a *agent.Agent, s *store.Store, serverTools *tool.Registry, cat *models.Catalog, ws Workspace, info ServerInfo, log *slog.Logger) *Server {
 	return &Server{agent: a, store: s, serverTools: serverTools, catalog: cat,
-		workspace: ws, info: info, log: log}
+		workspace: ws, info: info, log: log, errors: newErrorLog()}
 }
 
 // WithKnowledge attaches agent profiles and their libraries. Without it the
@@ -455,8 +458,16 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) (*store.Session
 
 // fail logs the underlying error and returns a generic message, so internal
 // details never reach the client.
+//
+// The detail is also kept in a bounded ring the admin API can read back — see
+// errorlog.go. The response is unchanged: what a failing caller learns stays
+// exactly as opaque as it was, and the operator gains a way to find out what
+// happened without leaving the browser.
 func (s *Server) fail(w http.ResponseWriter, op string, err error) {
 	s.log.Error(op+" failed", "error", err)
+	if s.errors != nil {
+		s.errors.record(ServerError{Op: op, Err: err.Error()})
+	}
 	writeError(w, http.StatusInternalServerError, "internal error")
 }
 
