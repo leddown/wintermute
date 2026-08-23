@@ -137,9 +137,19 @@ func (s *Store) Ingest(ctx context.Context, nodeName string, report Report) (int
 			gpuJSON = string(raw)
 		}
 	}
+	// The model store, likewise stored whole. An agent without one omits the
+	// field, and the column is then left as it was rather than blanked: an
+	// older agent reporting alongside newer ones should not erase what a
+	// newer one already said about the same host.
+	var storeJSON string
+	if report.Store != nil {
+		if raw, err := json.Marshal(report.Store); err == nil {
+			storeJSON = string(raw)
+		}
+	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO nodes (name, hostname, os, kernel, cores, agent_version, gpus, first_seen_at, last_seen_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO nodes (name, hostname, os, kernel, cores, agent_version, gpus, store, first_seen_at, last_seen_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   hostname = excluded.hostname,
 		   os = excluded.os,
@@ -147,8 +157,9 @@ func (s *Store) Ingest(ctx context.Context, nodeName string, report Report) (int
 		   cores = excluded.cores,
 		   agent_version = excluded.agent_version,
 		   gpus = excluded.gpus,
+		   store = CASE WHEN excluded.store = '' THEN nodes.store ELSE excluded.store END,
 		   last_seen_at = excluded.last_seen_at`,
-		nodeName, f.Hostname, f.OS, f.Kernel, f.Cores, f.AgentVersion, gpuJSON,
+		nodeName, f.Hostname, f.OS, f.Kernel, f.Cores, f.AgentVersion, gpuJSON, storeJSON,
 		stamp(now), stamp(now)); err != nil {
 		return 0, fmt.Errorf("record node: %w", err)
 	}
@@ -201,12 +212,16 @@ type Node struct {
 	// Latest is the newest sample, so a listing can show current state without
 	// a second request per node.
 	Latest *Sample `json:"latest,omitempty"`
+	// Store is the model library this host last reported holding. Nil for a
+	// node with no store configured, which is every node that only reports
+	// metrics.
+	Store *StoreReport `json:"store,omitempty"`
 }
 
 // Nodes lists every known host with its most recent sample.
 func (s *Store) Nodes(ctx context.Context) ([]Node, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT name, hostname, os, kernel, cores, agent_version, gpus, first_seen_at, last_seen_at
+		`SELECT name, hostname, os, kernel, cores, agent_version, gpus, store, first_seen_at, last_seen_at
 		 FROM nodes ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
@@ -216,15 +231,23 @@ func (s *Store) Nodes(ctx context.Context) ([]Node, error) {
 	out := []Node{}
 	for rows.Next() {
 		var n Node
-		var firstSeen, lastSeen, gpuJSON string
+		var firstSeen, lastSeen, gpuJSON, storeJSON string
 		if err := rows.Scan(&n.Name, &n.Hostname, &n.OS, &n.Kernel, &n.Cores,
-			&n.AgentVersion, &gpuJSON, &firstSeen, &lastSeen); err != nil {
+			&n.AgentVersion, &gpuJSON, &storeJSON, &firstSeen, &lastSeen); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		if gpuJSON != "" {
 			// A card list that will not decode is not worth failing the whole
 			// fleet listing over; the node is still real and still reporting.
 			_ = json.Unmarshal([]byte(gpuJSON), &n.GPUs)
+		}
+		if storeJSON != "" {
+			// A malformed column is left as a nil store rather than failing the
+			// whole listing: one node's bad row must not hide the fleet.
+			var sr StoreReport
+			if json.Unmarshal([]byte(storeJSON), &sr) == nil {
+				n.Store = &sr
+			}
 		}
 		n.FirstSeenAt, n.LastSeenAt = parseTime(firstSeen), parseTime(lastSeen)
 		out = append(out, n)

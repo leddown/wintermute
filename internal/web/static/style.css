@@ -1300,3 +1300,36 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
   background: transparent; border: 1px dashed var(--border); color: var(--text);
 }
 .repo-file-actions { display: flex; gap: 12px; }
+
+/* ---------- a node's model store ----------
+   What a host holds, against what it has been assigned. The panel exists to
+   make the gap between those two legible: an assignment with no file is a
+   transfer that has not happened yet, and a file with no assignment is a model
+   the host keeps that nothing currently asks for. Both are ordinary, and each
+   looks like a fault if it is not named. */
+
+.node-store { border-top: 1px solid var(--border); margin-top: 10px; padding-top: 10px; }
+.node-store-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.node-store-path {
+  font-family: ui-monospace, "Courier New", monospace; font-size: 12px;
+  word-break: break-all;
+}
+.node-store-facts { font-size: 12px; margin-top: 2px; }
+.node-store-rows { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.node-store-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 12px;
+}
+.node-store-name {
+  font-family: ui-monospace, "Courier New", monospace; word-break: break-all; flex: 1;
+  min-width: 140px;
+}
+.node-store-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--muted); }
+.node-store-dot.held { background: var(--gain, #3fb950); }
+.node-store-dot.pending { background: var(--accent); }
+.node-store-dot.fetching { background: var(--accent); }
+.node-store-dot.unimported { background: var(--muted); }
+
+.repo-badge.held { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
+.repo-badge.pending, .repo-badge.fetching { border-color: var(--accent); color: var(--accent); }
+.repo-badge.unimported { border-color: var(--border); color: var(--muted); }
+.node-store-assign { margin-top: 6px; }

@@ -2773,9 +2773,14 @@ async function renderAdminFleet(body) {
   // The fleet and the backends are shown together because they answer one
   // question between them: this host is busy — is it busy *serving a model*?
   // Neither list can say that alone.
-  const [data, models] = await Promise.all([
+  const [data, models, assigned, repo] = await Promise.all([
     api('/api/v1/nodes'),
     api('/api/v1/models').catch(() => ({ models: [] })),
+    // Which models each node should be holding, and what there is to choose
+    // from. Both are small, and fetching them here means the store panel on
+    // every card is drawn from one round trip rather than one per node.
+    api('/api/v1/nodes/assignments').catch(() => ({ assignments: {} })),
+    api('/api/v1/repo').catch(() => ({ files: [] })),
   ]);
 
   // Resident models, grouped by the backend serving them. A node and a backend
@@ -2804,11 +2809,12 @@ async function renderAdminFleet(body) {
   }
 
   for (const n of data.nodes) {
-    body.append(nodeCard(n, residentByBackend.get(n.name) || []));
+    body.append(nodeCard(n, residentByBackend.get(n.name) || [],
+      (assigned.assignments || {})[n.name] || [], repo.files || []));
   }
 }
 
-function nodeCard(n, resident) {
+function nodeCard(n, resident, assignments, repoFiles) {
   const s = n.latest;
   const seen = n.last_seen_at ? new Date(n.last_seen_at) : null;
   const ageMs = seen ? Date.now() - seen.getTime() : Infinity;
@@ -2874,7 +2880,143 @@ function nodeCard(n, resident) {
     cards,
     gauges,
     models,
+    nodeStorePanel(n, assignments || [], repoFiles || []),
   ]);
+}
+
+// A node's own library of weights, and what it has been assigned.
+//
+// The distinction the panel has to make legible is between the two, because
+// they come apart in both directions and each means something different. An
+// assignment with no file is a transfer that has not happened yet — the node
+// will fetch it on its next report. A file with no assignment is a model this
+// host keeps that nothing asked it to; dropping an assignment never deletes
+// anything, so that is the normal state after un-assigning something.
+function nodeStorePanel(n, assignments, repoFiles) {
+  const store = n.store;
+  if (!store) {
+    // Absent rather than empty: a node with no -store is a node that only
+    // reports metrics, which is a complete and ordinary configuration.
+    return assignments.length
+      ? el('div', { class: 'node-store' }, [
+          el('div', { class: 'node-store-head' }, [
+            el('span', { class: 'muted', text: 'model store' }),
+            el('span', { class: 'repo-badge missing', text: 'not configured' }),
+          ]),
+          el('p', { class: 'muted', text:
+            `${assignments.length} model${assignments.length === 1 ? '' : 's'} assigned, but this `
+            + 'agent has no -store. Restart it with -store and -runtime to have it fetch them.' }),
+        ])
+      : null;
+  }
+
+  const held = new Map();
+  for (const f of store.files || []) held.set(f.rel_path, f);
+
+  const rows = [];
+  for (const rel of assignments) {
+    const f = held.get(rel);
+    rows.push(nodeStoreRow(n, rel, f, true));
+  }
+  // Anything held but not assigned, so the disk cost is visible even when
+  // nothing currently asks for it.
+  for (const f of store.files || []) {
+    if (!assignments.includes(f.rel_path)) rows.push(nodeStoreRow(n, f.rel_path, f, false));
+  }
+
+  const facts = [
+    store.runtime ? `served by ${store.runtime}` : 'no runtime configured',
+    store.free_bytes ? `${bytes(store.free_bytes)} free` : null,
+  ].filter(Boolean).join(' · ');
+
+  return el('div', { class: 'node-store' }, [
+    el('div', { class: 'node-store-head' }, [
+      el('span', { class: 'muted', text: 'model store' }),
+      el('span', { class: 'node-store-path', text: store.path }),
+    ]),
+    el('div', { class: 'muted node-store-facts', text: facts }),
+    store.error ? el('div', { class: 'repo-job-error', text: store.error }) : null,
+    rows.length ? el('div', { class: 'node-store-rows' }, rows) : null,
+    nodeAssignControl(n, assignments, repoFiles),
+  ]);
+}
+
+function nodeStoreRow(n, rel, file, isAssigned) {
+  // Three states worth telling apart, and the middle one is the one people
+  // otherwise mistake for a failure.
+  let state = 'held';
+  let title = 'On this host and ready.';
+  if (!file) {
+    state = 'pending';
+    title = 'Assigned but not here yet. The agent fetches it on its next report.';
+  } else if (file.partial) {
+    state = 'fetching';
+    title = 'A transfer is part-way through. It resumes rather than restarting.';
+  } else if (!file.ingested) {
+    state = 'unimported';
+    title = 'The file is here, but the runtime cannot serve it yet.';
+  }
+
+  return el('div', { class: `node-store-row ${state}` }, [
+    el('span', { class: `node-store-dot ${state}`, title }),
+    el('span', { class: 'node-store-name', text: rel }),
+    el('span', { class: `repo-badge ${state}`, title, text: state }),
+    file && file.size_bytes ? el('span', { class: 'muted', text: bytes(file.size_bytes) }) : null,
+    isAssigned
+      ? el('button', {
+          class: 'link-btn', type: 'button', text: 'Unassign',
+          title: 'Stops this node being expected to hold it. Nothing is deleted from the host.',
+          onclick: () => unassignModel(n.name, rel).catch(showError),
+        })
+      : el('span', { class: 'muted', text: 'not assigned' }),
+  ]);
+}
+
+function nodeAssignControl(n, assignments, repoFiles) {
+  const available = (repoFiles || []).filter((f) => !f.missing && !assignments.includes(f.rel_path));
+  if (!available.length) {
+    return repoFiles && repoFiles.length
+      ? null
+      : el('p', { class: 'muted', text:
+          'Nothing in the model repository to assign yet — see Admin → Repository.' });
+  }
+
+  const select = el('select', { class: 'champion-select' }, [
+    el('option', { value: '', text: 'Assign a model…' }),
+    ...available.map((f) => el('option', {
+      value: f.rel_path,
+      text: `${f.name}${f.size_bytes ? ` (${bytes(f.size_bytes)})` : ''}`,
+    })),
+  ]);
+  select.addEventListener('change', (e) => {
+    if (!e.target.value) return;
+    assignModel(n.name, e.target.value).catch(showError);
+  });
+  return el('div', { class: 'node-store-assign' }, select);
+}
+
+// Assigning transfers nothing and contacts nothing. It records what the node
+// should have; the agent notices on its next report and fetches for itself,
+// which is why the toast talks about minutes rather than showing a progress bar.
+async function assignModel(node, relPath) {
+  await api(`/api/v1/nodes/${encodeURIComponent(node)}/models`, {
+    method: 'POST',
+    body: JSON.stringify({ rel_path: relPath }),
+  });
+  toast(`${relPath} assigned to ${node}. It will fetch it on its next report.`);
+  await renderAdmin();
+}
+
+async function unassignModel(node, relPath) {
+  if (!window.confirm(
+    `Stop expecting ${node} to hold ${relPath}?\n\n`
+    + 'The weights stay on that host — nothing is deleted there. Free the space on the '
+    + 'node itself if you need it back.')) return;
+  await api(`/api/v1/nodes/${encodeURIComponent(node)}/models/remove`, {
+    method: 'POST',
+    body: JSON.stringify({ rel_path: relPath }),
+  });
+  await renderAdmin();
 }
 
 // A gauge reads as a bar as well as a number, so a machine in trouble is

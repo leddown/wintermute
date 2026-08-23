@@ -31,6 +31,11 @@ func (s *Server) registerNodeRoutes(authed func(string, http.HandlerFunc)) {
 	authed("GET /api/v1/nodes/{name}/samples", s.handleNodeSamples)
 	authed("GET /api/v1/nodes/{name}/series", s.handleNodeSeries)
 	authed("DELETE /api/v1/nodes/{name}", s.handleForgetNode)
+	// Which models a node should hold. Desired state the agent reads back from
+	// its own report — the server never connects to a node to deliver it.
+	authed("GET /api/v1/nodes/assignments", s.handleNodeAssignments)
+	authed("POST /api/v1/nodes/{name}/models", s.handleAssignModel)
+	authed("POST /api/v1/nodes/{name}/models/remove", s.handleUnassignModel)
 }
 
 func (s *Server) nodesUnavailable(w http.ResponseWriter) {
@@ -85,14 +90,126 @@ func (s *Server) handleNodeReport(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "ingest node report", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"node":     client.Name,
-		"received": len(report.Samples),
+	resp := node.ReportResponse{
+		Node:     client.Name,
+		Received: len(report.Samples),
 		// Stored may be lower than received when an agent replays a batch it
 		// was unsure landed. That is the duplicate suppression working, and it
 		// is worth reporting so a resend does not look like data loss.
-		"stored": stored,
+		Stored: stored,
+	}
+	resp.Assignments = s.assignmentsFor(r, client.Name)
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// assignmentsFor builds the desired state this node reads back from its own
+// report.
+//
+// Enriched from the repository index with size and digest, so the agent can
+// check what it received without a second round trip and without being told a
+// path. An assignment naming a file the repository no longer has is dropped
+// rather than sent: an agent cannot fetch it, and offering it would produce a
+// node retrying forever against a 404.
+//
+// A failure here costs the assignments on this one report and nothing else. The
+// telemetry has already been stored, and the agent asks again in a minute.
+func (s *Server) assignmentsFor(r *http.Request, nodeName string) []node.Assignment {
+	if s.modelRepo == nil {
+		return nil
+	}
+	wanted, err := s.store.NodeModels(r.Context(), nodeName)
+	if err != nil {
+		s.log.Warn("could not read node assignments", "node", nodeName, "error", err)
+		return nil
+	}
+	if len(wanted) == 0 {
+		return nil
+	}
+	recorded, err := s.store.RepoFiles(r.Context())
+	if err != nil {
+		s.log.Warn("could not read repository index", "error", err)
+		recorded = nil
+	}
+
+	out := make([]node.Assignment, 0, len(wanted))
+	for _, rel := range wanted {
+		a := node.Assignment{RelPath: rel}
+		if rec, ok := recorded[rel]; ok {
+			a.SizeBytes, a.SHA256 = rec.SizeBytes, rec.SHA256
+		}
+		// Confirm the file is really there before promising it. A row without
+		// a file is the repository's "missing" state, and a node should not be
+		// sent chasing it.
+		if _, info, err := s.modelRepo.Open(rel); err == nil {
+			if a.SizeBytes == 0 {
+				a.SizeBytes = info.Size()
+			}
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// ---- assignments -----------------------------------------------------------
+
+type nodeModelRequest struct {
+	RelPath string `json:"rel_path"`
+}
+
+// handleAssignModel records that a node should hold a model.
+//
+// It does not transfer anything and does not contact the node. The agent
+// notices on its next report and fetches for itself, which is what keeps the
+// server out of the business of connecting to hosts.
+func (s *Server) handleAssignModel(w http.ResponseWriter, r *http.Request) {
+	var req nodeModelRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	name := r.PathValue("name")
+	if s.modelRepo != nil {
+		// Refuse an assignment the repository cannot honour, rather than
+		// leaving a node retrying against a file that was never there.
+		if _, _, err := s.modelRepo.Open(req.RelPath); err != nil {
+			writeError(w, http.StatusBadRequest,
+				fmt.Sprintf("%s is not in the model repository", req.RelPath))
+			return
+		}
+	}
+	if err := s.store.AssignModel(r.Context(), name, req.RelPath); err != nil {
+		s.fail(w, "assign model", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"node": name, "assigned": store.RepoKey(req.RelPath)})
+}
+
+func (s *Server) handleUnassignModel(w http.ResponseWriter, r *http.Request) {
+	var req nodeModelRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	name := r.PathValue("name")
+	if err := s.store.UnassignModel(r.Context(), name, req.RelPath); err != nil {
+		s.fail(w, "unassign model", err)
+		return
+	}
+	// Said plainly, because it is the thing most likely to be misunderstood:
+	// dropping an assignment frees nothing on the node.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"node": name, "unassigned": store.RepoKey(req.RelPath),
+		"note": "the weights stay on the node; nothing was deleted there",
 	})
+}
+
+// handleNodeAssignments lists every node's assignments, so the fleet screen can
+// draw the whole picture in one request.
+func (s *Server) handleNodeAssignments(w http.ResponseWriter, r *http.Request) {
+	all, err := s.store.AllNodeModels(r.Context())
+	if err != nil {
+		s.fail(w, "list assignments", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"assignments": all})
 }
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {

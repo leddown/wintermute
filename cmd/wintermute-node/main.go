@@ -2,12 +2,19 @@
 // server.
 //
 // It collects from /proc, batches readings, and pushes them on an interval. It
-// listens on nothing, opens no ports, and cannot be told to run anything: it
-// sends and that is all. A fleet of agents that execute commands is a fleet of
-// remote shells reachable by whatever can reach the server, and the thing
-// actually wanted from a remote box here — loading and unloading models — is
-// already done through the inference backend's own API without touching the
+// listens on nothing and opens no ports. Loading and unloading models is done
+// by the server through the inference backend's own API, without touching the
 // host at all.
+//
+// With -store it also keeps a local library of model weights, so switching a
+// model on this host is a local file read rather than a download. That is the
+// one thing it does besides report, and it is shaped to stay inside the same
+// rule: the server never connects here and never sends a command. It records
+// which models this node *should* hold, and the agent reads that desired state
+// from the reply to its own report. An assignment is a name and a digest —
+// there is no field in which a path, a command or an argument could arrive, so
+// the worst a compromised server can do is make this node download a file it
+// already had permission to download.
 //
 // Install it on each machine with a token issued by:
 //
@@ -16,6 +23,10 @@
 // then run:
 //
 //	wintermute-node -server https://wintermute.lan:8080 -token wm_…
+//
+// and, on a host that serves models:
+//
+//	wintermute-node … -store /var/lib/wintermute/models -runtime ollama
 package main
 
 import (
@@ -25,17 +36,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"wintermute/internal/hostmetrics"
 	"wintermute/internal/node"
+	"wintermute/internal/nodestore"
 )
 
 // version identifies the agent to the server, so a fleet part-way through an
@@ -57,6 +71,19 @@ func run() error {
 		push     = flag.Duration("push", envDuration("WINTERMUTE_NODE_PUSH", time.Minute), "how often to send what has been collected")
 		spool    = flag.String("spool", envOr("WINTERMUTE_NODE_SPOOL", defaultSpool()), "file holding readings not yet delivered")
 		once     = flag.Bool("once", false, "take one reading, send it, and exit — for checking the setup")
+
+		storeDir = flag.String("store", envOr("WINTERMUTE_NODE_STORE", ""),
+			"directory holding this host's model weights; empty means this node only reports metrics")
+		runtimeName = flag.String("runtime", envOr("WINTERMUTE_NODE_RUNTIME", ""),
+			"what serves models here: llamacpp, ollama, or empty to keep the files and wire them up by hand")
+		ollamaURL = flag.String("ollama-url", envOr("WINTERMUTE_NODE_OLLAMA_URL", "http://127.0.0.1:11434"),
+			"local Ollama to import weights into, with -runtime ollama")
+		swapConfig = flag.String("llama-swap-config", envOr("WINTERMUTE_NODE_LLAMA_SWAP_CONFIG", ""),
+			"llama-swap config this agent owns and rewrites, with -runtime llamacpp")
+		serverBin = flag.String("llama-server", envOr("WINTERMUTE_NODE_LLAMA_SERVER", "llama-server"),
+			"llama-server binary named in the generated config")
+		serverArgs = flag.String("llama-server-args", envOr("WINTERMUTE_NODE_LLAMA_SERVER_ARGS", ""),
+			"extra flags appended to every generated llama-server command, e.g. \"--n-gpu-layers 99\"")
 	)
 	flag.Parse()
 
@@ -76,6 +103,22 @@ func run() error {
 		client:   &http.Client{Timeout: 30 * time.Second},
 		facts:    collectFacts(),
 		interval: *interval,
+	}
+
+	if strings.TrimSpace(*storeDir) != "" {
+		st, err := buildStore(*storeDir, *runtimeName, *ollamaURL, *swapConfig, *serverBin, *serverArgs)
+		if err != nil {
+			return err
+		}
+		agent.store = st
+		agent.fetcher = nodestore.NewFetcher(st, agent.server, agent.token)
+		agent.fetcher.Progress = func(rel string, done, total int64) {
+			if total > 0 {
+				fmt.Printf("fetching %s: %d%%\n", rel, done*100/total)
+				return
+			}
+			fmt.Printf("fetching %s: %d bytes\n", rel, done)
+		}
 	}
 
 	if *once {
@@ -110,8 +153,20 @@ type agent struct {
 	facts    node.Facts
 	interval time.Duration
 
+	// store and fetcher are nil on a node that only reports metrics, which is
+	// the default and remains a complete configuration.
+	store   *nodestore.Store
+	fetcher *nodestore.Fetcher
+
 	prev    *hostmetrics.Counters
 	pending []node.Sample
+
+	// reconciling guards against a slow fetch overlapping the next one. A model
+	// takes minutes to hours to arrive and reports carry on every minute
+	// throughout, so without this a single assignment would start a new
+	// transfer on every push.
+	reconciling bool
+	mu          sync.Mutex
 }
 
 // maxPending bounds what is held in memory and on disk while the server is
@@ -226,12 +281,22 @@ func (a *agent) collect() (node.Sample, error) {
 
 // send delivers a batch. The server identifies the node from the token, so the
 // report carries no name to be trusted.
+//
+// The reply carries this node's assignments, which is the only channel by which
+// the server influences what happens here — and it says what this node should
+// have, never what it should do.
 func (a *agent) send(ctx context.Context, samples []node.Sample) error {
-	body, err := json.Marshal(node.Report{
+	report := node.Report{
 		FormatVersion: node.ReportFormatVersion,
 		Facts:         a.facts,
 		Samples:       samples,
-	})
+	}
+	if a.store != nil {
+		scan := a.store.Scan()
+		report.Store = &scan
+	}
+
+	body, err := json.Marshal(report)
 	if err != nil {
 		return err
 	}
@@ -252,7 +317,98 @@ func (a *agent) send(ctx context.Context, samples []node.Sample) error {
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned %s", resp.Status)
 	}
+
+	var reply node.ReportResponse
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&reply); err != nil {
+		// The telemetry landed, which is what this call was for. A reply that
+		// will not parse costs this round's assignments and nothing else.
+		return nil
+	}
+	a.reconcile(ctx, reply.Assignments)
 	return nil
+}
+
+// reconcile fetches whatever this node has been assigned and does not hold.
+//
+// It runs in the background and returns immediately, because a model is
+// gigabytes: blocking the report loop on a transfer would stop the telemetry
+// for the hour it takes, and the fleet view would show the node as missing at
+// exactly the moment it is doing the most work.
+func (a *agent) reconcile(ctx context.Context, assignments []node.Assignment) {
+	if a.store == nil || a.fetcher == nil || len(assignments) == 0 {
+		return
+	}
+
+	a.mu.Lock()
+	if a.reconciling {
+		// A transfer is still running from a previous report. Reports carry on
+		// every minute throughout, and starting again on each one would run a
+		// dozen overlapping downloads of the same file.
+		a.mu.Unlock()
+		return
+	}
+	missing := a.store.Missing(assignments)
+	if len(missing) == 0 {
+		a.mu.Unlock()
+		return
+	}
+	a.reconciling = true
+	a.mu.Unlock()
+
+	go func() {
+		defer func() {
+			a.mu.Lock()
+			a.reconciling = false
+			a.mu.Unlock()
+		}()
+		for _, want := range missing {
+			if ctx.Err() != nil {
+				return
+			}
+			fmt.Printf("fetching %s from %s\n", want.RelPath, a.server)
+			if err := a.fetcher.Fetch(ctx, want); err != nil {
+				// Logged and moved on. The assignment is still standing, so the
+				// next report tries again — which is what makes a flaky link
+				// eventually succeed rather than needing an operator.
+				fmt.Fprintf(os.Stderr, "fetch %s failed: %v\n", want.RelPath, err)
+				continue
+			}
+			fmt.Printf("%s is ready\n", want.RelPath)
+		}
+	}()
+}
+
+// buildStore assembles the model store and whatever ingests into this host's
+// runtime.
+func buildStore(dir, runtimeName, ollamaURL, swapConfig, serverBin, serverArgs string) (*nodestore.Store, error) {
+	rt := nodestore.Runtime(strings.TrimSpace(runtimeName))
+	if !rt.Valid() {
+		return nil, fmt.Errorf("unknown -runtime %q: expected llamacpp, ollama, or empty", runtimeName)
+	}
+
+	var ingester nodestore.Ingester
+	switch rt {
+	case nodestore.RuntimeOllama:
+		ingester = nodestore.NewOllamaIngester(ollamaURL)
+	case nodestore.RuntimeLlamaCPP:
+		ingester = nodestore.NewLlamaCPPIngester(swapConfig, serverBin, strings.Fields(serverArgs))
+	}
+
+	store, err := nodestore.New(dir, rt, ingester)
+	if err != nil {
+		return nil, err
+	}
+	if ingester != nil {
+		fmt.Printf("model store %s, served by %s\n", store.Root(), ingester.Describe())
+	} else {
+		fmt.Printf("model store %s; nothing is configured to serve from it\n", store.Root())
+	}
+	if rt == nodestore.RuntimeOllama {
+		// Said once, at startup, rather than discovered later from a full disk.
+		fmt.Println("note: Ollama imports weights into its own blob store, " +
+			"so each model occupies disk twice — once here and once in Ollama")
+	}
+	return store, nil
 }
 
 // The spool is what makes an outage survivable across a restart. It is written

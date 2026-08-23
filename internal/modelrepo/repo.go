@@ -422,6 +422,37 @@ func (r *Repo) entry(key, name string, size int64, rec store.RepoFile, tags []st
 	return e
 }
 
+// Open resolves one repository file for reading, confined to the root.
+//
+// Used to serve weights to fleet nodes, which is the one path where a path from
+// off this machine reaches the repository — so it goes through the same
+// safeJoin as everything else, and refuses anything that is not weights. A
+// missing marker is deliberately *not* required here: reading is not writing,
+// and refusing to serve a file that is plainly present because the marker was
+// deleted would be pedantry at the expense of a node waiting on a download.
+func (r *Repo) Open(relPath string) (path string, info os.FileInfo, err error) {
+	root, err := r.resolve()
+	if err != nil {
+		return "", nil, err
+	}
+	abs, err := r.safeJoin(root, relPath)
+	if err != nil {
+		return "", nil, err
+	}
+	if !strings.HasSuffix(strings.ToLower(abs), weightSuffix) {
+		return "", nil, fmt.Errorf("%w: only %s files are served from the repository",
+			ErrInvalidRequest, weightSuffix)
+	}
+	info, err = os.Stat(abs)
+	if err != nil {
+		return "", nil, fmt.Errorf("%w: %s is not in the repository", ErrInvalidRequest, relPath)
+	}
+	if info.IsDir() {
+		return "", nil, fmt.Errorf("%w: %s is a directory", ErrInvalidRequest, relPath)
+	}
+	return abs, info, nil
+}
+
 // Delete removes one file from the repository and forgets what was recorded
 // about it.
 //

@@ -12,6 +12,8 @@ package api
 import (
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"wintermute/internal/modelrepo"
@@ -35,6 +37,10 @@ func (s *Server) registerModelRepoRoutes(authed func(string, http.HandlerFunc)) 
 	authed("GET /api/v1/repo/jobs", s.handleRepoJobs)
 	authed("POST /api/v1/repo/jobs/{id}/cancel", s.handleRepoCancel)
 	authed("POST /api/v1/repo/delete", s.handleRepoDelete)
+	// Serving weights to fleet nodes. A GET, cacheable and resumable, because
+	// the thing on the other end is an agent fetching gigabytes over a home
+	// network — see handleRepoFile.
+	authed("GET /api/v1/repo/file/{path...}", s.handleRepoFile)
 	authed("POST /api/v1/repo/tags", s.handleRepoAddTag)
 	authed("POST /api/v1/repo/tags/remove", s.handleRepoRemoveTag)
 }
@@ -135,6 +141,38 @@ func (s *Server) handleRepoDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": store.RepoKey(req.RelPath)})
+}
+
+// handleRepoFile streams one set of weights to a fleet node.
+//
+// http.ServeContent rather than io.Copy, for one reason that matters: it
+// implements Range. A node fetching twelve gigabytes over a domestic network
+// will be interrupted, and its agent resumes with a Range request exactly as
+// this server's own downloader does against Hugging Face. Serving the whole
+// file from zero on every attempt would make a flaky link into a model that
+// never arrives.
+//
+// It is a plain authenticated GET. Any client with a token may read the
+// repository, which is the same reach the Repository screen already has; the
+// node-only check that guards reporting is about *writing* telemetry
+// attributed to a machine, and does not apply to reading a file.
+func (s *Server) handleRepoFile(w http.ResponseWriter, r *http.Request) {
+	path, info, err := s.modelRepo.Open(r.PathValue("path"))
+	if err != nil {
+		s.failRepo(w, "open repository file", err)
+		return
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		s.fail(w, "open repository file", err)
+		return
+	}
+	defer func() { _ = f.Close() }()
+
+	// Named as the operator's repository names it, so a file fetched by hand
+	// with curl -O lands with a sensible name.
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
 }
 
 type repoTagRequest struct {

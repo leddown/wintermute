@@ -1,0 +1,16 @@
+-- What each node is holding on its own disk.
+--
+-- Stored as JSON on the node row, beside the GPU list, and for the same
+-- reasons: it is read whole, written whole, replaced entirely by every report,
+-- and has no queryable structure worth a second table. A homelab node holds a
+-- handful of models, not a catalogue.
+--
+-- This is *reported* state — what the agent found when it walked its store
+-- directory. The desired state, which models a node ought to be holding, lives
+-- in the main database instead. The split matters: this file is documented as
+-- something that can be pruned hard or deleted outright without losing anything
+-- that matters, and an operator's decision about which machine should hold
+-- which weights is emphatically something that matters. Losing this column
+-- costs one report interval; losing the assignments would cost the fleet's
+-- configuration.
+ALTER TABLE nodes ADD COLUMN store TEXT NOT NULL DEFAULT '';
