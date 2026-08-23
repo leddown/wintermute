@@ -25,6 +25,7 @@ import (
 	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
 	"wintermute/internal/lookup"
+	"wintermute/internal/modelrepo"
 	"wintermute/internal/models"
 	"wintermute/internal/node"
 	"wintermute/internal/recall"
@@ -382,10 +383,23 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	// file and the diagnostics measure the disk holding it.
 	utilitiesService := utilities.NewService(st.DB(), cfg.DatabasePath)
 
+	// The model repository, on whatever disk the operator pointed it at. Built
+	// unconditionally: an unset path is a repository that reports itself as not
+	// configured, which is a better answer for the UI than a nil that has to be
+	// checked everywhere.
+	repo := modelrepo.New(cfg.ModelRepoPath, cfg.HuggingFaceToken, st, log)
+	if cfg.ModelRepoPath != "" {
+		status := repo.Status(context.Background())
+		log.Info("model repository configured",
+			"path", cfg.ModelRepoPath,
+			"available", status.Available, "initialised", status.Initialised)
+	}
+
 	srv := api.New(ag, st, tools, catalog, workspace, info, log).
 		WithKnowledge(knowledgeService, grcClient != nil, webClient != nil).
 		WithTwire(twireService).
 		WithUtilities(utilitiesService).
+		WithModelRepo(repo).
 		WithMemory(recallStore, indexer).
 		WithNodes(nodeStore, cfg.NodeRawRetention).
 		WithBackendAdmin(func(ctx context.Context) error {

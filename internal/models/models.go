@@ -3,11 +3,17 @@
 // actually run, and which model suits a given job.
 //
 // The server deliberately does not manage inference. It does not spawn
-// llama-server, it does not download weights, and it does not load or unload
-// models. Those are privileged local operations, and the whole point of this
-// codebase's split is that the server never performs them — llama-swap or
+// llama-server and it does not decide what a backend is serving; llama-swap or
 // Ollama own that lifecycle. What lives here is observation, estimation and
 // recommendation, all of which are safe to do from a network service.
+//
+// Two things have since been added that this paragraph used to rule out, and
+// both are narrower than they sound. Loading and unloading a model on an Ollama
+// backend (control.go) is done through that backend's own HTTP API, which needs
+// no access to the host at all. Downloading weights (internal/modelrepo) writes
+// files into one operator-configured directory and never runs them. Neither
+// gives the server the ability to execute anything on a machine it does not
+// already own, which is the property the split exists to protect.
 package models
 
 import (
@@ -220,4 +226,16 @@ func parseFloat(s string) float64 {
 		frac /= 10
 	}
 	return whole + frac
+}
+
+// Describe infers what it can about a model from a filename or tag alone.
+//
+// Exported for the model repository, which has files on a disk and no backend
+// to ask about them. Both halves are heuristics on a human-chosen string, so a
+// caller with an authoritative figure — the Hub's parsed GGUF header, say —
+// should prefer that and use this only as the fallback for a file somebody
+// copied in by hand. A zero parameter count means "could not tell", never
+// "small".
+func Describe(name string) (paramsB float64, quant string) {
+	return inferParams(name), inferQuant(name)
 }

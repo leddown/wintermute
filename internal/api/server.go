@@ -16,6 +16,7 @@ import (
 	"wintermute/internal/agent"
 	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
+	"wintermute/internal/modelrepo"
 	"wintermute/internal/models"
 	"wintermute/internal/node"
 	"wintermute/internal/recall"
@@ -54,6 +55,10 @@ type Server struct {
 	memory *recall.Store
 	// nodes is the fleet telemetry store. Nil when it is not enabled.
 	nodes *node.Store
+	// modelRepo is the library of weights on the operator's own disk. Nil
+	// leaves its routes unregistered, the same way an absent CRM does — the
+	// server simply has no repository rather than having an empty one.
+	modelRepo *modelrepo.Repo
 	// rawWindow is how long full-resolution samples survive, which is what
 	// decides whether a requested span can be answered from them.
 	rawWindow time.Duration
@@ -93,6 +98,14 @@ func (s *Server) WithKnowledge(svc *knowledge.Service, grcAvailable, webAvailabl
 // registered and the UI's twire view reports the module as unavailable.
 func (s *Server) WithTwire(svc *twire.Service) *Server {
 	s.twire = svc
+	return s
+}
+
+// WithModelRepo attaches the model repository. Without it the repository
+// routes are not registered and the UI's Repository tab reports the feature as
+// not configured.
+func (s *Server) WithModelRepo(repo *modelrepo.Repo) *Server {
+	s.modelRepo = repo
 	return s
 }
 
@@ -181,6 +194,9 @@ func (s *Server) Handler() http.Handler {
 
 	// Backups, diagnostics and maintenance — see utilities.go.
 	s.registerUtilitiesRoutes(authed)
+
+	// Weights the operator keeps on their own disk — see modelrepo.go.
+	s.registerModelRepoRoutes(authed)
 
 	mux.Handle("/", web.Handler())
 

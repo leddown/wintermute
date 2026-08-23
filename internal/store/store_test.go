@@ -853,3 +853,115 @@ func TestModelPerformanceOnAnEmptyTable(t *testing.T) {
 		t.Errorf("got %d rows from an empty table", len(perf))
 	}
 }
+
+// The repository index is provenance, not truth about existence — but what it
+// does record must survive a re-download and normalise paths consistently.
+func TestRepoFilesAndTags(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+
+	first := RepoFile{
+		RelPath: "Qwen/Qwen3-8B-GGUF/model.gguf", HubID: "Qwen/Qwen3-8B-GGUF",
+		Quant: "Q4_K_M", ParamsB: 8, SizeBytes: 100, SHA256: "abc",
+	}
+	if err := st.RecordRepoFile(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	files, err := st.RepoFiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	added := files[first.RelPath].AddedAt
+	if added.IsZero() {
+		t.Fatal("AddedAt should have been set")
+	}
+
+	// Re-downloading a corrupted file is the same acquisition arriving again,
+	// so the date it was first chosen must not be reset.
+	time.Sleep(10 * time.Millisecond)
+	second := first
+	second.SizeBytes = 200
+	second.AddedAt = added
+	if err := st.RecordRepoFile(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	files, err = st.RepoFiles(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := files[first.RelPath]
+	if got.SizeBytes != 200 {
+		t.Errorf("size = %d, want the updated 200", got.SizeBytes)
+	}
+	if !got.AddedAt.Equal(added) {
+		t.Errorf("AddedAt moved from %v to %v on re-download", added, got.AddedAt)
+	}
+	if len(files) != 1 {
+		t.Errorf("re-recording should update one row, got %d", len(files))
+	}
+
+	// Paths normalise, so the same file named two ways is one row.
+	if err := st.RecordRepoFile(ctx, RepoFile{RelPath: "/Qwen/Qwen3-8B-GGUF/model.gguf"}); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := st.RepoFiles(ctx); len(files) != 1 {
+		t.Errorf("a leading slash should not make a second row, got %d", len(files))
+	}
+
+	// Case is preserved: on Linux two paths differing in case are two files.
+	if err := st.RecordRepoFile(ctx, RepoFile{RelPath: "qwen/qwen3-8b-gguf/model.gguf"}); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := st.RepoFiles(ctx); len(files) != 2 {
+		t.Errorf("case-differing paths are different files, got %d rows", len(files))
+	}
+
+	if err := st.ForgetRepoFile(ctx, first.RelPath); err != nil {
+		t.Fatal(err)
+	}
+	if files, _ := st.RepoFiles(ctx); len(files) != 1 {
+		t.Errorf("after forgetting one row, want 1 left")
+	}
+}
+
+func TestTagsNormaliseAndDeduplicate(t *testing.T) {
+	st := newTestStore(t)
+	ctx := context.Background()
+	const subject = "Qwen/Qwen3-8B-GGUF/model.gguf"
+
+	// "Coding" and "coding" are one label a person typed twice.
+	for _, tag := range []string{"coding", "Coding", "  CODING  ", "long context"} {
+		if err := st.AddTag(ctx, subject, tag); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tags, err := st.Tags(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"coding", "long-context"}
+	if len(tags[subject]) != len(want) {
+		t.Fatalf("tags = %v, want %v", tags[subject], want)
+	}
+	for i, w := range want {
+		if tags[subject][i] != w {
+			t.Errorf("tags[%d] = %q, want %q", i, tags[subject][i], w)
+		}
+	}
+
+	// Removing uses the same normalisation, so the label as typed comes off.
+	if err := st.RemoveTag(ctx, subject, "Long Context"); err != nil {
+		t.Fatal(err)
+	}
+	tags, _ = st.Tags(ctx)
+	if len(tags[subject]) != 1 || tags[subject][0] != "coding" {
+		t.Errorf("after removal tags = %v", tags[subject])
+	}
+
+	if err := st.AddTag(ctx, subject, "   "); err == nil {
+		t.Error("an empty tag must be refused")
+	}
+	if err := st.AddTag(ctx, "", "coding"); err == nil {
+		t.Error("a tag with no subject must be refused")
+	}
+}

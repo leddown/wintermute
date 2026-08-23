@@ -168,6 +168,18 @@ type Config struct {
 	// the operator's backups. The newest is never removed regardless.
 	BackupKeep int
 
+	// ModelRepoPath is the directory holding model weights the operator keeps
+	// — in practice an external drive attached to the server. Empty disables
+	// the repository entirely, and the UI says so rather than showing an
+	// empty library.
+	//
+	// It is not required to exist at startup. A USB drive can be unplugged,
+	// fail to mount after a reboot, or be attached later, and a server that
+	// refused to start over any of those would be down for a reason having
+	// nothing to do with the conversations it exists to hold. Availability is
+	// therefore resolved per request — see internal/modelrepo.
+	ModelRepoPath string
+
 	// Memory. The embedding model is configured separately from the chat
 	// models and is not one of them: the chat model changes constantly and
 	// costs nothing to change, while the embedder defines the space every
@@ -368,6 +380,8 @@ func Load() (*Config, error) {
 		BackupInterval: backupInterval,
 		BackupKeep:     backupKeep,
 
+		ModelRepoPath: strings.TrimSpace(os.Getenv("WINTERMUTE_MODEL_REPO")),
+
 		EmbedURL:              strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_URL")),
 		EmbedModel:            strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_MODEL")),
 		EmbedAPIKey:           strings.TrimSpace(os.Getenv("WINTERMUTE_EMBED_API_KEY")),
@@ -400,6 +414,12 @@ func Load() (*Config, error) {
 	}
 	if cfg.BackupInterval > 0 && cfg.BackupDir == "" {
 		return nil, errors.New("WINTERMUTE_BACKUP_INTERVAL is set but WINTERMUTE_BACKUP_DIR is not")
+	}
+	// Absolute for the same reason the backup directory is, and one more: the
+	// repository is written to relative to the process's working directory
+	// otherwise, which for a service is wherever systemd happened to start it.
+	if cfg.ModelRepoPath != "" && !filepath.IsAbs(cfg.ModelRepoPath) {
+		return nil, errors.New("WINTERMUTE_MODEL_REPO must be an absolute path")
 	}
 	// Half a memory configuration is worse than none: an embedder URL with no
 	// model name would pin the index to an empty name.

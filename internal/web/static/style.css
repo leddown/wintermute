@@ -1177,3 +1177,126 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
 .view[data-view="utilities"] .pane-body > .meter {
   max-width: 60rem;
 }
+
+/* ---------- the model repository ----------
+   Weights on a disk this server owns. The screen has to answer two questions
+   at a glance that the Models tab never asks: is the drive actually there, and
+   how much room is left on it. Both are stated at the top, because every other
+   control on the page is meaningless if the answer to the first is no. */
+
+.repo-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.repo-root {
+  font-family: ui-monospace, "Courier New", monospace; font-weight: 600;
+  word-break: break-all;
+}
+.repo-state { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); }
+.repo-state.ready { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
+.repo-state.unclaimed { border-color: var(--accent); color: var(--accent); }
+.repo-state.unavailable { border-color: var(--error); color: var(--error); }
+
+.repo-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.repo-dot.ready { background: var(--gain, #3fb950); }
+.repo-dot.unclaimed { background: var(--accent); }
+.repo-dot.unavailable { background: var(--error); }
+
+.repo-detail { margin: 6px 0 10px; }
+.repo-disk { margin: 10px 0 18px; }
+.repo-disk-facts { font-size: 12px; margin-top: 5px; font-variant-numeric: tabular-nums; }
+
+/* One bar serves the disk gauge and every download's progress. */
+.repo-bar {
+  height: 6px; border-radius: 999px; background: var(--surface-2);
+  border: 1px solid var(--border); overflow: hidden;
+}
+.repo-bar-fill { height: 100%; background: var(--accent); transition: width 0.4s ease; }
+.repo-bar-fill.tight { background: var(--error); }
+.repo-bar-fill.done { background: var(--gain, #3fb950); }
+.repo-bar-fill.failed { background: var(--error); }
+.repo-bar-fill.cancelled { background: var(--muted); }
+/* Before the server has said how big the file is, a bar sitting at 0% would be
+   a claim about progress nobody has made. It sweeps instead. */
+.repo-bar-fill.indeterminate {
+  background: linear-gradient(90deg, var(--surface-2) 0%, var(--accent) 50%, var(--surface-2) 100%);
+  background-size: 200% 100%;
+  animation: repo-sweep 1.4s linear infinite;
+}
+@keyframes repo-sweep {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .repo-bar-fill.indeterminate { animation: none; }
+  .repo-bar-fill { transition: none; }
+}
+
+.repo-h { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin: 22px 0 10px; font-weight: 600; }
+
+.repo-job, .repo-result, .repo-file {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 10px;
+  display: flex; flex-direction: column; gap: 7px;
+}
+.repo-job.failed { border-color: var(--error); }
+.repo-job-head, .repo-result-head, .repo-file-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.repo-job-name, .repo-result-id, .repo-file-name {
+  font-family: ui-monospace, "Courier New", monospace; font-weight: 600;
+  word-break: break-all;
+}
+.repo-job-state { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); }
+.repo-job-state.done { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
+.repo-job-state.failed { border-color: var(--error); color: var(--error); }
+.repo-job-facts, .repo-job-src, .repo-file-facts, .repo-file-src, .repo-file-path {
+  font-size: 12px; font-variant-numeric: tabular-nums;
+}
+.repo-file-path { font-family: ui-monospace, "Courier New", monospace;
+  font-size: 11px; opacity: 0.7; word-break: break-all; }
+.repo-job-error { font-size: 12px; color: var(--error); }
+
+.repo-search-form { display: flex; gap: 8px; margin-bottom: 12px; }
+.repo-query { flex: 1; min-width: 0; }
+
+.repo-quants { display: flex; flex-direction: column; gap: 6px; }
+.repo-quant {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 6px 0; border-top: 1px solid var(--border);
+}
+.repo-quant-name { font-family: ui-monospace, "Courier New", monospace; min-width: 90px; }
+
+/* The fit verdict is why a list of eight near-identical filenames is readable
+   at all: it says which one will actually run on this hardware. */
+.repo-fit { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted); }
+.repo-fit.fits { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
+/* Tight and partial both run; they are warnings, not refusals, and colouring
+   them like a failure would send the operator past a model that works. */
+.repo-fit.tight, .repo-fit.partial { border-color: var(--accent); color: var(--accent); }
+.repo-fit.no { border-color: var(--error); color: var(--error); }
+/* "unknown" means the hardware was never measured, which is a statement about
+   this server rather than about the model. It stays muted. */
+.repo-fit.unknown { border-color: var(--border); color: var(--muted); }
+
+.repo-file.missing { border-style: dashed; opacity: 0.75; }
+.repo-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); }
+.repo-badge.verified { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
+.repo-badge.missing { border-color: var(--error); color: var(--error); }
+
+.repo-tags { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.repo-tag {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; padding: 2px 4px 2px 9px; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+.repo-tag-x {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 14px; line-height: 1; padding: 0 4px;
+}
+.repo-tag-x:hover { color: var(--error); }
+.repo-tag-add {
+  font-size: 11px; padding: 3px 9px; border-radius: 999px; min-width: 90px;
+  background: transparent; border: 1px dashed var(--border); color: var(--text);
+}
+.repo-file-actions { display: flex; gap: 12px; }

@@ -2742,7 +2742,8 @@ async function renderAdmin() {
   const titles = {
     status: 'Status', config: 'Configuration', backends: 'Backends',
     hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
-    models: 'Models', fleet: 'Fleet', memory: 'Memory', appearance: 'Appearance',
+    models: 'Models', repo: 'Repository', fleet: 'Fleet', memory: 'Memory',
+    appearance: 'Appearance',
   };
   $('admin-title').textContent = titles[admin.tab];
   body.innerHTML = '';
@@ -2753,6 +2754,7 @@ async function renderAdmin() {
   if (admin.tab === 'hardware') return renderAdminHardware(body);
   if (admin.tab === 'tools') return renderAdminTools(body);
   if (admin.tab === 'models') return renderAdminModels(body);
+  if (admin.tab === 'repo') return renderAdminRepo(body);
   if (admin.tab === 'fleet') return renderAdminFleet(body);
   if (admin.tab === 'memory') return renderAdminMemory(body);
   // Purely local, unlike every other tab here: it reads and writes
@@ -3135,6 +3137,476 @@ async function setChampion(task, modelID) {
     body: JSON.stringify({ task, model_id: modelID }),
   });
   await renderAdmin();
+}
+
+
+/* ---------- the model repository ----------
+   Weights the operator keeps on a disk this server owns, as opposed to
+   whatever a backend happens to be serving. The two are deliberately separate
+   screens: the Models tab answers "what can I run right now", this one answers
+   "what do I have, and what is it costing me in disk".
+
+   The page holds three things that must not be thrown away by a refresh — the
+   search box, its results, and the expanded repository detail — so the poll
+   that follows a running download updates the jobs panel alone and leaves the
+   rest of the DOM standing. Re-rendering everything every second would clear
+   the search field under the operator's fingers. */
+
+const repoView = { query: '', results: null, detail: null, timer: null, busy: false };
+
+async function renderAdminRepo(body) {
+  stopRepoPolling();
+  const data = await api('/api/v1/repo');
+  const status = data.status || {};
+
+  const statusEl = el('div', { class: 'repo-status' });
+  const jobsEl = el('div', { class: 'repo-jobs' });
+  const searchEl = el('div', { class: 'repo-search' });
+  const filesEl = el('div', { class: 'repo-files' });
+
+  body.append(statusEl, jobsEl, searchEl, filesEl);
+  paintRepoStatus(statusEl, status);
+
+  if (!status.configured) {
+    statusEl.append(el('p', { class: 'muted', text:
+      'Set WINTERMUTE_MODEL_REPO to an absolute path — the mount point of the drive you '
+      + 'want to keep weights on — and restart the server.' }));
+    return;
+  }
+  if (!status.available) return;
+
+  if (!status.initialised) {
+    // The marker is what tells a mounted drive from an empty mount point, so
+    // it is created by a deliberate press rather than on first use. Getting
+    // this wrong fills the server's own root filesystem with model weights.
+    statusEl.append(el('button', {
+      class: 'ghost-btn', type: 'button', text: 'Initialise this directory',
+      onclick: () => initRepo().catch(showError),
+    }));
+    return;
+  }
+
+  paintRepoJobs(jobsEl, data.jobs || []);
+  paintRepoSearch(searchEl);
+  paintRepoFiles(filesEl, data.files || [], data.tags || []);
+  if ((data.jobs || []).some((j) => j.state === 'running')) startRepoPolling();
+}
+
+function paintRepoStatus(host, status) {
+  host.innerHTML = '';
+  if (!status.configured) {
+    host.append(el('p', { class: 'muted', text: 'No model repository is configured.' }));
+    return;
+  }
+
+  const state = !status.available ? 'unavailable' : (status.initialised ? 'ready' : 'unclaimed');
+  const label = {
+    unavailable: 'not available',
+    unclaimed: 'not initialised',
+    ready: 'ready',
+  }[state];
+
+  host.append(el('div', { class: 'repo-head' }, [
+    el('span', { class: `repo-dot ${state}` }),
+    el('span', { class: 'repo-root', text: status.root || '—' }),
+    el('span', { class: `repo-state ${state}`, text: label }),
+  ]));
+
+  if (status.detail) host.append(el('p', { class: 'muted repo-detail', text: status.detail }));
+  if (!status.available) return;
+
+  // Two figures, and they answer different questions. How full the drive is
+  // decides whether the next download fits; what the weights occupy decides
+  // what deleting one would win back.
+  if (status.total_bytes) {
+    const used = status.total_bytes - status.free_bytes;
+    const pct = Math.min(100, Math.round((used / status.total_bytes) * 100));
+    host.append(el('div', { class: 'repo-disk' }, [
+      el('div', { class: 'repo-bar' }, [
+        el('div', { class: `repo-bar-fill ${pct > 90 ? 'tight' : ''}`, style: `width:${pct}%` }),
+      ]),
+      el('div', { class: 'repo-disk-facts muted', text:
+        `${bytes(status.free_bytes)} free of ${bytes(status.total_bytes)} · `
+        + `${status.file_count} model${status.file_count === 1 ? '' : 's'} `
+        + `using ${bytes(status.used_by_repo_bytes)}` }),
+    ]));
+  }
+}
+
+async function initRepo() {
+  await api('/api/v1/repo/init', { method: 'POST' });
+  toast('Repository initialised.');
+  await renderAdmin();
+}
+
+/* ---- downloads in flight ---- */
+
+function paintRepoJobs(host, jobs) {
+  host.innerHTML = '';
+  if (!jobs.length) return;
+
+  host.append(el('h3', { class: 'repo-h', text: 'Downloads' }));
+  for (const j of jobs) host.append(repoJobCard(j));
+}
+
+function repoJobCard(j) {
+  const running = j.state === 'running';
+  const pct = j.total_bytes ? Math.min(100, (j.done_bytes / j.total_bytes) * 100) : 0;
+
+  // A transfer that is quietly retrying looks exactly like a slow one, and
+  // hashing 12GB back off a USB disk looks exactly like a hang. Both get said
+  // out loud rather than left to be inferred from a stalled bar.
+  const detail = [];
+  if (running && j.phase === 'verifying') detail.push('checking the digest');
+  else if (running && j.attempt > 1) detail.push(`retry ${j.attempt}`);
+  if (j.total_bytes) detail.push(`${bytes(j.done_bytes)} of ${bytes(j.total_bytes)}`);
+  else if (j.done_bytes) detail.push(bytes(j.done_bytes));
+  if (running && j.bytes_per_second) detail.push(`${bytes(j.bytes_per_second)}/s`);
+  if (j.resumed_bytes) detail.push(`resumed from ${bytes(j.resumed_bytes)}`);
+
+  return el('div', { class: `repo-job ${j.state}` }, [
+    el('div', { class: 'repo-job-head' }, [
+      el('span', { class: 'repo-job-name', text: j.filename }),
+      el('span', { class: `repo-job-state ${j.state}`, text: j.state }),
+      running ? el('button', {
+        class: 'link-btn', type: 'button', text: 'Cancel',
+        title: 'Stops the transfer. What has arrived is kept, so starting it again resumes.',
+        onclick: () => cancelRepoJob(j.id).catch(showError),
+      }) : null,
+    ]),
+    el('div', { class: 'repo-bar' }, [
+      el('div', {
+        // With no total the server has not said how big the file is yet, so
+        // the bar admits it rather than sitting at a fictitious 0%.
+        class: `repo-bar-fill ${running && !j.total_bytes ? 'indeterminate' : ''} ${j.state}`,
+        style: `width:${j.total_bytes ? pct : 100}%`,
+      }),
+    ]),
+    el('div', { class: 'repo-job-facts muted', text: detail.join(' · ') }),
+    j.error ? el('div', { class: 'repo-job-error', text: j.error }) : null,
+    el('div', { class: 'muted repo-job-src', text: j.hub_id }),
+  ]);
+}
+
+async function cancelRepoJob(id) {
+  const res = await api(`/api/v1/repo/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' });
+  paintRepoJobs(document.querySelector('.repo-jobs'), res.jobs || []);
+  toast('Download cancelled. What arrived is kept for a resume.');
+}
+
+// Polling is confined to the jobs panel so the search box and its results
+// survive it. It stops itself when nothing is running, when the tab is left,
+// and while the browser tab is in the background.
+function startRepoPolling() {
+  if (repoView.timer) return;
+  repoView.timer = setInterval(async () => {
+    if (admin.tab !== 'repo') return stopRepoPolling();
+    if (document.hidden || repoView.busy) return;
+    const host = document.querySelector('.repo-jobs');
+    if (!host) return stopRepoPolling();
+
+    repoView.busy = true;
+    try {
+      const { jobs } = await api('/api/v1/repo/jobs');
+      const wasRunning = host.querySelectorAll('.repo-job.running').length;
+      paintRepoJobs(host, jobs || []);
+      const running = (jobs || []).filter((j) => j.state === 'running').length;
+      if (!running) {
+        stopRepoPolling();
+        // Something finished: the file list and the disk figures have both
+        // moved, so those are refreshed once rather than on every tick.
+        if (wasRunning) await refreshRepoFiles();
+      }
+    } catch {
+      // A failed poll leaves the last state on screen. The download itself is
+      // running on the server and is not affected by this page losing touch.
+      stopRepoPolling();
+    } finally {
+      repoView.busy = false;
+    }
+  }, 1500);
+}
+
+function stopRepoPolling() {
+  if (repoView.timer) clearInterval(repoView.timer);
+  repoView.timer = null;
+}
+
+async function refreshRepoFiles() {
+  const filesHost = document.querySelector('.repo-files');
+  const statusHost = document.querySelector('.repo-status');
+  if (!filesHost) return;
+  const data = await api('/api/v1/repo');
+  if (statusHost) paintRepoStatus(statusHost, data.status || {});
+  paintRepoFiles(filesHost, data.files || [], data.tags || []);
+}
+
+/* ---- finding something to download ---- */
+
+function paintRepoSearch(host) {
+  host.innerHTML = '';
+  const input = el('input', {
+    class: 'repo-query', type: 'search', placeholder: 'Search Hugging Face for GGUF models…',
+    value: repoView.query, autocomplete: 'off', spellcheck: 'false',
+  });
+  const results = el('div', { class: 'repo-results' });
+
+  const run = async () => {
+    repoView.query = input.value.trim();
+    if (!repoView.query) return;
+    results.innerHTML = '';
+    results.append(el('p', { class: 'muted', text: 'Searching…' }));
+    try {
+      const { results: found } = await api(
+        `/api/v1/models/search?q=${encodeURIComponent(repoView.query)}&gguf=true&limit=15`);
+      repoView.results = found || [];
+      paintRepoResults(results, repoView.results);
+    } catch (err) {
+      results.innerHTML = '';
+      results.append(el('p', { class: 'error', text: err.message }));
+    }
+  };
+
+  const form = el('form', { class: 'row-form repo-search-form', onsubmit: (e) => { e.preventDefault(); run(); } }, [
+    input,
+    el('button', { class: 'ghost-btn', type: 'submit', text: 'Search' }),
+  ]);
+
+  host.append(el('h3', { class: 'repo-h', text: 'Add a model' }), form, results);
+  if (repoView.results) paintRepoResults(results, repoView.results);
+}
+
+function paintRepoResults(host, found) {
+  host.innerHTML = '';
+  if (!found.length) {
+    host.append(el('p', { class: 'muted', text: 'Nothing matched. Hugging Face is searched for '
+      + 'repositories carrying GGUF files, which is what these backends can load.' }));
+    return;
+  }
+  for (const m of found) host.append(repoResultCard(m));
+}
+
+function repoResultCard(m) {
+  const facts = [
+    m.params_b ? `${Number(m.params_b).toFixed(m.params_b < 10 ? 1 : 0)}B` : null,
+    m.license || null,
+    m.downloads ? `${m.downloads.toLocaleString()} downloads` : null,
+  ].filter(Boolean).join(' · ');
+
+  const detailHost = el('div', { class: 'repo-quants' });
+  const card = el('div', { class: 'repo-result' }, [
+    el('div', { class: 'repo-result-head' }, [
+      el('span', { class: 'repo-result-id', text: m.id }),
+      el('button', {
+        class: 'link-btn', type: 'button', text: 'Files',
+        onclick: () => toggleRepoDetail(m.id, detailHost).catch(showError),
+      }),
+    ]),
+    el('div', { class: 'muted', text: facts }),
+    detailHost,
+  ]);
+  return card;
+}
+
+// The quantisations are fetched per repository rather than up front: it is one
+// Hub request each, and a search returning fifteen results would otherwise make
+// fifteen of them for a list the operator will mostly scroll past.
+async function toggleRepoDetail(hubID, host) {
+  if (host.childElementCount) { host.innerHTML = ''; return; }
+  host.append(el('p', { class: 'muted', text: 'Loading files…' }));
+
+  const detail = await api(`/api/v1/models/detail/${hubID}`);
+  host.innerHTML = '';
+  const quants = detail.quants || [];
+  if (!quants.length) {
+    host.append(el('p', { class: 'muted', text:
+      'No GGUF files in this repository — it may only carry the original weights.' }));
+    return;
+  }
+  for (const q of quants) host.append(repoQuantRow(detail, q));
+}
+
+function repoQuantRow(detail, q) {
+  // The fit verdict is the whole reason this is worth showing in a list: it
+  // says which of eight near-identical filenames will actually run here.
+  const fit = q.fit || null;
+  return el('div', { class: 'repo-quant' }, [
+    el('span', { class: 'repo-quant-name', text: q.quant }),
+    fit ? el('span', { class: `repo-fit ${fit.verdict || ''}`, text: fit.verdict || '' }) : null,
+    fit && fit.total_mb
+      ? el('span', { class: 'muted', text: `${bytes(fit.total_mb * 1024 * 1024)} to load` })
+      : null,
+    el('button', {
+      class: 'ghost-btn', type: 'button', text: 'Download',
+      title: `Fetch ${q.filename} into the repository`,
+      onclick: (e) => startRepoDownload(detail, q, e.target).catch(showError),
+    }),
+  ]);
+}
+
+async function startRepoDownload(detail, q, button) {
+  button.disabled = true;
+  try {
+    await api('/api/v1/repo/download', {
+      method: 'POST',
+      body: JSON.stringify({
+        hub_id: detail.id,
+        filename: q.filename,
+        // Passed through so the index records the Hub's own parse of the GGUF
+        // header rather than a guess made from the filename later.
+        quant: q.quant || '',
+        params_b: detail.params_b || 0,
+      }),
+    });
+    toast(`Downloading ${q.filename}. It carries on if you leave this page.`);
+    const host = document.querySelector('.repo-jobs');
+    if (host) {
+      const { jobs } = await api('/api/v1/repo/jobs');
+      paintRepoJobs(host, jobs || []);
+    }
+    startRepoPolling();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---- what is on the drive ---- */
+
+function paintRepoFiles(host, files, vocab) {
+  host.innerHTML = '';
+  host.append(el('h3', { class: 'repo-h', text: 'On the drive' }));
+
+  if (!files.length) {
+    host.append(el('p', { class: 'muted', text:
+      'Nothing here yet. Search above, or copy GGUF files onto the drive by hand — '
+      + 'the listing walks the directory, so anything you put there shows up.' }));
+    return;
+  }
+  for (const f of files) host.append(repoFileCard(f, vocab));
+}
+
+function repoFileCard(f, vocab) {
+  const facts = [
+    f.params_b ? `${Number(f.params_b).toFixed(f.params_b < 10 ? 1 : 0)}B` : null,
+    f.quant || null,
+    f.size_bytes ? bytes(f.size_bytes) : null,
+    f.estimated ? 'from the filename' : null,
+    f.added_at || null,
+  ].filter(Boolean).join(' · ');
+
+  const tagHost = el('div', { class: 'repo-tags' });
+  paintRepoTags(tagHost, f, vocab);
+
+  return el('div', { class: `repo-file ${f.missing ? 'missing' : ''}` }, [
+    el('div', { class: 'repo-file-head' }, [
+      el('span', { class: 'repo-file-name', text: f.name }),
+      f.missing
+        ? el('span', { class: 'repo-badge missing', title:
+            'The index remembers this file but it is not on the drive. The drive may be '
+            + 'mounted elsewhere, or it was deleted outside wintermute.', text: 'missing' })
+        : null,
+      // Whether the bytes were checked against a published digest. Absent is a
+      // normal state, not a fault: Hugging Face only publishes a content hash
+      // for files kept in LFS.
+      !f.missing && f.verified
+        ? el('span', { class: 'repo-badge verified', title: `sha256 ${f.sha256}`, text: 'verified' })
+        : null,
+      f.fit && f.fit.verdict
+        ? el('span', { class: `repo-fit ${f.fit.verdict}`, text: f.fit.verdict })
+        : null,
+    ]),
+    el('div', { class: 'muted repo-file-facts', text: facts }),
+    f.hub_id ? el('div', { class: 'muted repo-file-src', text: f.hub_id }) : null,
+    el('div', { class: 'muted repo-file-path', text: f.rel_path }),
+    tagHost,
+    el('div', { class: 'repo-file-actions' }, [
+      el('button', {
+        class: 'link-btn danger', type: 'button',
+        text: f.missing ? 'Forget' : 'Delete',
+        onclick: () => deleteRepoFile(f).catch(showError),
+      }),
+    ]),
+  ]);
+}
+
+function paintRepoTags(host, f, vocab) {
+  host.innerHTML = '';
+  for (const t of f.tags || []) {
+    host.append(el('span', { class: 'repo-tag' }, [
+      el('span', { text: t }),
+      el('button', {
+        class: 'repo-tag-x', type: 'button', text: '×', title: `Remove "${t}"`,
+        onclick: () => removeRepoTag(f, t, host, vocab).catch(showError),
+      }),
+    ]));
+  }
+
+  // A datalist of what is already in use, so the vocabulary converges instead
+  // of growing a synonym every time somebody types.
+  const listID = 'repo-tag-vocab';
+  const input = el('input', {
+    class: 'repo-tag-add', placeholder: '+ label', list: listID, autocomplete: 'off',
+  });
+  input.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const value = input.value.trim();
+    if (!value) return;
+    input.value = '';
+    addRepoTag(f, value, host, vocab).catch(showError);
+  });
+  host.append(input);
+  if (!document.getElementById(listID)) {
+    document.body.append(el('datalist', { id: listID },
+      (vocab || []).map((t) => el('option', { value: t }))));
+  }
+}
+
+async function addRepoTag(f, tag, host, vocab) {
+  const { tag: saved } = await api('/api/v1/repo/tags', {
+    method: 'POST',
+    body: JSON.stringify({ rel_path: f.rel_path, tag }),
+  });
+  if (!f.tags) f.tags = [];
+  if (!f.tags.includes(saved)) f.tags.push(saved);
+  f.tags.sort();
+  paintRepoTags(host, f, vocab);
+}
+
+async function removeRepoTag(f, tag, host, vocab) {
+  await api('/api/v1/repo/tags/remove', {
+    method: 'POST',
+    body: JSON.stringify({ rel_path: f.rel_path, tag }),
+  });
+  f.tags = (f.tags || []).filter((t) => t !== tag);
+  paintRepoTags(host, f, vocab);
+}
+
+// Deleting weights is hours of downloading thrown away, so it asks for the word
+// to be typed rather than for a click — the same bar the memory wipe sets, for
+// the same reason. The server checks the confirmation too; this one is a
+// courtesy, not the control.
+async function deleteRepoFile(f) {
+  if (f.missing) {
+    // Nothing to erase: the file is already gone and only the record is left.
+    if (!window.confirm(`Forget ${f.rel_path}?\n\n`
+      + 'The file is not on the drive. This only drops what was recorded about it.')) return;
+  } else {
+    const typed = window.prompt(
+      `Delete ${f.name}?\n\nThis erases ${bytes(f.size_bytes)} from the drive permanently. `
+      + `It would have to be downloaded again.\n\nType: delete`);
+    if (typed === null) return;
+    if (typed.trim().toLowerCase() !== 'delete') {
+      showError(new Error('Not deleted — the confirmation did not match.'));
+      return;
+    }
+  }
+  await api('/api/v1/repo/delete', {
+    method: 'POST',
+    body: JSON.stringify({ rel_path: f.rel_path, confirm: 'delete' }),
+  });
+  toast(f.missing ? 'Record dropped.' : `${f.name} deleted.`);
+  await refreshRepoFiles();
 }
 
 // Shared memory: the master switch, and the two ways to throw things away.
