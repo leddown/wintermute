@@ -74,15 +74,12 @@ Change `127.0.0.1` to the model host's address if it's a different machine. Note
 the `/v1` — it's Ollama's OpenAI-compatible endpoint, and leaving it off is the
 most common setup mistake.
 
-Then create `.env` for everything else. A TMDB key is free and takes two minutes
-([themoviedb.org/settings/api](https://www.themoviedb.org/settings/api)); without
-at least one metadata key the assistant can chat but can't verify a title.
+Then create `.env` for everything else.
 
 ```bash
 # .env
 WINTERMUTE_ADDR=:8080
 WINTERMUTE_DB=wintermute.db
-TMDB_API_KEY=...
 ```
 
 ## 4. Create a token and start the server
@@ -114,7 +111,7 @@ curl -s "localhost:8080/api/v1/models?context=8192" -H "Authorization: Bearer $T
 
 ## 5. Set up the desktop harness
 
-On the desktop — the machine that can see your media:
+On the desktop — the machine that can see the files you want to work on:
 
 ```bash
 ./wintermute -init          # writes ~/.config/wintermute/config.json, mode 0600
@@ -126,7 +123,7 @@ Edit it:
 {
   "server_url": "http://server-host:8080",
   "token": "wm_…",
-  "roots": ["/mnt/media"],
+  "roots": ["/srv/files"],
   "auto_approve_reads": true,
   "always_allow": [],
   "never_allow": []
@@ -146,20 +143,20 @@ a good first root.
 Then, at the prompt:
 
 ```
-> list /mnt/media/tv and tell me what's there
+> list /srv/files/inbox and tell me what's there
 ```
 
 Reads are auto-approved, so that runs immediately. Now ask for something that
 changes a file:
 
 ```
-> rename these to "Show Name - S01E01 - Episode Title.mkv" style, checking TMDB
+> rename report-final-FINAL-v2.pdf to something sensible
 ```
 
 You'll get a prompt per rename:
 
 ```
-rename_file  /mnt/media/tv/show.s01e01.mkv → Show Name - S01E01 - Pilot.mkv
+rename_file  /srv/files/inbox/report-final-FINAL-v2.pdf → 2026-08 Quarterly Report.pdf
 [y] yes  [n] no  [a] always  [q] quit turn
 ```
 

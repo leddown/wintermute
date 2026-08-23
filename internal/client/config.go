@@ -24,7 +24,7 @@ type Config struct {
 	// Token is the client token issued by `wintermuted -add-client`.
 	Token string `json:"token"`
 	// Roots are the directories this machine will let the assistant touch.
-	// On Windows these may be UNC paths (\\NAS\Media) or mapped drives.
+	// On Windows these may be UNC paths (\\NAS\share) or mapped drives.
 	Roots []string `json:"roots"`
 
 	// AutoApproveReads skips the prompt for read-only actions. On by default:

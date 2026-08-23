@@ -109,7 +109,7 @@ func banner(w io.Writer, id *client.Identity, roots []string) {
 // the session.
 func repl(ctx context.Context, h *client.Harness, in io.Reader, out io.Writer) error {
 	reader := bufio.NewScanner(in)
-	// Media paths and pasted listings can be long lines.
+	// Long paths and pasted listings can be long lines.
 	reader.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 
 	for {

@@ -220,7 +220,7 @@ func TestTranscriptRoundTrip(t *testing.T) {
 				json.RawMessage(`{"type":"thinking","thinking":"check the title","signature":"sig"}`),
 			},
 			ToolCalls: []tool.Call{
-				{ID: "call_1", Name: "lookup_metadata", Input: json.RawMessage(`{"kind":"movie"}`)},
+				{ID: "call_1", Name: "probe_thing", Input: json.RawMessage(`{"kind":"movie"}`)},
 			},
 		},
 		llm.ToolMessage(tool.Result{CallID: "call_1", Content: "no matches", IsError: true}),
@@ -242,7 +242,7 @@ func TestTranscriptRoundTrip(t *testing.T) {
 			t.Errorf("message %d = %+v, want %+v", i, got[i], want[i])
 		}
 	}
-	if len(got[1].ToolCalls) != 1 || got[1].ToolCalls[0].Name != "lookup_metadata" {
+	if len(got[1].ToolCalls) != 1 || got[1].ToolCalls[0].Name != "probe_thing" {
 		t.Errorf("tool calls did not survive the round trip: %+v", got[1].ToolCalls)
 	}
 	if !got[2].IsError || got[2].ToolCallID != "call_1" {

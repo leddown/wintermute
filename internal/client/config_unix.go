@@ -11,7 +11,7 @@ import (
 func exampleRoot() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/srv/media"
+		return "/srv/files"
 	}
-	return filepath.Join(home, "Media")
+	return filepath.Join(home, "Documents")
 }

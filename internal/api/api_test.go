@@ -49,7 +49,7 @@ func newTestServer(t *testing.T) (*Server, *store.Store) {
 		t.Fatal(err)
 	}
 	tools := tool.NewRegistry()
-	ag := agent.New(router, nil, st, tools, log, 4)
+	ag := agent.New(router, st, tools, log, 4)
 	cat := models.NewCatalog(nil, st, models.NewHub("", ""), log)
 	return New(ag, st, tools, cat, Workspace{}, ServerInfo{}, log), st
 }
@@ -228,7 +228,7 @@ func TestClientToolWireFormatMatchesToolDefinition(t *testing.T) {
 // A client claiming its tool is server-side must not get a server-side tool.
 func TestClientCannotClaimServerSide(t *testing.T) {
 	defs, err := validateClientTools([]clientToolInput{
-		{Name: "lookup_metadata", Risk: "read", Side: string(tool.SideServer)},
+		{Name: "probe_thing", Risk: "read", Side: string(tool.SideServer)},
 	})
 	if err != nil {
 		t.Fatal(err)

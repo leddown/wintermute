@@ -139,13 +139,6 @@ WINTERMUTE_MAX_TOOL_ITERATIONS=12
 LLAMA_API_KEY=
 ANTHROPIC_API_KEY=
 
-# At least one of these, or the lookup tool is not registered at all and the
-# assistant cannot verify a title before proposing a rename.
-TMDB_API_KEY=
-TVDB_API_KEY=
-TVDB_PIN=
-OMDB_API_KEY=
-
 HUGGINGFACE_TOKEN=
 EOF_ENV
   echo "    wrote $ENV_FILE"
@@ -177,8 +170,7 @@ EOF_BACKENDS
   echo "    wrote $BACKENDS_FILE (kind: $DETECTED_KIND)"
   echo
   echo "    Leave \"model\" empty only if the backend serves exactly one model."
-  echo "    To add Claude as a per-conversation alternative, or to declare a"
-  echo "    batch pool across several machines, see docs/backends.md."
+  echo "    To add Claude as a per-conversation alternative, see docs/backends.md."
 else
   echo "    $BACKENDS_FILE already exists, leaving it alone"
 fi
@@ -241,12 +233,10 @@ HOST_URL="http://localhost${LISTEN_ADDR}"
 
 echo
 echo "Setup complete. Next steps:"
-echo "  1. Add a metadata key to $ENV_FILE (TMDB_API_KEY is the easiest to get)."
-echo "     Without one the assistant cannot verify a title before proposing a rename."
-echo "  2. Start the service:  sudo systemctl start $SERVICE_NAME"
-echo "  3. Check it came up:   sudo systemctl status $SERVICE_NAME"
-echo "  4. Tail logs:          sudo journalctl -u $SERVICE_NAME -f"
-echo "  5. Open the UI at $HOST_URL and paste the browser token."
+echo "  1. Start the service:  sudo systemctl start $SERVICE_NAME"
+echo "  2. Check it came up:   sudo systemctl status $SERVICE_NAME"
+echo "  3. Tail logs:          sudo journalctl -u $SERVICE_NAME -f"
+echo "  4. Open the UI at $HOST_URL and paste the browser token."
 echo
 echo "  For the desktop harness on this machine:"
 echo "     $CLIENT_BIN -init"

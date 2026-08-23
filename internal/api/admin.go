@@ -25,15 +25,13 @@ type ServerInfo struct {
 	BackendsPath      string        `json:"backends_path"`
 	DefaultBackend    string        `json:"default_backend"`
 	FallbackBackend   string        `json:"fallback_backend"`
-	PoolBackends      []string      `json:"pool_backends"`
 	LLMMaxTokens      int           `json:"llm_max_tokens"`
 	LLMTimeout        time.Duration `json:"-"`
 	LLMTimeoutLabel   string        `json:"llm_timeout"`
 	MaxToolIterations int           `json:"max_tool_iterations"`
 
 	// Presence, never value.
-	MetadataProviders   []string `json:"metadata_providers"`
-	HasHuggingFaceToken bool     `json:"has_huggingface_token"`
+	HasHuggingFaceToken bool `json:"has_huggingface_token"`
 
 	// Knowledge sources an agent profile can be given, described rather than
 	// disclosed: a base URL is configuration worth seeing on the admin screen,

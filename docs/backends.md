@@ -16,7 +16,6 @@ second GPU box and measuring no improvement at all.
 - [Configuration recipes](#configuration-recipes)
 - [Gotchas that will cost you performance](#gotchas-that-will-cost-you-performance)
 - [Measure before you build](#measure-before-you-build)
-- [The batch pool](#the-batch-pool)
 - [Still to build](#still-to-build)
 
 ---
@@ -31,7 +30,6 @@ second GPU box and measuring no improvement at all.
 | Automatic retry against a fallback when a backend fails | **Works** |
 | Concurrent turns in different conversations | **Works** (see caveats below) |
 | Probing each backend for what it serves, and whether it fits | **Works** |
-| Fanning a batch job out across backends | **Works** — [the pool](#the-batch-pool) |
 | Splitting one turn across backends | Not built — and see below, it wouldn't help |
 | Routing steps within a turn to different models by role | **Not built** — [sketched below](#role-based-routing-within-a-turn) |
 
@@ -116,7 +114,7 @@ lookup and a proposed name; only the final approval pass is inherently serial.
 That shape parallelises properly across backends, because each item is a *fresh
 short prompt* rather than a continuation of a growing transcript — so the prompt
 cache objection above doesn't apply. Two machines genuinely halve it. This is
-built: see [the batch pool](#the-batch-pool).
+built.
 
 ### 4. What doesn't earn its keep
 
@@ -278,7 +276,7 @@ reports the backend, the model and token counts:
 curl -s -X POST http://localhost:8080/api/v1/sessions/$ID/messages \
   -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
-  -d '{"text":"list /mnt/media/tv and propose renames"}' | jq '{backend, model, usage}'
+  -d '{"text":"list /srv/files/inbox and tell me what is there"}' | jq '{backend, model, usage}'
 ```
 
 Then work out which of these you have:
@@ -294,102 +292,6 @@ Then work out which of these you have:
 `nvidia-smi dmon` on the model host while a turn runs answers most of this in
 about thirty seconds.
 
-## The batch pool
-
-A **pool** is the set of backends a batch may be fanned out across. Declare one
-and the assistant gains a `batch_propose_names` tool; declare none and that tool
-does not exist, so the model is never shown a way to fan out that you haven't
-configured.
-
-```json
-{
-  "default": "gpu",
-  "pool": { "backends": ["gpu", "nas", "npu"], "max_inflight": 1 },
-  "backends": [
-    { "name": "gpu", "kind": "llamacpp", "base_url": "http://192.168.1.10:8080/v1",
-      "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
-    { "name": "nas", "kind": "ollama",   "base_url": "http://192.168.1.11:11434/v1",
-      "model": "gemma3:4b" },
-    { "name": "npu", "kind": "hailo",    "base_url": "http://192.168.1.12:11434/v1",
-      "model": "qwen2.5-1.5b" }
-  ]
-}
-```
-
-| Field | Meaning |
-|---|---|
-| `backends` | Pool members. Each must also be declared in `backends`. Order is irrelevant — work goes wherever is free |
-| `max_inflight` | Items **each member** serves at once. Total concurrency is this times the member count. Defaults to 1 |
-
-`max_inflight: 1` is the right default and you should think before raising it.
-On a single-GPU llama-server a second concurrent request divides the throughput
-the card already had instead of adding to it; raise it only for a backend that
-genuinely batches (vLLM, or llama.cpp with enough `--parallel` slots *and* the
-context to divide among them).
-
-There is one pool, not a set of named pools. A second pool would only mean
-something if something chose between them, and nothing does.
-
-### What it does
-
-Given N files, the server builds N independent prompts and runs them across the
-pool. Each item is its own miniature agent loop: it can call the metadata lookup
-tools, and it answers with a proposed name or a decision to skip. The collected
-proposals come back into the conversation as one tool result.
-
-Because each item is a fresh short prompt sharing no prefix with any other,
-there is no served prompt cache to lose by sending it to a different machine —
-which is exactly why this shape parallelises and a conversation doesn't.
-
-### What it guarantees
-
-Fanning out is a throughput trick, not a change to who may do what. Three
-properties are enforced in code rather than asked for in the prompt:
-
-- **A batch worker only ever sees server-side, read-only tools.** It cannot be
-  handed a filesystem tool, so no amount of prompt injection in a filename turns
-  a worker into something that renames a file. It cannot start a batch of its
-  own either.
-- **Workers produce proposals.** Every rename still goes back through the main
-  transcript, out to the client as a pending call, and past your approval policy
-  one file at a time. A 300-file batch does not become 300 unapproved renames.
-- **Every worker's tool call is audited** against the same session, with the
-  call id namespaced per item so concurrent workers stay distinguishable. A
-  fanned-out batch is exactly as traceable as a serial one.
-
-### How it handles failure
-
-- An item that fails is retried on a **different** member (two attempts by
-  default).
-- A member that fails three times in a row is **retired for the rest of that
-  batch**, so a machine that has gone down stops taking work instead of making
-  every remaining item pay a retry.
-- If every member retires, the remaining items come back reported as failed —
-  the batch returns rather than hanging the turn.
-- A failed item is reported as failed, with its error, alongside the ones that
-  worked. One bad filename does not cost you the run.
-- Cancelling the turn cancels the batch, and cancelled work is never retried.
-
-The result carries a summary: how many were proposed, skipped and failed, which
-backend served how many, and — if a cloud backend is in the pool — how many
-items left the network. That last count exists because a batch is the one place
-where a lot of filenames can go off-network at once without anyone approving
-each one.
-
-### Limits and tuning
-
-| | |
-|---|---|
-| Items per call | 200. Beyond that the tool refuses and asks the model to split the work |
-| Iterations per item | 4 tool round-trips, then the item is reported as failed |
-| Progress | Server logs (`batch progress`, every 10%), not the client — a turn is one request/response, so there is nowhere to stream to until the tool result comes back |
-
-Watch `journalctl`/stderr during a long batch. If you see items failing on one
-member and succeeding on another, that member is the problem, and
-`GET /api/v1/backends` will usually agree.
-
----
-
 ## Still to build
 
 ### Role-based routing within a turn
@@ -404,7 +306,7 @@ conversation's own model for the reasoning.
 
 Cheap to implement: the router already dispatches by name, so this adds a
 role→backend lookup. The payoff is modest, though, because the main loop still
-has to run on the model that owns the conversation — the batch pool already
+has to run on the model that owns the conversation — the router already
 captures the case where the work is genuinely separable.
 
 ### Deliberately not planned

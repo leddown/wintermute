@@ -261,3 +261,13 @@ func newTestRouter(t *testing.T, p Provider) *Router {
 	}
 	return r
 }
+
+// echoModelProvider replies with whatever model the request named, which is how
+// these tests observe which backend and model a route actually selected.
+type echoModelProvider struct{}
+
+func (echoModelProvider) Name() string { return "echo" }
+
+func (echoModelProvider) Complete(_ context.Context, req Request) (*Response, error) {
+	return &Response{Message: Message{Role: RoleAssistant, Content: req.Model}}, nil
+}

@@ -37,7 +37,7 @@ type registration struct {
 // The set covers lists, tasks, notes and the calendar — everything this module
 // stores, because it is all the same kind of thing: a person's own record of
 // what they mean to do, reversible and audited by nobody. The rest of what
-// this server can reach — the media library, the model backends — is a
+// this server can reach — the model backends, the fleet — is a
 // different decision, and should be made deliberately rather than by extending
 // a slice.
 //

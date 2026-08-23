@@ -7,9 +7,11 @@ requiring that the model be somebody else's.
 It runs models you host yourself (llama.cpp, Ollama, vLLM) and can keep Claude
 available alongside them as a deliberate, per-conversation choice.
 
-The first thing it's built to do is rename media files: your desktop lists a
-NAS share, the server looks the titles up against TMDB/TVDB/OMDb, and the model
-proposes renames that you approve one at a time.
+It manages the models themselves: a repository of weights on a disk the server
+owns, downloaded from Hugging Face, labelled, and handed out to the machines in
+your fleet that should be holding them. Files on your own computers stay behind
+the client harness, which proposes changes and never applies one you haven't
+approved.
 
 It also carries a small practice-management workspace — tasks, a CRM and your
 company profile — reachable from the same browser UI and the same token. See
@@ -91,9 +93,7 @@ a cloud model is reached *deliberately*. So:
 
 One conversation is pinned to one backend, because moving it between machines
 would throw away the served prompt cache and reprocess the whole transcript.
-Work that *is* separable — proposing names for 300 files, where each file is its
-own short prompt — goes to a **pool** instead, and runs across every configured
-backend at once. See [docs/backends.md](docs/backends.md).
+See [docs/backends.md](docs/backends.md).
 
 The server also knows what it is running on. It probes each backend for the
 models it serves, reads the host's GPU, VRAM, CPU and RAM, and can estimate
@@ -120,26 +120,16 @@ At a prompt you can answer `y` (yes), `n` (no), `a` (always allow this tool for
 the rest of the run), or `q` (decline this and everything else in the turn).
 A refusal still produces a tool result, so the model is told it was declined
 rather than assuming success. This matters more with small local models than
-with large ones: a model that is never told "no" will cheerfully report a rename
-it never performed.
+with large ones: a model that is never told "no" will cheerfully report a change
+it never made.
 
 ### Tools
-
-**Server-side, metadata** — `lookup_metadata`: resolve a movie, series or
-episode against whichever of TMDB / TVDB / OMDb you configured, to confirm the
-canonical title, year and episode name.
 
 **Server-side, model awareness** — `system_capabilities` (what hardware this
 host has), `list_models` (what each backend is serving, with a fit verdict),
 `estimate_model_fit` (will this model at this quant and context fit in VRAM),
 `recommend_model` (rank what's available for a task), `search_models` (search
 the Hugging Face Hub, results annotated with whether they'd run here).
-
-**Server-side, batch** — `batch_propose_names`: propose names for many files at
-once, fanned out across the configured pool. Registered only when a pool is
-declared. Each item is handled by a worker that can see server-side read-only
-tools and nothing else — it proposes, and every resulting rename still goes to
-the client for approval one at a time.
 
 **Server-side, tasks** — `list_todo_lists`, `create_todo_list`, `add_todo_task`:
 read and build the task lists the Tasks view shows. Short on purpose — creating
@@ -159,8 +149,6 @@ three are confined to your configured roots, checked *after* symlink resolution.
     for a full build-and-tune guide, or
   - an **Anthropic API key** from
     [console.anthropic.com](https://console.anthropic.com), or both.
-- Optionally, API keys for TMDB, TVDB and/or OMDb. Without at least one, the
-  lookup tool isn't registered at all and the assistant can't verify titles.
 - Optionally, `nvidia-smi` on the server host, for GPU and VRAM reporting.
   Without it the hardware report simply omits the GPU.
 
@@ -220,14 +208,10 @@ The top level takes three more keys:
 - `"fallback"` — a backend retried when the selected one fails. **Leave it
   unset** unless you want failures to reach the cloud; unset means a failed
   local backend reports the failure and stops.
-- `"pool"` — the backends a batch may be fanned out across, e.g.
-  `{"backends": ["gpu", "nas"], "max_inflight": 1}`. Every member must also be
-  declared. With no pool, the batch tool is not offered at all.
 
 ```json
 {
   "default": "gpu",
-  "pool": { "backends": ["gpu", "nas"], "max_inflight": 1 },
   "backends": [
     { "name": "gpu", "kind": "llamacpp", "base_url": "http://192.168.1.10:8080/v1",
       "api_key_env": "LLAMA_API_KEY", "model": "qwen3-8b" },
@@ -237,11 +221,7 @@ The top level takes three more keys:
 }
 ```
 
-A pool is what makes "300 files" finish in parallel rather than one at a time.
-It only helps when its members are on *different hardware* — two members on one
-GPU are two queues into one worker. `max_inflight` is per member and defaults to
-1, which is the honest number for a single-GPU llama-server.
-[docs/backends.md](docs/backends.md#the-batch-pool) has the full picture.
+[docs/backends.md](docs/backends.md) has the full picture.
 
 To keep Claude available as a per-conversation alternative, add it as a second
 backend:
@@ -296,10 +276,6 @@ LLAMA_API_KEY=...                         # referenced by api_key_env above
 ANTHROPIC_API_KEY=sk-ant-...              # only if you declare an anthropic backend
 
 # At least one of these, or the assistant can't verify titles:
-TMDB_API_KEY=...
-TVDB_API_KEY=...
-TVDB_PIN=...                              # only for user-supported TVDB keys
-OMDB_API_KEY=...
 ```
 
 | Variable | Default | Meaning |
@@ -418,8 +394,7 @@ under `ProtectSystem=strict`.
 `update.sh` finishes with a report on what the running service can actually
 reach: whether it answers, whether `WINTERMUTE_BACKENDS` is set (unset, a
 carefully written `backends.json` is silently ignored), which backends are
-reachable, and whether a declared pool has two members sharing one host — which
-adds queueing rather than throughput.
+reachable.
 
 ## Choosing a model per conversation
 
@@ -475,7 +450,7 @@ because the results are enriched with a fit verdict only the server can compute.
 
 ## Workspace: tasks, CRM, accounting and company
 
-Beyond the media assistant, the server carries the practice-management modules
+Beyond the model fleet, the server carries the practice-management modules
 that moved here from an RCSA application: a task list, a CRM (clients,
 engagements, billable time, a billing rollup) and the company profile — plus a
 double-entry accounting module built on top of the CRM. They are views in the
@@ -597,7 +572,7 @@ token. Fill it in:
 {
   "server_url": "http://nas-host:8080",
   "token": "wm_…",
-  "roots": ["/mnt/media", "\\\\NAS\\Media"],
+  "roots": ["/srv/files", "\\\\NAS\\share"],
   "auto_approve_reads": true,
   "always_allow": [],
   "never_allow": []
@@ -606,7 +581,7 @@ token. Fill it in:
 
 `roots` is the list of directories this machine will let the assistant touch.
 Nothing outside them is reachable, whatever the model asks for. On Windows they
-can be UNC paths (`\\NAS\Media`) or mapped drives. `always_allow` and
+can be UNC paths (`\\NAS\share`) or mapped drives. `always_allow` and
 `never_allow` name tools that skip the prompt or are refused outright.
 
 `server_url`, `token` and `roots` can be overridden by `WINTERMUTE_SERVER`,
@@ -617,8 +592,8 @@ Then run it:
 
 ```bash
 ./wintermute                                  # interactive REPL
-./wintermute -prompt "tidy up /mnt/media/tv"  # one request, then exit
-./wintermute -roots /mnt/media/movies         # override roots for this run
+./wintermute -prompt "tidy up /srv/files/inbox"  # one request, then exit
+./wintermute -roots /srv/files/archive            # override roots for this run
 ./wintermute -config ./other.json
 ./wintermute -yes                             # auto-approve writes — see below
 ```
@@ -687,18 +662,9 @@ reports which models advertise the `tools` capability.
 **Long local turns time out.** Raise `WINTERMUTE_LLM_TIMEOUT`.
 
 **Everything is slow and adding a second backend didn't help.** Expected — see
-[docs/backends.md](docs/backends.md). One conversation is a sequential loop, and
-a second backend does not make a single turn faster. What a second backend
-speeds up is a *batch*, and only if you declared a `pool`.
-
-**The assistant won't batch anything.** `batch_propose_names` is registered only
-when `backends.json` declares a `pool`. Check the startup log for
-`batch pool configured`.
-
-**A batch reports items failed on one backend.** That member was retired for the
-rest of that batch after three consecutive failures; its items were retried
-elsewhere. The server log names it, and `GET /api/v1/backends` will usually
-confirm it is unreachable.
+[docs/backends.md](docs/backends.md). One conversation is a sequential loop, so
+a second backend does not make a single turn faster. It gives you somewhere else
+to run a *different* conversation.
 
 ## Development
 

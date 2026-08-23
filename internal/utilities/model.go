@@ -9,12 +9,6 @@
 // and none of the interface: pg_dump becomes VACUUM INTO, pg_database_size
 // becomes page_count × page_size, pg_stat_user_tables becomes sqlite_master
 // plus dbstat, and VACUUM ANALYZE becomes VACUUM then ANALYZE.
-//
-// One thing did not come across. Morpheus's Utilities view could export its
-// media catalog as a JSON document to upload to a wintermute agent; that
-// export reads media_files, media_shares and media_metadata, and wintermute
-// has no media library of its own to read. It stays on the morpheus side,
-// which is the end of that pipe that has the data.
 package utilities
 
 import (

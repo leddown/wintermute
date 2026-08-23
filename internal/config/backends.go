@@ -26,27 +26,8 @@ type BackendsFile struct {
 	// Leaving it empty means a failed local backend simply fails, which is the
 	// right default for anything privacy-sensitive: a fallback to a cloud
 	// model sends the transcript off the network.
-	Fallback string `json:"fallback"`
-	// Pool declares the backends a batch may be fanned out across. It is
-	// optional: with no pool declared there is no batch tool, and the
-	// assistant is never shown something it cannot use.
-	Pool     *PoolEntry       `json:"pool"`
+	Fallback string           `json:"fallback"`
 	Backends []BackendedEntry `json:"backends"`
-}
-
-// PoolEntry declares the batch pool.
-//
-// There is one pool, not a set of named pools, because there is one thing to
-// fan out — many short independent prompts — and a second pool would only be
-// meaningful if something chose between them.
-type PoolEntry struct {
-	// Backends names the members. Every one must also be declared above.
-	Backends []string `json:"backends"`
-	// MaxInflight is how many items each member serves at once, so the total
-	// concurrency is this times the number of members. One is the honest
-	// default for a single-GPU llama-server, where a second concurrent
-	// request divides the throughput it already had rather than adding to it.
-	MaxInflight int `json:"max_inflight"`
 }
 
 // memoryPattern splits "7GB" / "7.5 GiB" / "3500 MB" into number and unit.
@@ -262,48 +243,6 @@ func (f *BackendsFile) resolve() ([]models.Backend, error) {
 		return nil, fmt.Errorf("fallback backend %q is not declared", f.Fallback)
 	}
 	return out, nil
-}
-
-// Pool is the validated batch pool: which backends may serve a fanned-out
-// batch, and how many items each takes at once.
-type Pool struct {
-	Backends    []string
-	MaxInflight int
-}
-
-// resolvePool validates the declared pool against the declared backends.
-// It returns nil when no pool was declared, which is not an error.
-func (f *BackendsFile) resolvePool() (*Pool, error) {
-	if f.Pool == nil {
-		return nil, nil
-	}
-	if len(f.Pool.Backends) == 0 {
-		return nil, errors.New("pool declares no backends")
-	}
-
-	declared := map[string]bool{}
-	for _, e := range f.Backends {
-		declared[e.Name] = true
-	}
-
-	seen := map[string]bool{}
-	members := make([]string, 0, len(f.Pool.Backends))
-	for _, name := range f.Pool.Backends {
-		if !declared[name] {
-			return nil, fmt.Errorf("pool member %q is not declared as a backend", name)
-		}
-		if seen[name] {
-			return nil, fmt.Errorf("pool lists %q twice", name)
-		}
-		seen[name] = true
-		members = append(members, name)
-	}
-
-	inflight := f.Pool.MaxInflight
-	if inflight < 1 {
-		inflight = 1
-	}
-	return &Pool{Backends: members, MaxInflight: inflight}, nil
 }
 
 func orDefault(v, fallback string) string {

@@ -30,9 +30,6 @@ type Config struct {
 	// no fallback: a local backend that is down simply reports the failure
 	// rather than quietly sending the transcript somewhere else.
 	FallbackBackend string
-	// Pool is the set of backends a batch may be fanned out across. Nil means
-	// none was declared, and the batch tool is not offered at all.
-	Pool *Pool
 
 	// HuggingFaceToken is optional and only needed for gated repositories;
 	// searching public models works without one.
@@ -48,13 +45,6 @@ type Config struct {
 	// MaxToolIterations caps how many tool round-trips one turn may take
 	// before the loop gives up, so a model that loops can't run forever.
 	MaxToolIterations int
-
-	// Metadata provider credentials are all optional; each lookup provider
-	// registers itself only when its credentials are present.
-	TMDBAPIKey string
-	TVDBAPIKey string
-	TVDBPin    string
-	OMDBAPIKey string
 
 	// Knowledge sources an agent profile can be given. Each is optional, and
 	// an unset one means the corresponding tools are never offered rather than
@@ -329,7 +319,6 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", backendsPath, err)
 	}
-	pool, err := file.resolvePool()
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", backendsPath, err)
 	}
@@ -340,15 +329,10 @@ func Load() (*Config, error) {
 		Backends:          backends,
 		DefaultBackend:    file.Default,
 		FallbackBackend:   file.Fallback,
-		Pool:              pool,
 		HuggingFaceToken:  os.Getenv("HUGGINGFACE_TOKEN"),
 		LLMMaxTokens:      maxTokens,
 		LLMTimeout:        timeout,
 		MaxToolIterations: iterations,
-		TMDBAPIKey:        os.Getenv("TMDB_API_KEY"),
-		TVDBAPIKey:        os.Getenv("TVDB_API_KEY"),
-		TVDBPin:           os.Getenv("TVDB_PIN"),
-		OMDBAPIKey:        os.Getenv("OMDB_API_KEY"),
 		AssistantTools:    envStringSlice("WINTERMUTE_ASSISTANT_TOOLS", []string{"tasks"}),
 		GRCBaseURL:        strings.TrimSpace(os.Getenv("GRC_URL")),
 		GRCToken:          strings.TrimSpace(os.Getenv("GRC_KNOWLEDGE_TOKEN")),

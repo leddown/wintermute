@@ -24,7 +24,6 @@ import (
 	"wintermute/internal/grc"
 	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
-	"wintermute/internal/lookup"
 	"wintermute/internal/modelrepo"
 	"wintermute/internal/models"
 	"wintermute/internal/node"
@@ -154,34 +153,6 @@ func reloadBackends(ctx context.Context, cfg *config.Config, st *store.Store,
 	return nil
 }
 
-// buildPool resolves the declared batch pool against the live backends. It
-// returns nil when no pool was declared, and the agent then offers no batch
-// tool at all.
-func buildPool(cfg *config.Config, router *llm.Router, log *slog.Logger) (*llm.Pool, error) {
-	if cfg.Pool == nil {
-		return nil, nil
-	}
-	members := make([]llm.PoolMember, 0, len(cfg.Pool.Backends))
-	for _, name := range cfg.Pool.Backends {
-		b, ok := router.Backend(name)
-		if !ok {
-			return nil, fmt.Errorf("pool member %q: %w", name, llm.ErrNoBackend)
-		}
-		members = append(members, llm.PoolMember{Backend: b, Slots: cfg.Pool.MaxInflight})
-	}
-
-	pool, err := llm.NewPool("batch", members, log)
-	if err != nil {
-		return nil, err
-	}
-	// A pool member that leaves the network is a legitimate choice, but it is
-	// one a batch makes many times over without anyone approving each item, so
-	// it gets said out loud at startup rather than only in a turn's response.
-	log.Info("batch pool configured",
-		"members", pool.Members(), "slots", pool.Slots(), "cloud", pool.HasCloudMember())
-	return pool, nil
-}
-
 // New assembles the application. The caller owns Close.
 func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	st, err := store.Open(cfg.DatabasePath)
@@ -204,12 +175,6 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		return nil, err
 	}
 
-	pool, err := buildPool(cfg, router, log)
-	if err != nil {
-		st.Close()
-		return nil, err
-	}
-
 	catalog := models.NewCatalog(backends, st, models.NewHub("", cfg.HuggingFaceToken), log)
 
 	// Which parts of the application the assistant may act on. See
@@ -223,13 +188,6 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		"available", knownAssistantGroups)
 
 	tools := tool.NewRegistry()
-	providers := metadataProviders(cfg, log)
-	if enabled["media"] {
-		if err := lookup.Register(tools, providers); err != nil {
-			st.Close()
-			return nil, fmt.Errorf("register lookup tools: %w", err)
-		}
-	}
 	// Model-awareness tools let the assistant answer hardware and model
 	// questions from measurements rather than from its training data.
 	if enabled["models"] {
@@ -304,7 +262,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	router = router.WithRecorder(inference)
 
 	scope := &agentScope{knowledge: knowledgeService, grc: grcClient, web: webClient}
-	ag := agent.New(router, pool, st, tools, log, cfg.MaxToolIterations).WithScope(scope)
+	ag := agent.New(router, st, tools, log, cfg.MaxToolIterations).WithScope(scope)
 
 	// Memory. Configured only when an embedder is, so a deployment without one
 	// runs exactly as it did before this existed.
@@ -354,15 +312,11 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		LLMMaxTokens:        cfg.LLMMaxTokens,
 		LLMTimeout:          cfg.LLMTimeout,
 		MaxToolIterations:   cfg.MaxToolIterations,
-		MetadataProviders:   providers.Names(),
 		GRC:                 grcClient.Describe(),
 		WebSearch:           webClient.Describe(),
 		HasHuggingFaceToken: cfg.HuggingFaceToken != "",
 		GoVersion:           runtime.Version(),
 		StartedAt:           time.Now().UTC(),
-	}
-	if cfg.Pool != nil {
-		info.PoolBackends = cfg.Pool.Backends
 	}
 
 	// Fleet telemetry, in its own database. Optional: without it the server
@@ -523,7 +477,6 @@ func buildTwire(cfg *config.Config, st *store.Store, log *slog.Logger) *twire.Se
 // and what each one hands the model:
 //
 //	tasks       lists, tasks, notes and the calendar — the Tasks view
-//	media       the TMDB/TVDB/OMDb title lookups
 //	models      hardware and model-fit questions, answered from measurements
 //	accounting  the books: invoices, payments, expenses, reports
 //	portfolio   holdings, trades, forecasts, the simulated broker
@@ -559,28 +512,6 @@ func assistantGroups(names []string) (map[string]bool, error) {
 		enabled[n] = true
 	}
 	return enabled, nil
-}
-
-// metadataProviders registers whichever metadata sources have credentials.
-func metadataProviders(cfg *config.Config, log *slog.Logger) *lookup.Registry {
-	reg := lookup.NewRegistry()
-	if p := lookup.NewTMDB(cfg.TMDBAPIKey); p != nil {
-		reg.Register(p)
-	}
-	if p := lookup.NewTVDB(cfg.TVDBAPIKey, cfg.TVDBPin); p != nil {
-		reg.Register(p)
-	}
-	if p := lookup.NewOMDb(cfg.OMDBAPIKey); p != nil {
-		reg.Register(p)
-	}
-
-	if reg.Len() == 0 {
-		log.Warn("no metadata providers configured; the assistant cannot verify titles",
-			"hint", "set TMDB_API_KEY, TVDB_API_KEY or OMDB_API_KEY")
-	} else {
-		log.Info("metadata providers configured", "providers", reg.Names())
-	}
-	return reg
 }
 
 // Store exposes the store for the CLI subcommands (client management).

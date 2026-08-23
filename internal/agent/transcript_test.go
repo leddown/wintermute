@@ -194,7 +194,7 @@ func TestActionsAreAuditedEvenOffTheRecord(t *testing.T) {
 	ctx := context.Background()
 	reg := tool.NewRegistry()
 	err := reg.Register(
-		tool.Definition{Name: "lookup_metadata", Description: "lookup", Risk: tool.RiskRead},
+		tool.Definition{Name: "probe_thing", Description: "lookup", Risk: tool.RiskRead},
 		func(context.Context, json.RawMessage) (string, error) { return "found", nil },
 	)
 	if err != nil {
@@ -202,7 +202,7 @@ func TestActionsAreAuditedEvenOffTheRecord(t *testing.T) {
 	}
 
 	p := &scriptedProvider{responses: []llm.Response{
-		toolCall("lookup_metadata", `{"title":"x"}`),
+		toolCall("probe_thing", `{"title":"x"}`),
 		reply("done"),
 	}}
 	a, st, sess := newTestAgent(t, p, reg)

@@ -9,7 +9,7 @@ on a home network. It is two binaries plus a browser UI:
 
 - **`cmd/wintermuted`** — the server. Runs on a Linux host on the network,
   calls Claude through the Anthropic Messages API, owns the conversation
-  transcript, and executes server-side tools (metadata lookups). It also
+  transcript, and executes server-side tools. It also
   serves the embedded browser UI.
 - **`cmd/wintermute`** — the desktop harness, built for Windows/macOS/Linux
   clients. It declares which actions the local machine can perform, and
@@ -23,9 +23,10 @@ The server never touches a user's filesystem and never decides that an
 action was approved. Preserve that split — it is the security model, not an
 implementation detail.
 
-The first feature built on this is media file renaming: the client lists a
-NAS share, the server looks the titles up against TMDB/TVDB/OMDb, and the
-model proposes renames that the user approves one by one.
+The first feature built on this was media file renaming, against TMDB/TVDB/OMDb.
+That has been removed. What the split now protects is narrower and unchanged in
+kind: the client harness lists and renames files on the user's own machines, one
+approval at a time, and the server never touches them.
 
 State lives in SQLite (`modernc.org/sqlite`, pure Go — **no cgo**, which is
 what lets the client cross-compile to a standalone Windows binary).
@@ -41,7 +42,6 @@ internal/agent/     the turn loop; partitions calls into server/client work
 internal/api/       JSON HTTP handlers + auth middleware
 internal/llm/       Provider interface + Anthropic Messages API implementation
 internal/tool/      shared vocabulary: Definition, Call, Result, Registry
-internal/lookup/    server-side tools: TMDB/TVDB/OMDb metadata lookup
 internal/store/     SQLite: clients, sessions, messages, muninn (audit)
 internal/recall/    memory: embedding index, hybrid retrieval, prior-context block
 internal/hostmetrics/ /proc readers, shared by the server and the node agent
@@ -76,9 +76,8 @@ GOOS=windows GOARCH=amd64 go build -o wintermute.exe ./cmd/wintermute
 Run `gofmt -l .` and `go vet ./...` before considering any change complete.
 Never leave the tree in a state that fails `go build ./...`.
 
-Server configuration is environment-based (`ANTHROPIC_API_KEY`, `WINTERMUTE_*`,
-plus `TMDB_API_KEY` / `TVDB_API_KEY` / `TVDB_PIN` / `OMDB_API_KEY`), loaded
-from `.env` if present. `ANTHROPIC_API_KEY` is required;
+Server configuration is environment-based (`ANTHROPIC_API_KEY`, `WINTERMUTE_*`),
+loaded from `.env` if present. `ANTHROPIC_API_KEY` is required;
 `WINTERMUTE_LLM_MODEL` defaults to `claude-opus-5`. Client configuration
 is a JSON file (`~/.config/wintermute/config.json`, `%AppData%` on Windows);
 `wintermute -init` writes a starter.
@@ -95,7 +94,7 @@ transcript is replayed from SQLite on every iteration of the turn loop, so
 strip it, and don't disable thinking to avoid the problem (with thinking off,
 the model sometimes writes a tool call into its visible text instead of
 emitting a tool_use block, which looks like a turn that succeeded while the
-rename silently never ran).
+action silently never ran).
 
 ## Memory
 
@@ -251,8 +250,11 @@ implementing, rather than guessing at scope.
 
 ## Security
 
-These rules exist because this program renames files on a NAS on behalf of a
-language model. Treat model output as untrusted input.
+These rules exist because this program acts on a home network on behalf of a
+language model: it renames files on the user's machines through the client
+harness, and it downloads gigabytes onto disks the server owns. Treat model
+output as untrusted input, and treat a filename from off the machine — a
+Hugging Face repository, a fleet assignment — the same way.
 
 - **Every client action is confined to the configured roots.** Path
   validation lives in `internal/client/actions/roots.go`. Any new filesystem

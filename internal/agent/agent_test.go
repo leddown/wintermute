@@ -71,7 +71,7 @@ func newTestAgent(t *testing.T, p llm.Provider, reg *tool.Registry) (*Agent, *st
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(router, nil, st, reg, log, 8), st, sess
+	return New(router, st, reg, log, 8), st, sess
 }
 
 func clientTool(name string, risk tool.Risk) tool.Definition {
@@ -107,7 +107,7 @@ func TestAdvanceRunsServerToolsInline(t *testing.T) {
 	reg := tool.NewRegistry()
 	var gotInput string
 	err := reg.Register(
-		tool.Definition{Name: "lookup_metadata", Description: "lookup", Risk: tool.RiskRead},
+		tool.Definition{Name: "probe_thing", Description: "lookup", Risk: tool.RiskRead},
 		func(_ context.Context, in json.RawMessage) (string, error) {
 			gotInput = string(in)
 			return `{"matches":[{"title":"Pilot"}]}`, nil
@@ -117,7 +117,7 @@ func TestAdvanceRunsServerToolsInline(t *testing.T) {
 	}
 
 	p := &scriptedProvider{responses: []llm.Response{
-		toolCall("lookup_metadata", `{"kind":"episode","title":"Show"}`),
+		toolCall("probe_thing", `{"kind":"episode","title":"Show"}`),
 		reply("Found it."),
 	}}
 	a, st, sess := newTestAgent(t, p, reg)

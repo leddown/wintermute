@@ -111,8 +111,8 @@ fi
 
 # The single most consequential line in the env file. Unset, the server looks
 # for ./backends.json in its working directory, doesn't find one, and quietly
-# builds one backend from the environment instead — so a multi-backend file
-# with a pool in it sits on disk doing nothing, and the only symptom is that
+# builds one backend from the environment instead — so a carefully written
+# multi-backend file sits on disk doing nothing, and the only symptom is that
 # the extra backends have vanished.
 BACKENDS_FILE="$(env_value WINTERMUTE_BACKENDS)"
 if [ -z "$BACKENDS_FILE" ]; then
@@ -173,51 +173,6 @@ else
     esac
   done < <(jq -r '.backends[] | [.name, .kind, (.base_url // ""), (.api_key_env // "")] | @tsv' "$BACKENDS_FILE")
 
-  # Pool checks. The batch tool only exists if a pool is declared, and the way
-  # a pool disappoints is not by failing — it is by being configured across
-  # members that share a machine, where it adds queueing rather than throughput.
-  POOL_MEMBERS="$(jq -r '(.pool.backends // [])[]' "$BACKENDS_FILE")"
-  echo
-  if [ -z "$POOL_MEMBERS" ]; then
-    echo "==> Batch pool"
-    echo "    • none declared, so batch_propose_names is not offered. Naming a"
-    echo "      directory of files runs one at a time. See docs/backends.md."
-  else
-    INFLIGHT="$(jq -r '.pool.max_inflight // 1' "$BACKENDS_FILE")"
-    COUNT="$(printf '%s\n' "$POOL_MEMBERS" | grep -c .)"
-    echo "==> Batch pool ($COUNT members, max_inflight $INFLIGHT)"
-
-    HOSTS=""
-    while IFS= read -r member; do
-      [ -n "$member" ] || continue
-      url="$(jq -r --arg n "$member" '.backends[] | select(.name==$n) | .base_url // ""' "$BACKENDS_FILE")"
-      kind="$(jq -r --arg n "$member" '.backends[] | select(.name==$n) | .kind' "$BACKENDS_FILE")"
-      if [ "$kind" = "anthropic" ]; then
-        echo "    • $member is a cloud backend. A batch sends many filenames off the"
-        echo "      network at once, without anyone approving them one by one."
-        continue
-      fi
-      # Strip scheme, port and path; treat localhost and 127.0.0.1 as one host,
-      # because writing them differently does not make them different machines.
-      host="${url#*://}"
-      host="${host%%/*}"
-      host="${host%%:*}"
-      [ "$host" = "localhost" ] && host="127.0.0.1"
-      case " $HOSTS " in
-        *" $host "*)
-          echo "    ✗ $member shares host $host with another member. Two members on one"
-          echo "      machine are two queues into one worker, not two workers — the batch"
-          echo "      will not go faster, and on one GPU it may go slower." ;;
-        *) HOSTS="$HOSTS $host" ;;
-      esac
-    done <<< "$POOL_MEMBERS"
-
-    if [ "$INFLIGHT" -gt 1 ] 2>/dev/null; then
-      echo "    • max_inflight is $INFLIGHT, so each member takes $INFLIGHT items at once."
-      echo "      On a single-GPU llama-server that divides the throughput it already"
-      echo "      had rather than adding to it. Worth measuring against 1."
-    fi
-  fi
 fi
 
 echo

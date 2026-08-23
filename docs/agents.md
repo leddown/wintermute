@@ -34,7 +34,7 @@ question gets a real answer, with references.
 | `web` | `web_search`, `fetch_url` | Your SearXNG instance, and one page at a time |
 
 An agent with no sources is a plain assistant. The workspace tools — tasks,
-CRM, accounting, media lookup — are available to every session regardless;
+CRM, accounting — are available to every session regardless;
 sources govern *knowledge*, not the firm's own tools.
 
 The document tools are registered per session and bound to the session's agent.

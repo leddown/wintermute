@@ -115,8 +115,8 @@ func (s *Server) mcpInitialize() map[string]any {
 			"title":   "Wintermute",
 			"version": mcpProtocolVersion,
 		},
-		"instructions": "Server-side Wintermute tools: metadata lookups for media titles, " +
-			"and questions about this host's hardware and the models it can run. " +
+		"instructions": "Server-side Wintermute tools: questions about this host's hardware " +
+			"and the models it can run, and whatever else the operator has enabled. " +
 			"Filesystem actions are not offered here — those belong to the wintermute client harness.",
 	}
 }

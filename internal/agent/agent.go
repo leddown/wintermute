@@ -60,7 +60,6 @@ type Turn struct {
 // Agent wires the model, the transcript store and the server-side tools.
 type Agent struct {
 	router        *llm.Router
-	pool          *llm.Pool
 	store         *store.Store
 	serverTools   *tool.Registry
 	log           *slog.Logger
@@ -131,13 +130,9 @@ func (a *Agent) WithScope(s Scoper) *Agent {
 
 // New builds an Agent. serverTools holds only tools the server executes;
 // client-declared tools are layered on per session.
-//
-// pool may be nil, in which case no batch tool is offered — the model is never
-// shown a way to fan work out that the deployment has not configured.
-func New(router *llm.Router, pool *llm.Pool, s *store.Store, serverTools *tool.Registry, log *slog.Logger, maxIterations int) *Agent {
+func New(router *llm.Router, s *store.Store, serverTools *tool.Registry, log *slog.Logger, maxIterations int) *Agent {
 	return &Agent{
 		router:        router,
-		pool:          pool,
 		store:         s,
 		serverTools:   serverTools,
 		log:           log,
@@ -338,18 +333,11 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 // registryFor layers a client's declared tools over the server's own, then
 // narrows the result to what this session's agent profile may reach.
 //
-// The batch tool is added here rather than at startup because it has to be
-// bound to a session: that is what puts each worker's tool calls in the right
-// audit trail. The knowledge tools are added here for a stronger reason — they
-// are bound to the session's agent, so the library a model can search is
-// decided by the session rather than named in a tool argument it could change.
+// The knowledge tools are added here rather than at startup because they are
+// bound to the session's agent, so the library a model can search is decided by
+// the session rather than named in a tool argument it could change.
 func (a *Agent) registryFor(ctx context.Context, sess *store.Session, clientTools []tool.Definition) (*tool.Registry, string, error) {
 	registry := a.serverTools.Clone()
-	if a.pool != nil {
-		if err := registry.Register(batchDefinition(a.pool), a.batchHandler(sess)); err != nil {
-			return nil, "", fmt.Errorf("batch tool: %w", err)
-		}
-	}
 
 	var extraPrompt string
 	if a.scope != nil {

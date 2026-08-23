@@ -12,7 +12,7 @@ import (
 	"wintermute/internal/tool"
 )
 
-// defaultMaxEntries bounds a listing so a large media directory cannot blow
+// defaultMaxEntries bounds a listing so a very large directory cannot blow
 // past the model's context window in a single tool result.
 const defaultMaxEntries = 200
 
@@ -22,7 +22,7 @@ func listDirectory(roots *Roots) Action {
   "properties": {
     "path": {
       "type": "string",
-      "description": "Directory to list. Must be inside an allowed root; UNC paths such as \\\\NAS\\Media are supported on Windows."
+      "description": "Directory to list. Must be inside an allowed root; UNC paths such as \\\\NAS\\share are supported on Windows."
     },
     "include_subdirectories": {
       "type": "boolean",

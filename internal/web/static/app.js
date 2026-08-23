@@ -576,7 +576,7 @@ async function newSession() {
 function emptyChatHint() {
   const agent = state.agents.find((a) => a.id === state.chatAgent);
   if (agent) return `Talking to ${agent.name}. It can read the documents and sources given to it.`;
-  return 'Ask about your media library, your tasks, or anything else.';
+  return 'Ask about your models, your tasks, or anything else.';
 }
 
 async function openSession(id) {
@@ -4018,7 +4018,6 @@ async function renderAdminConfig(body) {
   body.append(facts([
     ['Default backend', c.default_backend],
     ['Fallback backend', c.fallback_backend || '(none — failures are reported, not rerouted)'],
-    ['Pool', (c.pool_backends || []).join(', ') || '(none — the batch tool is not offered)'],
     ['Max tokens', c.llm_max_tokens],
     ['Timeout', c.llm_timeout],
     ['Max tool iterations', c.max_tool_iterations],
@@ -4028,8 +4027,6 @@ async function renderAdminConfig(body) {
   // gets left open and screenshotted.
   body.append(el('div', { class: 'group-head', text: 'Credentials' }));
   body.append(facts([
-    ['Metadata providers', (c.metadata_providers || []).join(', ') ||
-      '(none — the assistant cannot verify a title before renaming)'],
     ['Hugging Face token', c.has_huggingface_token ? 'configured' : 'not set'],
   ]));
   body.append(el('div', { class: 'muted', text:
