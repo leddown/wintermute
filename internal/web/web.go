@@ -39,6 +39,9 @@ var assets embed.FS
 var compressible = map[string]bool{
 	".html": true, ".css": true, ".js": true, ".json": true,
 	".svg": true, ".txt": true, ".map": true, ".webmanifest": true,
+	// The FAQ is served as Markdown and rendered in the browser, so it is
+	// text like the rest and compresses like the rest.
+	".md": true,
 }
 
 // minCompressBytes is the size below which compression is not worth it: the

@@ -1333,3 +1333,45 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
 .repo-badge.pending, .repo-badge.fetching { border-color: var(--accent); color: var(--accent); }
 .repo-badge.unimported { border-color: var(--border); color: var(--muted); }
 .node-store-assign { margin-top: 6px; }
+
+/* ---------- rendered documentation ----------
+   The FAQ, rendered from Markdown. Measure is capped: this is prose, and a
+   line of body text spanning a wide monitor is genuinely harder to read than
+   one that does not. */
+
+.doc { max-width: 68ch; }
+.doc-h { margin: 22px 0 8px; line-height: 1.3; }
+.doc h1.doc-h { font-size: 22px; margin-top: 0; }
+.doc h2.doc-h {
+  font-size: 17px; border-bottom: 1px solid var(--border); padding-bottom: 6px;
+  margin-top: 30px;
+}
+.doc h3.doc-h { font-size: 14px; color: var(--accent); }
+.doc-p { margin: 0 0 12px; line-height: 1.65; }
+.doc-list { margin: 0 0 12px 18px; line-height: 1.65; }
+.doc-list li { margin-bottom: 4px; }
+
+.doc-code {
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; margin: 0 0 14px;
+  /* Config blocks contain long paths that must not wrap into something that
+     looks like two settings. */
+  overflow-x: auto;
+}
+.doc-code code {
+  font-family: ui-monospace, "Courier New", monospace; font-size: 12px;
+  white-space: pre; color: var(--text);
+}
+.doc-inline-code {
+  font-family: ui-monospace, "Courier New", monospace; font-size: 12px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px;
+  padding: 1px 5px; word-break: break-word;
+}
+.doc a { color: var(--accent); }
+
+.doc-table-wrap { overflow-x: auto; margin: 0 0 14px; }
+.doc-table { border-collapse: collapse; font-size: 13px; }
+.doc-table th, .doc-table td {
+  border: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top;
+}
+.doc-table th { background: var(--surface-2); font-weight: 600; }

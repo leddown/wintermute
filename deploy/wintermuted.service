@@ -24,6 +24,21 @@ RestartSec=5
 StateDirectory=wintermute
 WorkingDirectory=/var/lib/wintermute
 
+# The model repository, when WINTERMUTE_MODEL_REPO points outside
+# /var/lib/wintermute — an external drive is the usual case.
+#
+# ProtectSystem=strict makes everything except StateDirectory read-only, so
+# without a line like this the repository is readable and every download fails
+# with permission denied on a directory that works perfectly from a shell.
+# Uncomment and match it to WINTERMUTE_MODEL_REPO:
+#
+#   ReadWritePaths=/mnt/usb-drive/wintermute
+#
+# If the drive is mounted by systemd, require it too, so the service does not
+# start against a bare mount point and find the repository uninitialised:
+#
+#   RequiresMountsFor=/mnt/usb-drive
+
 NoNewPrivileges=true
 ProtectSystem=strict
 # The server never touches a user's files — that is the whole point of the

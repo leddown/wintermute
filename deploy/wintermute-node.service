@@ -1,0 +1,62 @@
+[Unit]
+Description=Wintermute fleet agent (reports host state, keeps this host's model store)
+Documentation=https://github.com/leddown/wintermute
+After=network-online.target
+Wants=network-online.target
+# Start after whatever serves models here, so the first scan finds the runtime
+# up rather than reporting every model as present-but-not-importable.
+# After=ollama.service
+# After=llama-swap.service
+
+[Service]
+Type=simple
+User=wintermute-node
+Group=wintermute-node
+EnvironmentFile=/etc/wintermute/node.env
+ExecStart=/usr/local/bin/wintermute-node
+Restart=on-failure
+RestartSec=10
+
+# The spool of undelivered readings lives here, and so does the model store
+# unless WINTERMUTE_NODE_STORE points elsewhere. StateDirectory creates it
+# owned by the service user on start.
+StateDirectory=wintermute-node
+WorkingDirectory=/var/lib/wintermute-node
+
+# If the model store is on another filesystem — a second disk with room for
+# weights is the usual reason — name it here, or ProtectSystem=strict makes
+# every fetch fail with permission denied on a directory that is plainly
+# writable from a shell:
+#
+#   ReadWritePaths=/srv/models
+#
+# With -runtime llamacpp the agent also rewrites one llama-swap config, which
+# is a second path outside StateDirectory:
+#
+#   ReadWritePaths=/etc/llama-swap
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+
+# Deliberately NOT set: PrivateDevices=true.
+#
+# GPU telemetry shells out to nvidia-smi, which needs /dev/nvidia*. With
+# PrivateDevices=true the fleet view shows this host with no cards and no VRAM
+# figures, which reads as a driver problem rather than a sandbox setting.
+
+# The agent listens on nothing and opens no ports. It dials out to the server
+# and to the local runtime, and that is the whole of its network use.
+
+[Install]
+WantedBy=multi-user.target

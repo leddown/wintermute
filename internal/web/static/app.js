@@ -2743,7 +2743,7 @@ async function renderAdmin() {
     status: 'Status', config: 'Configuration', backends: 'Backends',
     hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
     models: 'Models', repo: 'Repository', fleet: 'Fleet', memory: 'Memory',
-    appearance: 'Appearance',
+    appearance: 'Appearance', faq: 'Help',
   };
   $('admin-title').textContent = titles[admin.tab];
   body.innerHTML = '';
@@ -2755,6 +2755,7 @@ async function renderAdmin() {
   if (admin.tab === 'tools') return renderAdminTools(body);
   if (admin.tab === 'models') return renderAdminModels(body);
   if (admin.tab === 'repo') return renderAdminRepo(body);
+  if (admin.tab === 'faq') return renderAdminFAQ(body);
   if (admin.tab === 'fleet') return renderAdminFleet(body);
   if (admin.tab === 'memory') return renderAdminMemory(body);
   // Purely local, unlike every other tab here: it reads and writes
@@ -3749,6 +3750,118 @@ async function deleteRepoFile(f) {
   });
   toast(f.missing ? 'Record dropped.' : `${f.name} deleted.`);
   await refreshRepoFiles();
+}
+
+/* ---------- the FAQ ----------
+   Served as Markdown from the embedded assets and rendered here, rather than
+   shipped as a second copy in HTML. One source, and it stays readable in the
+   repository — which is where anyone setting the thing up will actually be.
+
+   Rendered into DOM nodes rather than assigned as innerHTML. That is the rule
+   the whole UI keeps: every value reaching the DOM goes through el() or
+   textContent. The FAQ is our own file rather than user input, so nothing here
+   is hostile today, but a Markdown renderer that builds a string and hands it
+   to innerHTML is a cross-site scripting hole waiting for the day somebody
+   points it at content from somewhere else. */
+
+async function renderAdminFAQ(body) {
+  const res = await fetch('/FAQ.md', { headers: { Authorization: `Bearer ${state.token}` } });
+  if (!res.ok) {
+    body.append(el('p', { class: 'error', text: `Could not load the FAQ (${res.status}).` }));
+    return;
+  }
+  body.append(el('div', { class: 'doc' }, renderMarkdown(await res.text())));
+}
+
+// A deliberately small Markdown subset: headings, paragraphs, lists, fenced
+// code, tables, and inline code/bold/links. Enough for the FAQ, and small
+// enough to read in one sitting — the alternative was embedding a library to
+// render one document.
+function renderMarkdown(text) {
+  const lines = text.split('\n');
+  const out = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code. Taken verbatim, including anything that looks like markup,
+    // which is the point of a fence.
+    if (line.startsWith('```')) {
+      const code = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('```')) code.push(lines[i++]);
+      i++;
+      out.push(el('pre', { class: 'doc-code' }, el('code', { text: code.join('\n') })));
+      continue;
+    }
+
+    const heading = /^(#{1,4})\s+(.*)$/.exec(line);
+    if (heading) {
+      out.push(el(`h${heading[1].length}`, { class: 'doc-h' }, inlineMarkdown(heading[2])));
+      i++;
+      continue;
+    }
+
+    // Tables: a header row, a divider of dashes, then body rows.
+    if (line.includes('|') && /^\s*\|?[\s:|-]+\|[\s:|-]*$/.test(lines[i + 1] || '')) {
+      const head = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].includes('|')) rows.push(splitRow(lines[i++]));
+      out.push(el('div', { class: 'doc-table-wrap' },
+        el('table', { class: 'doc-table' }, [
+          el('thead', {}, el('tr', {}, head.map((c) => el('th', {}, inlineMarkdown(c))))),
+          el('tbody', {}, rows.map((r) => el('tr', {}, r.map((c) => el('td', {}, inlineMarkdown(c)))))),
+        ])));
+      continue;
+    }
+
+    if (/^\s*[-*]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
+        items.push(el('li', {}, inlineMarkdown(lines[i].replace(/^\s*[-*]\s+/, ''))));
+        i++;
+      }
+      out.push(el('ul', { class: 'doc-list' }, items));
+      continue;
+    }
+
+    if (!line.trim()) { i++; continue; }
+
+    // Everything else is a paragraph, running until a blank line. Markdown's
+    // soft wrapping means the FAQ's hard-wrapped source must be rejoined, or
+    // every line would become its own paragraph.
+    const para = [];
+    while (i < lines.length && lines[i].trim() && !lines[i].startsWith('```')
+           && !/^#{1,4}\s/.test(lines[i]) && !/^\s*[-*]\s+/.test(lines[i])) {
+      para.push(lines[i++]);
+    }
+    out.push(el('p', { class: 'doc-p' }, inlineMarkdown(para.join(' '))));
+  }
+  return out;
+}
+
+function splitRow(line) {
+  return line.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+}
+
+// Inline spans, returned as nodes. Code first so that bold or link syntax
+// inside a code span is left alone.
+function inlineMarkdown(text) {
+  const nodes = [];
+  const pattern = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\(([^)]+)\)/g;
+  let last = 0;
+  let m;
+  while ((m = pattern.exec(text)) !== null) {
+    if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)));
+    if (m[1] !== undefined) nodes.push(el('code', { class: 'doc-inline-code', text: m[1] }));
+    else if (m[2] !== undefined) nodes.push(el('strong', { text: m[2] }));
+    else nodes.push(el('a', { href: m[4], target: '_blank', rel: 'noopener noreferrer', text: m[3] }));
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
+  return nodes;
 }
 
 // Shared memory: the master switch, and the two ways to throw things away.
