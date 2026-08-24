@@ -33,58 +33,61 @@ just against tests:
 syntax-checked and the JSON behind it was read field by field, but the card
 layout itself is unreviewed in a browser. That is the first thing to do.
 
-## 2. The live blocker: Initialise fails on the server
+## 2. The live blocker: the deployed server is from 13 August
 
-**Symptom:** Admin → Repository → Initialise returns `internal error`.
-
-**Diagnosed cause:** not permissions. The directory is already
-`drwxr-xr-x wintermute` — the service user owns it with `rwx`. The unit has:
+**This supersedes yesterday's diagnosis, which was wrong.** Initialise did not
+fail because of `ProtectSystem=strict`. It failed because the endpoint is not
+in the running binary:
 
 ```
-User=wintermute
-ProtectSystem=strict
-ReadWritePaths=          <-- empty
+$ ls -l /usr/local/bin/wintermuted
+-rwxr-xr-x 1 root root 23008316 Aug 13 15:59 /usr/local/bin/wintermuted
+$ strings /usr/local/bin/wintermuted | grep -cF /api/v1/repo/init
+0
 ```
 
-`ProtectSystem=strict` remounts everything outside `StateDirectory` read-only
-*for the process*, so the write fails no matter who owns the directory. Adding
-the user to a group will not help.
+Zero for `/api/v1/repo/init`, `repo/download` and `WINTERMUTE_MODEL_REPO`. The
+deployed build predates the model repository entirely, and since the browser UI
+is embedded in the binary, the served JS and CSS are that old too. Everything
+from `a6f72e8` onward — eight commits — is unreleased. **Nothing in this repo
+can be reviewed in the running UI until `./update.sh` is run.**
 
-**Fix, on the server:**
+That script rebuilds from the working tree and restarts the service; it was
+offered and explicitly declined on 24 August, so the stale deploy is a known
+state, not an oversight.
 
-```bash
-sudo systemctl edit wintermuted
-```
-```ini
-[Service]
-ReadWritePaths=/mnt/usb-drive/wintermute
-RequiresMountsFor=/mnt/usb-drive
-```
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart wintermuted
-```
+### What is still expected to bite after deploying
 
-**Still to verify on the actual server** (it is *not* this machine —
-`/mnt/usb-drive` does not exist here and `/mnt` is empty):
+Both of these are unproven — they were reasoned from the unit file and the
+filesystem, not observed against a build that has the feature.
 
-```bash
-systemctl show -p ReadWritePaths -p ProtectSystem wintermuted
-findmnt --target /mnt/usb-drive            # mounted? read-only? CIFS?
-strings /usr/local/bin/wintermuted | grep -c wintermute-repo
-```
+1. **The unit still has no writable path outside its state directory:**
 
-That last one matters: the binary installed on *this* box returns **0**, i.e.
-it predates the repository feature entirely. If the server is running a build
-that old, `/api/v1/repo/init` does not exist there and the whole diagnosis is
-moot — deploy a current build first.
+   ```
+   ProtectSystem=strict
+   ReadWritePaths=          <-- empty
+   StateDirectory=wintermute
+   ```
 
-If the drive turns out to be a **CIFS/SMB mount** rather than a local disk that
-Samba exports, group membership and `chown` both do nothing: permissions on
-CIFS are synthetic and set at mount time via `uid=`, `gid=`, `file_mode=`,
-`dir_mode=` in `/etc/fstab`.
+   So the EROFS reasoning probably does apply once the endpoint exists. The
+   fix, unchanged:
 
----
+   ```bash
+   sudo systemctl edit wintermuted
+   ```
+   ```ini
+   [Service]
+   ReadWritePaths=/mnt/usb-drive/wintermute
+   RequiresMountsFor=/mnt/usb-drive
+   ```
+
+2. **`/mnt` is empty on this host.** Whatever `WINTERMUTE_MODEL_REPO` points
+   at, `/mnt/usb-drive` is not mounted, so the write has nowhere to land
+   whatever the unit permits. Check `findmnt --target` before blaming systemd
+   a second time.
+
+`15f9b92` means the distinction will now be reported in the browser rather
+than guessed at: EROFS names `ReadWritePaths`, EACCES names `chown`.
 
 ## 3. The Hugging Face search work — done, with notes
 
@@ -112,6 +115,31 @@ Three things worth knowing about what landed:
 - **A shard set is several jobs, started together.** The job registry is
   per-file and that was left alone. The progress panel therefore shows two
   bars for one BF16 download, which is accurate but may read oddly.
+
+## 3b. Text brightness in Admin → Appearance
+
+Added 24 August (`8cf3889`). A slider lifting `--text` and `--muted` towards
+white, 100–175, per browser, on all four themes at once.
+
+- `--text` and `--muted` are now **derived** in `style.css` from `--text-base`
+  and `--muted-base`, which is what each palette sets. A new theme must define
+  the `-base` pair, not `--text`/`--muted` directly, or the lift will not
+  reach it.
+- The derivation is inside `@supports (color: color-mix(...))` with a plain
+  fallback before it. This is not defensive habit: a custom property that
+  fails to compute does not fall back to the palette, it invalidates every
+  colour depending on it, and on these backgrounds that is an unreadable page.
+- Applied in `theme-init.js` before first paint, so the clamp is duplicated
+  there. If the range changes, both files move.
+- Verified in headless Chrome rather than by eye: at 175 the body colour goes
+  from `#e6e8ec` to `#f9f9fa` and mean text-pixel brightness across the pane
+  from (115,129,152) to (157,166,180); junk and out-of-range input clamp to
+  100/175; the pre-paint path and the module path produce identical colours.
+
+Not checked: how the lift reads on the Matrix and 40K palettes on a real
+screen. Both mix towards white, so at the top of the range the Matrix green
+pales and the 40K brass loses some of its warmth. That is the trade the
+setting exists to offer, but nobody has looked at it.
 
 ## 4. Other things left open
 
