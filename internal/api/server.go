@@ -201,6 +201,9 @@ func (s *Server) Handler() http.Handler {
 	// Weights the operator keeps on their own disk — see modelrepo.go.
 	s.registerModelRepoRoutes(authed)
 
+	// Browsing the Hugging Face Hub, read-only — see hub.go.
+	s.registerHubRoutes(authed)
+
 	mux.Handle("/", web.Handler())
 
 	return s.recoverPanic(s.logRequests(mux))
