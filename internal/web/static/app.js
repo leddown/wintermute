@@ -3555,34 +3555,84 @@ function paintRepoResults(host, found) {
   for (const m of found) host.append(repoResultCard(m));
 }
 
+// A search result carries everything the Hub knows in one request, so the card
+// answers the two questions that decide a download — what is this, and will it
+// run here — without opening anything.
 function repoResultCard(m) {
-  const facts = [
-    m.params_b ? `${Number(m.params_b).toFixed(m.params_b < 10 ? 1 : 0)}B` : null,
+  const caps = m.capabilities || [];
+  const params = m.params_b
+    ? `${Number(m.params_b).toFixed(m.params_b < 10 ? 1 : 0)}B` : null;
+  // What it is.
+  const what = [
+    params,
+    m.architecture || null,
+    m.ctx_len ? `${compactCount(m.ctx_len)} ctx` : null,
+    caps.includes('tools') ? 'tools' : null,
+    caps.includes('vision') ? 'vision' : null,
+  ].filter(Boolean).join(' · ');
+  // Where it came from and what people make of it.
+  const who = [
     m.license || null,
-    m.downloads ? `${m.downloads.toLocaleString()} downloads` : null,
+    m.downloads ? `${compactCount(m.downloads)} downloads / 30d` : null,
+    m.downloads_all_time ? `${compactCount(m.downloads_all_time)} all time` : null,
+    m.likes ? `${compactCount(m.likes)} likes` : null,
+    m.updated_at ? `updated ${relativeTime(new Date(m.updated_at))}` : null,
   ].filter(Boolean).join(' · ');
 
   const detailHost = el('div', { class: 'repo-quants' });
-  const card = el('div', { class: 'repo-result' }, [
+  // The download used to be behind a quiet "Files" link, which is why nobody
+  // found it. It is the reason this page exists, so it looks like it.
+  const toggle = el('button', {
+    class: 'ghost-btn repo-download-btn', type: 'button', text: 'Download…',
+    onclick: () => toggleRepoDetail(m.id, detailHost, toggle).catch(showError),
+  });
+
+  return el('div', { class: 'repo-result' }, [
     el('div', { class: 'repo-result-head' }, [
       el('span', { class: 'repo-result-id', text: m.id }),
-      el('button', {
-        class: 'link-btn', type: 'button', text: 'Files',
-        onclick: () => toggleRepoDetail(m.id, detailHost).catch(showError),
-      }),
+      m.fit && m.fit.verdict
+        ? el('span', { class: `repo-fit ${m.fit.verdict}`, text: m.fit.verdict })
+        : null,
+      // A gated repository needs a token and accepted terms. Finding that out
+      // when the download fails is finding it out too late.
+      m.gated ? el('span', { class: 'repo-gated', text: 'gated' }) : null,
+      el('span', { class: 'repo-result-spacer' }),
+      m.quant_count
+        ? el('span', { class: 'muted', text: `${m.quant_count} quantisation${m.quant_count === 1 ? '' : 's'}` })
+        : null,
+      toggle,
     ]),
-    el('div', { class: 'muted', text: facts }),
+    what ? el('div', { class: 'muted', text: what }) : null,
+    who ? el('div', { class: 'muted', text: who }) : null,
+    // Which upstream model this was quantised from — the quickest way to tell
+    // a dozen repackagings of the same weights apart.
+    m.base_model && m.base_model !== m.id
+      ? el('div', { class: 'muted repo-result-base', text: `quantised from ${m.base_model}` })
+      : null,
     detailHost,
   ]);
-  return card;
+}
+
+// Counts on this page run from tens to tens of millions, and a column of full
+// figures is unreadable at a glance.
+function compactCount(n) {
+  const v = Number(n) || 0;
+  if (v < 1000) return `${v}`;
+  if (v < 1000000) return `${(v / 1000).toFixed(v < 10000 ? 1 : 0)}k`;
+  return `${(v / 1000000).toFixed(v < 10000000 ? 1 : 0)}M`;
 }
 
 // The quantisations are fetched per repository rather than up front: it is one
 // Hub request each, and a search returning fifteen results would otherwise make
 // fifteen of them for a list the operator will mostly scroll past.
-async function toggleRepoDetail(hubID, host) {
-  if (host.childElementCount) { host.innerHTML = ''; return; }
+async function toggleRepoDetail(hubID, host, button) {
+  if (host.childElementCount) {
+    host.innerHTML = '';
+    if (button) button.textContent = 'Download…';
+    return;
+  }
   host.append(el('p', { class: 'muted', text: 'Loading files…' }));
+  if (button) button.textContent = 'Hide files';
 
   const detail = await api(`/api/v1/models/detail/${hubID}`);
   host.innerHTML = '';
@@ -3602,7 +3652,16 @@ function repoQuantRow(detail, q) {
   const parts = q.parts || [];
   return el('div', { class: 'repo-quant' }, [
     el('span', { class: 'repo-quant-name', text: q.quant }),
+    // Several files in a repository routinely infer to the same label —
+    // Q2_K, Q2_K_L and UD-Q2_K_XL all read as Q2_K — so the label alone does
+    // not say which row is which. The file name does, and it is also what
+    // ends up on the drive.
+    el('span', { class: 'repo-quant-file', text: (q.filename || '').split('/').pop() }),
     fit ? el('span', { class: `repo-fit ${fit.verdict || ''}`, text: fit.verdict || '' }) : null,
+    // The download size and the memory it will occupy are different numbers
+    // and both matter: one decides whether it fits on the drive, the other
+    // whether it fits in the card.
+    q.size_bytes ? el('span', { class: 'muted', text: `${bytes(q.size_bytes)} to fetch` }) : null,
     fit && fit.total_mb
       ? el('span', { class: 'muted', text: `${bytes(fit.total_mb * 1024 * 1024)} to load` })
       : null,

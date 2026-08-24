@@ -505,6 +505,11 @@ func (s *Server) handleModelSearch(w http.ResponseWriter, r *http.Request) {
 		Limit:    queryInt(r, "limit", 20),
 		GGUFOnly: r.URL.Query().Get("gguf") != "false",
 		Sort:     r.URL.Query().Get("sort"),
+		// Graded against this machine on the way past. The search now carries
+		// the GGUF header for every result, so the verdict costs nothing extra
+		// and answers the only question that matters before opening one.
+		Hardware:      s.catalog.Hardware(r.Context()),
+		ContextTokens: queryInt(r, "context", defaultPlanContext),
 	})
 	if err != nil {
 		// The Hub being unreachable is an upstream problem, not an internal

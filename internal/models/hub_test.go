@@ -5,8 +5,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 )
+
+// hubRecorder serves a canned response and remembers what was asked for.
+func hubRecorder(t *testing.T, body string) (*Hub, *url.URL) {
+	t.Helper()
+	var got url.URL
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = *r.URL
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return NewHub(srv.URL, ""), &got
+}
 
 // hubStub serves one canned response for any path.
 func hubStub(t *testing.T, body string) *Hub {
@@ -132,4 +147,135 @@ func TestDetailReadsGGUFHeaderFacts(t *testing.T) {
 		b, _ := json.Marshal(m)
 		t.Errorf("header facts not carried through: %s", b)
 	}
+}
+
+// Without expand[] a search returns barely more than an id, and every fact on
+// the result card comes back empty — which is exactly how the cards came to be
+// bare. The facts are all on the search response; asking for them is the whole
+// fix, so the request itself is what this checks.
+func TestSearchAsksForTheFactsItDisplays(t *testing.T) {
+	hub, got := hubRecorder(t, `[{
+	  "id": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
+	  "author": "unsloth",
+	  "downloads": 90000, "downloadsAllTime": 15120421, "likes": 340,
+	  "gated": false,
+	  "lastModified": "2026-01-30T06:29:38.000Z",
+	  "gguf": {"total": 30532122624, "architecture": "qwen3moe", "context_length": 262144,
+	           "chat_template": "{% if tools %}{{ tools }}{% endif %}"},
+	  "cardData": {"license": "apache-2.0"},
+	  "baseModels": {"relation": "quantized", "models": [{"id": "Qwen/Qwen3-Coder-30B-A3B-Instruct"}]},
+	  "siblings": [{"rfilename": "m-Q4_K_M.gguf"}, {"rfilename": "m-Q8_0.gguf"}]
+	}]`)
+
+	out, err := hub.Search(context.Background(), SearchOptions{Query: "qwen"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	asked := got.Query()["expand[]"]
+	for _, want := range []string{"gguf", "author", "gated", "lastModified", "siblings", "baseModels"} {
+		if !contains(asked, want) {
+			t.Errorf("search must expand %q, asked for %v", want, asked)
+		}
+	}
+
+	if len(out) != 1 {
+		t.Fatalf("want one result, got %d", len(out))
+	}
+	m := out[0]
+	switch {
+	case m.Author != "unsloth":
+		t.Errorf("author empty: %+v", m)
+	case m.ParamsB < 30.5 || m.ParamsB > 30.6:
+		t.Errorf("params must come from the GGUF header, not the name: %v", m.ParamsB)
+	case m.Architecture != "qwen3moe" || m.CtxLen != 262144:
+		t.Errorf("header facts missing: %+v", m)
+	case m.License != "apache-2.0":
+		t.Errorf("license missing: %+v", m)
+	case m.DownloadsAllTime != 15120421:
+		t.Errorf("all-time downloads missing: %+v", m)
+	case m.BaseModel != "Qwen/Qwen3-Coder-30B-A3B-Instruct":
+		t.Errorf("base model missing: %+v", m)
+	case m.UpdatedAt.IsZero():
+		t.Errorf("last modified missing: %+v", m)
+	case m.QuantCount != 2:
+		t.Errorf("want 2 quantizations counted, got %d", m.QuantCount)
+	}
+	if !contains(capabilityStrings(m.Capabilities), "tools") {
+		t.Errorf("tool support is read from the chat template: %+v", m.Capabilities)
+	}
+
+	// The chat template is several kilobytes of Jinja per result and nothing
+	// downstream reads it. It is consumed on the way past, never forwarded.
+	blob, _ := json.Marshal(m)
+	if strings.Contains(string(blob), "{% if tools %}") {
+		t.Error("the chat template must not reach the browser")
+	}
+	// The per-file list belongs to the detail request, which is the only one
+	// that carries sizes; shipping it here doubles the payload for a list most
+	// of which is scrolled past.
+	if len(m.Quants) != 0 {
+		t.Errorf("search should not carry the file list, got %v", m.Quants)
+	}
+}
+
+// gated is false for an open repository and a string naming the approval flow
+// for a closed one. Decoding it as either would fail on the other.
+func TestSearchDecodesGatedBothWays(t *testing.T) {
+	for body, want := range map[string]string{
+		`[{"id":"a/b","gated":false}]`:    "",
+		`[{"id":"a/b","gated":"auto"}]`:   "auto",
+		`[{"id":"a/b","gated":"manual"}]`: "manual",
+	} {
+		hub, _ := hubRecorder(t, body)
+		out, err := hub.Search(context.Background(), SearchOptions{Query: "x"})
+		if err != nil {
+			t.Fatalf("%s: %v", body, err)
+		}
+		if out[0].Gated != want {
+			t.Errorf("%s: want gated %q, got %q", body, want, out[0].Gated)
+		}
+	}
+}
+
+// The download size is the number that decides whether a fetch is started, and
+// a shard set costs what all of its shards cost.
+func TestDetailSizesQuantizationsIncludingShards(t *testing.T) {
+	hub, got := hubRecorder(t, `{"id":"a/b","siblings":[
+	  {"rfilename":"BF16/m-BF16-00001-of-00002.gguf","size":49655154016},
+	  {"rfilename":"BF16/m-BF16-00002-of-00002.gguf","size":11440652032},
+	  {"rfilename":"m-IQ4_NL.gguf","size":17310784672}
+	]}`)
+	m, err := hub.Detail(context.Background(), "a/b", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sizes only come back when blobs are asked for; without this every size
+	// is silently zero.
+	if got.Query().Get("blobs") != "true" {
+		t.Errorf("detail must ask for blobs, requested %s", got.RawQuery)
+	}
+	if q := quantByLabel(t, m, "BF16"); q.SizeBytes != 49655154016+11440652032 {
+		t.Errorf("a shard set costs what all its shards cost, got %d", q.SizeBytes)
+	}
+	if q := quantByLabel(t, m, "IQ4_NL"); q.SizeBytes != 17310784672 {
+		t.Errorf("want the file size, got %d", q.SizeBytes)
+	}
+}
+
+func contains(hay []string, needle string) bool {
+	for _, h := range hay {
+		if h == needle {
+			return true
+		}
+	}
+	return false
+}
+
+func capabilityStrings(caps []Capability) []string {
+	out := make([]string, 0, len(caps))
+	for _, c := range caps {
+		out = append(out, string(c))
+	}
+	return out
 }

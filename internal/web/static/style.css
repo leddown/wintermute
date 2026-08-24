@@ -1259,12 +1259,27 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
 .repo-search-form { display: flex; gap: 8px; margin-bottom: 12px; }
 .repo-query { flex: 1; min-width: 0; }
 
+/* The download is the point of this page; it should not look like a footnote,
+   which is what a text link next to a monospace id reads as. */
+.repo-result-spacer { flex: 1; }
+.repo-download-btn { font-weight: 600; }
+.repo-result-base { font-size: 12px; opacity: 0.8; }
+/* Gated needs accepting terms and a token. It is a warning, not an error —
+   the model is fine, it just cannot be fetched without a step elsewhere. */
+.repo-gated { font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--accent); color: var(--accent); }
+
 .repo-quants { display: flex; flex-direction: column; gap: 6px; }
 .repo-quant {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 6px 0; border-top: 1px solid var(--border);
 }
 .repo-quant-name { font-family: ui-monospace, "Courier New", monospace; min-width: 90px; }
+/* The label is ambiguous by itself; the file name is the identity, and it is
+   allowed to shrink because the numbers beside it are what get read first. */
+.repo-quant-file { font-family: ui-monospace, "Courier New", monospace;
+  font-size: 11px; color: var(--muted); flex: 1 1 120px; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The fit verdict is why a list of eight near-identical filenames is readable
    at all: it says which one will actually run on this hardware. */
