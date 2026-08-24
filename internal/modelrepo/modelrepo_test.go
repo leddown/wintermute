@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -642,5 +643,26 @@ func TestInitialiseReportsUnwritable(t *testing.T) {
 	}
 	if errors.Is(err, ErrUnavailable) {
 		t.Error("unwritable is a different problem from absent and must not be conflated")
+	}
+}
+
+// EROFS and EACCES need different fixes, and confusing them costs an afternoon:
+// under ProtectSystem=strict no amount of chown or group membership helps.
+func TestWriteFailureDistinguishesReadOnlyFromPermissions(t *testing.T) {
+	rofs := writeFailure("/mnt/drive", &os.PathError{Op: "open", Err: syscall.EROFS})
+	if !errors.Is(rofs, ErrNotWritable) {
+		t.Fatalf("want ErrNotWritable, got %v", rofs)
+	}
+	if !strings.Contains(rofs.Error(), "ProtectSystem=strict") ||
+		!strings.Contains(rofs.Error(), "ReadWritePaths=/mnt/drive") {
+		t.Errorf("a read-only filesystem must point at the systemd fix:\n%v", rofs)
+	}
+	if strings.Contains(rofs.Error(), "chown") {
+		t.Error("chown does not help against EROFS and must not be suggested")
+	}
+
+	denied := writeFailure("/mnt/drive", &os.PathError{Op: "open", Err: syscall.EACCES})
+	if !strings.Contains(denied.Error(), "chown") {
+		t.Errorf("a permissions failure should mention ownership:\n%v", denied)
 	}
 }

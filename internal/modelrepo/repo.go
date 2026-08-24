@@ -199,6 +199,20 @@ func (r *Repo) Initialise() error {
 // things that are actually wrong. So both are named, along with the identity
 // the server is actually running as, which is the fact that resolves it.
 func writeFailure(root string, err error) error {
+	// A read-only filesystem is the systemd case, and it is worth telling
+	// apart from a permissions one because the fixes do not overlap at all.
+	// Under ProtectSystem=strict every path outside StateDirectory is mounted
+	// read-only for the service, so writes fail with EROFS however the
+	// directory is owned — chown and group membership change nothing, which is
+	// a genuinely disorienting thing to discover one command at a time.
+	if errors.Is(err, syscall.EROFS) {
+		return fmt.Errorf("%w: %s is on a read-only filesystem. If this server runs "+
+			"under systemd, that is almost certainly ProtectSystem=strict, which makes "+
+			"everything outside StateDirectory read-only no matter who owns it — add "+
+			"ReadWritePaths=%s to the unit, then daemon-reload and restart. Otherwise "+
+			"the mount itself is read-only (%v)",
+			ErrNotWritable, root, root, err)
+	}
 	if !errors.Is(err, os.ErrPermission) {
 		return fmt.Errorf("%w: %s: %v", ErrNotWritable, root, err)
 	}
