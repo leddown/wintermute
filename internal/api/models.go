@@ -500,7 +500,7 @@ func (s *Server) handleModelSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	results, err := s.catalog.Hub().Search(r.Context(), models.SearchOptions{
+	page, err := s.catalog.Hub().Search(r.Context(), models.SearchOptions{
 		Query:    query,
 		Limit:    queryInt(r, "limit", 20),
 		GGUFOnly: r.URL.Query().Get("gguf") != "false",
@@ -518,10 +518,14 @@ func (s *Server) handleModelSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "could not reach the Hugging Face Hub: "+err.Error())
 		return
 	}
+	results := page.Models
 	if results == nil {
 		results = []models.HubModel{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	// next carries the cursor for the following page. The browser hands it
+	// back verbatim; it is never a URL, so there is nothing in it this server
+	// would follow.
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "next": page.Next})
 }
 
 func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {

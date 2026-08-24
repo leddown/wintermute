@@ -220,7 +220,7 @@ func searchModels(cat *Catalog) tool.Handler {
 		if err := json.Unmarshal(input, &in); err != nil {
 			return "", fmt.Errorf("invalid input: %w", err)
 		}
-		results, err := cat.Hub().Search(ctx, SearchOptions{
+		page, err := cat.Hub().Search(ctx, SearchOptions{
 			Query:    in.Query,
 			GGUFOnly: in.GGUFOnly,
 			Limit:    in.Limit,
@@ -230,10 +230,10 @@ func searchModels(cat *Catalog) tool.Handler {
 			// to fail the turn.
 			return fmt.Sprintf("Could not reach the Hugging Face Hub: %v", err), nil
 		}
-		if len(results) == 0 {
+		if len(page.Models) == 0 {
 			return "No models matched that search.", nil
 		}
-		return encode(map[string]any{"results": results})
+		return encode(map[string]any{"results": page.Models})
 	}
 }
 

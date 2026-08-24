@@ -1,8 +1,10 @@
 package models
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,12 +14,200 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // DefaultHubURL is the Hugging Face Hub API root. Public model metadata needs
 // no authentication.
 const DefaultHubURL = "https://huggingface.co"
+
+// Errors the Hub can return that are facts about the world rather than faults
+// in this server.
+//
+// Distinguished for the same reason modelrepo's are: answering "this
+// repository is gated and you have no token" with "internal error" makes the
+// whole feature undiagnosable from the browser, and every one of these is
+// something the operator can act on.
+var (
+	// ErrHubNotFound reports a repository the Hub does not have.
+	ErrHubNotFound = errors.New("no such repository on the Hugging Face Hub")
+
+	// ErrHubForbidden reports a repository this server may not read: gated
+	// terms not accepted, a private repository, or no token where one is
+	// needed.
+	ErrHubForbidden = errors.New("the Hugging Face Hub refused access")
+
+	// ErrHubRateLimited reports an exhausted rate-limit window. See RateLimit
+	// for why this is a routine condition rather than an exceptional one.
+	ErrHubRateLimited = errors.New("the Hugging Face Hub rate limit is exhausted")
+
+	// ErrHubUnavailable reports the Hub being unreachable, or answering 5xx.
+	ErrHubUnavailable = errors.New("the Hugging Face Hub is not answering")
+
+	// ErrHubBadRequest reports a request the Hub itself rejected — a malformed
+	// repository id, a stale cursor, an expansion it has retired.
+	ErrHubBadRequest = errors.New("the Hugging Face Hub rejected the request")
+)
+
+// maxHubResponse bounds a single response. The largest thing read here is a
+// file listing for a repository with thousands of shards.
+const maxHubResponse = 16 << 20
+
+// RateLimit is the Hub's own account of how much budget is left in the current
+// window, read from the headers it sets on every response.
+//
+// Worth carrying rather than discovering by failing. The anonymous allowance is
+// 500 API calls per five minutes counted against *this server's* IP and shared
+// by every client of it, which a few minutes of browsing will spend; a token
+// doubles the allowance and moves it off the shared address. The Hub meters
+// three buckets separately and only "api" is reached from here.
+type RateLimit struct {
+	// Bucket is "api", "resolvers" or "pages".
+	Bucket string `json:"bucket,omitempty"`
+	// Remaining is how many requests are left in this window.
+	Remaining int `json:"remaining"`
+	// ResetSeconds is how long until the window rolls over.
+	ResetSeconds int `json:"reset_seconds"`
+	// Quota and WindowSeconds come from the policy header. They are what tells
+	// a token's allowance from an anonymous one, which is the difference an
+	// operator wondering why searches fail actually needs to see.
+	Quota         int `json:"quota,omitempty"`
+	WindowSeconds int `json:"window_seconds,omitempty"`
+}
+
+// RateLimitError is a 429 with the wait attached, so a caller can say how long
+// rather than only that it happened.
+type RateLimitError struct{ RateLimit }
+
+func (e *RateLimitError) Error() string {
+	bucket := firstNonEmptyString(e.Bucket, "api")
+	if e.ResetSeconds > 0 {
+		return fmt.Sprintf("the Hugging Face Hub rate limit for %s requests is exhausted; it resets in %ds",
+			bucket, e.ResetSeconds)
+	}
+	return fmt.Sprintf("the Hugging Face Hub rate limit for %s requests is exhausted", bucket)
+}
+
+func (e *RateLimitError) Unwrap() error { return ErrHubRateLimited }
+
+// parseRateLimit reads the two headers the Hub sets on every response. They
+// follow draft-ietf-httpapi-ratelimit-headers, which in practice looks like:
+//
+//	RateLimit: "api";r=499;t=71
+//	RateLimit-Policy: "fixed window";"api";q=500;w=300
+//
+// A quoted field with no "=" is a name; the rest are the numbers.
+func parseRateLimit(h http.Header) *RateLimit {
+	raw := h.Get("RateLimit")
+	if raw == "" {
+		return nil
+	}
+	rl := &RateLimit{}
+	for _, field := range strings.Split(raw, ";") {
+		key, value, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if !ok {
+			rl.Bucket = strings.Trim(strings.TrimSpace(key), `"`)
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "r":
+			rl.Remaining = n
+		case "t":
+			rl.ResetSeconds = n
+		}
+	}
+	for _, field := range strings.Split(h.Get("RateLimit-Policy"), ";") {
+		key, value, ok := strings.Cut(strings.TrimSpace(field), "=")
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			continue
+		}
+		switch strings.TrimSpace(key) {
+		case "q":
+			rl.Quota = n
+		case "w":
+			rl.WindowSeconds = n
+		}
+	}
+	return rl
+}
+
+// How long each class of answer is held. A search is a live question and is
+// cached only long enough to survive a page redraw; the facts about one
+// repository barely move within a session; the tag vocabulary and the token's
+// own identity essentially never do.
+const (
+	searchTTL = 60 * time.Second
+	repoTTL   = 5 * time.Minute
+	vocabTTL  = time.Hour
+)
+
+// hubCacheMax bounds the cache. Entries are metadata and model cards, so a few
+// hundred is small — the cap exists so that a long browsing session cannot grow
+// the server's heap without limit.
+const hubCacheMax = 256
+
+// hubCache is a small time-bounded cache over GET responses.
+//
+// Opening one repository costs several requests — the file list, the refs, the
+// card, the scan — and comparing four repositories does that four times. Without
+// this, ordinary browsing is what exhausts the window described on RateLimit.
+type hubCache struct {
+	mu      sync.Mutex
+	entries map[string]hubCacheEntry
+}
+
+type hubCacheEntry struct {
+	payload []byte
+	meta    hubMeta
+	expires time.Time
+}
+
+func newHubCache() *hubCache { return &hubCache{entries: map[string]hubCacheEntry{}} }
+
+func (c *hubCache) get(key string) ([]byte, hubMeta, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[key]
+	if !ok || time.Now().After(e.expires) {
+		return nil, hubMeta{}, false
+	}
+	return e.payload, e.meta, true
+}
+
+func (c *hubCache) put(key string, payload []byte, meta hubMeta, ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.entries) >= hubCacheMax {
+		now := time.Now()
+		for k, e := range c.entries {
+			if now.After(e.expires) {
+				delete(c.entries, k)
+			}
+		}
+		// Still full: drop entries until there is room. Which ones go is
+		// arbitrary, and deliberately so — this is a cache, and the cost of a
+		// wrong eviction is one more request.
+		for k := range c.entries {
+			if len(c.entries) < hubCacheMax {
+				break
+			}
+			delete(c.entries, k)
+		}
+	}
+	c.entries[key] = hubCacheEntry{payload: payload, meta: meta, expires: time.Now().Add(ttl)}
+}
 
 // Hub searches the Hugging Face Hub for downloadable models.
 //
@@ -29,6 +219,12 @@ type Hub struct {
 	client  *http.Client
 	baseURL string
 	token   string
+	cache   *hubCache
+
+	// rate is the last allowance the Hub reported. Guarded because a browser
+	// polling downloads and a tool call can be in flight together.
+	mu   sync.Mutex
+	rate *RateLimit
 }
 
 // NewHub builds a Hub client. token is optional and only needed for gated
@@ -41,7 +237,25 @@ func NewHub(baseURL, token string) *Hub {
 		client:  &http.Client{Timeout: 20 * time.Second},
 		baseURL: strings.TrimSuffix(baseURL, "/"),
 		token:   token,
+		cache:   newHubCache(),
 	}
+}
+
+// HasToken reports whether a token is configured, without revealing it. The
+// answer changes what a failure means and what the allowance is, so the UI is
+// entitled to it; the token itself never leaves this process.
+func (h *Hub) HasToken() bool { return h.token != "" }
+
+// RateLimit returns the allowance the Hub reported on the most recent request,
+// or nil if none has been made yet.
+func (h *Hub) RateLimit() *RateLimit {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.rate == nil {
+		return nil
+	}
+	snapshot := *h.rate
+	return &snapshot
 }
 
 // HubModel is one search result.
@@ -68,6 +282,16 @@ type HubModel struct {
 	// with one quantization and one with twenty are different propositions,
 	// and the list should not have to be opened to see which this is.
 	QuantCount int `json:"quant_count,omitempty"`
+	// PipelineTag is the Hub's own classification of what the model does —
+	// "text-generation", "image-text-to-text" and so on. It is the field the
+	// Hub's own filters are built on, so a browser that offers those filters
+	// has to be able to show what it filtered by.
+	PipelineTag string `json:"pipeline_tag,omitempty"`
+	// Providers lists the hosted inference providers serving this model. It is
+	// reported, never used: nothing here calls them. It answers "is there a way
+	// to try this without downloading 30GB first", which is a fair question to
+	// ask of a repository before fetching it.
+	Providers []HubProvider `json:"providers,omitempty"`
 
 	// The following are populated by Detail, from the Hub's parsed GGUF
 	// metadata. They are what makes a fit estimate possible.
@@ -79,6 +303,61 @@ type HubModel struct {
 	Quants []HubQuant `json:"quants,omitempty"`
 	// Fit is attached against the current hardware when requested.
 	Fit *Fit `json:"fit,omitempty"`
+}
+
+// HubProvider is one hosted provider serving a model.
+type HubProvider struct {
+	Name   string `json:"name"`
+	Status string `json:"status,omitempty"`
+	Task   string `json:"task,omitempty"`
+}
+
+// hubProviderMapping decodes the inferenceProviderMapping field, which the Hub
+// returns in two different shapes depending on which endpoint answered.
+//
+// A search sends an array of objects, each naming its own provider; the detail
+// endpoint sends an object keyed by provider name. Both are current, both turn
+// up in ordinary use, and a decoder written for one fails outright on the
+// other — which is how a single unserved model in a page of results took the
+// whole search down with it.
+//
+// The array form carries more besides: pricing, context length and measured
+// throughput per provider. None of it is read here. Calling hosted inference is
+// not something this file does, and the fact worth reporting is only that there
+// is a way to try the model without fetching thirty gigabytes first.
+type hubProviderMapping []HubProvider
+
+func (m *hubProviderMapping) UnmarshalJSON(raw []byte) error {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+
+	type entry struct {
+		Provider string `json:"provider"`
+		Status   string `json:"status"`
+		Task     string `json:"task"`
+	}
+
+	if raw[0] == '[' {
+		var list []entry
+		if err := json.Unmarshal(raw, &list); err != nil {
+			return err
+		}
+		for _, e := range list {
+			*m = append(*m, HubProvider{Name: e.Provider, Status: e.Status, Task: e.Task})
+		}
+		return nil
+	}
+
+	var byName map[string]entry
+	if err := json.Unmarshal(raw, &byName); err != nil {
+		return err
+	}
+	for name, e := range byName {
+		*m = append(*m, HubProvider{Name: firstNonEmptyString(e.Provider, name), Status: e.Status, Task: e.Task})
+	}
+	return nil
 }
 
 // HubQuant is one quantization in a repository: usually a single GGUF file,
@@ -142,6 +421,16 @@ type hubRecord struct {
 		ChatTemplate string `json:"chat_template"`
 	} `json:"gguf"`
 
+	// Safetensors is the Hub's parse of the original weights, for a repository
+	// that ships those rather than a GGUF requantization. It carries the same
+	// authoritative parameter count the GGUF header does.
+	Safetensors *struct {
+		Total int64 `json:"total"`
+	} `json:"safetensors"`
+
+	// InferenceProviderMapping names the hosted providers serving the model.
+	InferenceProviderMapping hubProviderMapping `json:"inferenceProviderMapping"`
+
 	CardData struct {
 		License string `json:"license"`
 	} `json:"cardData"`
@@ -185,6 +474,7 @@ func (r hubRecord) model(hw *Hardware, contextTokens int) HubModel {
 		License:          firstNonEmptyString(r.CardData.License, licenseFromTags(r.Tags)),
 		UpdatedAt:        parseHubTime(r.LastModified),
 		Gated:            string(r.Gated),
+		PipelineTag:      r.PipelineTag,
 	}
 	if len(r.BaseModels.Models) > 0 {
 		m.BaseModel = r.BaseModels.Models[0].ID
@@ -199,11 +489,23 @@ func (r hubRecord) model(hw *Hardware, contextTokens int) HubModel {
 			m.Capabilities = append(m.Capabilities, CapTools)
 		}
 	}
+	if m.ParamsB == 0 && r.Safetensors != nil && r.Safetensors.Total > 0 {
+		// The same authoritative count, for a repository shipping the original
+		// weights rather than a requantization. Without this every safetensors
+		// repository fell through to the guess below, which reads the number
+		// out of the *name* and is wrong whenever the name lies.
+		m.ParamsB = float64(r.Safetensors.Total) / 1e9
+	}
 	if m.ParamsB == 0 {
 		// A guess from the name, and marked as one everywhere it is used. The
 		// Hub reports the real figure for anything with a parsed GGUF header.
 		m.ParamsB = inferParams(r.ID)
 	}
+	m.Providers = append(m.Providers, r.InferenceProviderMapping...)
+	// Sorted because map iteration order is random, and without this two
+	// identical requests return JSON that differs for no reason — which makes
+	// the cache above look broken and any diff of two results unreadable.
+	sort.Slice(m.Providers, func(i, j int) bool { return m.Providers[i].Name < m.Providers[j].Name })
 	if tagsMentionVision(r.Tags, r.PipelineTag) {
 		m.Capabilities = append(m.Capabilities, CapVision)
 	}
@@ -241,20 +543,55 @@ func (r hubRecord) model(hw *Hardware, contextTokens int) HubModel {
 }
 
 // SearchOptions narrows a Hub query.
+//
+// Every field below maps to a parameter the Hub search endpoint already
+// accepts. Together they are the difference between a search box and a
+// browser: without an author or a pipeline filter, the only way to reach a
+// specific publisher's work is to guess words that appear in its name.
 type SearchOptions struct {
 	Query string
-	// Limit caps results; zero means 20.
+	// Limit caps results; zero means 20 and anything above maxSearchLimit is
+	// clamped to it.
 	Limit int
 	// GGUFOnly restricts to repositories carrying GGUF files, which is what
 	// llama.cpp and Ollama can actually load.
 	GGUFOnly bool
-	// Sort is "downloads", "likes" or "lastModified".
+	// Sort is "downloads", "downloadsAllTime", "likes", "lastModified",
+	// "createdAt" or "trendingScore".
 	Sort string
+	// Author restricts to one owner, e.g. "unsloth" or "Qwen".
+	Author string
+	// Library restricts by the framework the weights are for, e.g.
+	// "transformers" or "gguf".
+	Library string
+	// PipelineTag restricts by task, e.g. "text-generation".
+	PipelineTag string
+	// Filters are raw Hub tag filters — "license:apache-2.0", "language:en".
+	// The Hub ANDs them, and accepts any tag it indexes, so this stays a list
+	// of strings rather than growing a field per tag namespace.
+	Filters []string
+	// InferenceProvider restricts to models a named hosted provider serves.
+	InferenceProvider string
+	// Cursor continues a previous page. It is the opaque value from a prior
+	// SearchPage.Next and nothing else; see nextCursor.
+	Cursor string
 	// Hardware grades each result for fit when it is set, the same way the
 	// detail view does. A search that cannot say whether a model runs here is
 	// most of the way to useless.
 	Hardware      *Hardware
 	ContextTokens int
+}
+
+// maxSearchLimit caps a page. The Hub itself will return far more, but every
+// result carries its whole file list, so a large page is megabytes for a screen
+// that shows a dozen rows.
+const maxSearchLimit = 100
+
+// SearchPage is one page of results and the means to ask for the next.
+type SearchPage struct {
+	Models []HubModel `json:"models"`
+	// Next is empty on the last page.
+	Next string `json:"next,omitempty"`
 }
 
 // searchExpand is what the search endpoint is asked to include.
@@ -268,13 +605,16 @@ type SearchOptions struct {
 var searchExpand = []string{
 	"gguf", "author", "gated", "tags", "cardData", "downloads",
 	"downloadsAllTime", "likes", "lastModified", "siblings",
-	"pipeline_tag", "baseModels",
+	"pipeline_tag", "baseModels", "safetensors", "inferenceProviderMapping",
 }
 
 // Search queries the Hub.
-func (h *Hub) Search(ctx context.Context, opts SearchOptions) ([]HubModel, error) {
+func (h *Hub) Search(ctx context.Context, opts SearchOptions) (SearchPage, error) {
 	if opts.Limit <= 0 {
 		opts.Limit = 20
+	}
+	if opts.Limit > maxSearchLimit {
+		opts.Limit = maxSearchLimit
 	}
 	if opts.Sort == "" {
 		opts.Sort = "downloads"
@@ -284,8 +624,28 @@ func (h *Hub) Search(ctx context.Context, opts SearchOptions) ([]HubModel, error
 	if opts.Query != "" {
 		q.Set("search", opts.Query)
 	}
+	// A fresh slice: appending the GGUF filter onto the caller's would mutate
+	// an argument, and this one is routinely a literal reused across calls.
+	filters := make([]string, 0, len(opts.Filters)+1)
 	if opts.GGUFOnly {
-		q.Set("filter", "gguf")
+		filters = append(filters, "gguf")
+	}
+	filters = append(filters, opts.Filters...)
+	for _, f := range filters {
+		if f = strings.TrimSpace(f); f != "" {
+			q.Add("filter", f)
+		}
+	}
+	for key, value := range map[string]string{
+		"author":             opts.Author,
+		"library":            opts.Library,
+		"pipeline_tag":       opts.PipelineTag,
+		"inference_provider": opts.InferenceProvider,
+		"cursor":             opts.Cursor,
+	} {
+		if v := strings.TrimSpace(value); v != "" {
+			q.Set(key, v)
+		}
 	}
 	q.Set("sort", opts.Sort)
 	q.Set("direction", "-1")
@@ -295,8 +655,9 @@ func (h *Hub) Search(ctx context.Context, opts SearchOptions) ([]HubModel, error
 	}
 
 	var raw []hubRecord
-	if err := h.get(ctx, h.baseURL+"/api/models?"+q.Encode(), &raw); err != nil {
-		return nil, err
+	meta, err := h.get(ctx, h.baseURL+"/api/models?"+q.Encode(), searchTTL, &raw)
+	if err != nil {
+		return SearchPage{}, err
 	}
 
 	out := make([]HubModel, 0, len(raw))
@@ -308,7 +669,7 @@ func (h *Hub) Search(ctx context.Context, opts SearchOptions) ([]HubModel, error
 		m.Quants = nil
 		out = append(out, m)
 	}
-	return out, nil
+	return SearchPage{Models: out, Next: meta.next}, nil
 }
 
 // Detail fetches one repository, including its GGUF metadata and the list of
@@ -318,8 +679,22 @@ func (h *Hub) Detail(ctx context.Context, id string, hw *Hardware, contextTokens
 	// decides whether a download is worth starting, and the only place the Hub
 	// offers it — the fit estimate next to it is a prediction from the
 	// parameter count, not a measurement of what will land on the drive.
+	repo, err := repoPath(id)
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	q.Set("blobs", "true")
+	// The same expansion the search asks for. Without it the detail response
+	// carries neither baseModels nor downloadsAllTime, so a fact shown on the
+	// search card vanished the moment the repository was opened — precisely the
+	// drift the shared hubRecord exists to prevent.
+	for _, e := range searchExpand {
+		q.Add("expand[]", e)
+	}
+
 	var raw hubRecord
-	if err := h.get(ctx, h.baseURL+"/api/models/"+id+"?blobs=true", &raw); err != nil {
+	if _, err := h.get(ctx, h.baseURL+"/api/models/"+repo+"?"+q.Encode(), repoTTL, &raw); err != nil {
 		return nil, err
 	}
 
@@ -434,33 +809,167 @@ func splitParts(name string) (stem string, part, want int) {
 	return m[1], part, want
 }
 
-func (h *Hub) get(ctx context.Context, url string, dst any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// hubMeta is what a response carries besides its body.
+type hubMeta struct {
+	// next is the opaque cursor for the following page, empty on the last one.
+	next string
+}
+
+// get fetches JSON and decodes it, returning what the response said about
+// paging. dst may be nil to fetch for the side effects alone.
+func (h *Hub) get(ctx context.Context, rawURL string, ttl time.Duration, dst any) (hubMeta, error) {
+	payload, meta, err := h.fetch(ctx, rawURL, "application/json", ttl)
 	if err != nil {
-		return err
+		return meta, err
 	}
-	req.Header.Set("Accept", "application/json")
+	if dst != nil {
+		if err := json.Unmarshal(payload, dst); err != nil {
+			return meta, fmt.Errorf("hub: decode: %w", err)
+		}
+	}
+	return meta, nil
+}
+
+// fetch performs one GET, serving from the cache when a fresh copy is held.
+func (h *Hub) fetch(ctx context.Context, rawURL, accept string, ttl time.Duration) ([]byte, hubMeta, error) {
+	if payload, meta, ok := h.cache.get(rawURL); ok {
+		return payload, meta, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, hubMeta{}, err
+	}
+	req.Header.Set("Accept", accept)
 	if h.token != "" {
 		req.Header.Set("Authorization", "Bearer "+h.token)
 	}
 
 	resp, err := h.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("hub: %w", err)
+		return nil, hubMeta{}, fmt.Errorf("%w: %v", ErrHubUnavailable, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("hub: %s", resp.Status)
+	// Read off every response, the failures included: a 429 is exactly when the
+	// remaining budget is worth knowing.
+	if rl := parseRateLimit(resp.Header); rl != nil {
+		h.mu.Lock()
+		h.rate = rl
+		h.mu.Unlock()
 	}
-	payload, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+
+	payload, err := io.ReadAll(io.LimitReader(resp.Body, maxHubResponse))
 	if err != nil {
-		return fmt.Errorf("hub: read: %w", err)
+		return nil, hubMeta{}, fmt.Errorf("%w: read: %v", ErrHubUnavailable, err)
 	}
-	if err := json.Unmarshal(payload, dst); err != nil {
-		return fmt.Errorf("hub: decode: %w", err)
+	meta := hubMeta{next: nextCursor(resp.Header.Get("Link"))}
+
+	if err := h.classify(resp, payload); err != nil {
+		return nil, meta, err
 	}
-	return nil
+	h.cache.put(rawURL, payload, meta, ttl)
+	return payload, meta, nil
+}
+
+// classify turns a status code into an error a caller can act on.
+func (h *Hub) classify(resp *http.Response, payload []byte) error {
+	switch {
+	case resp.StatusCode == http.StatusOK:
+		return nil
+
+	case resp.StatusCode == http.StatusTooManyRequests:
+		err := &RateLimitError{}
+		if rl := parseRateLimit(resp.Header); rl != nil {
+			err.RateLimit = *rl
+		}
+		return err
+
+	case resp.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("%w: %s", ErrHubNotFound, hubErrorText(payload, resp.Status))
+
+	case resp.StatusCode == http.StatusUnauthorized, resp.StatusCode == http.StatusForbidden:
+		// Whether a token was sent decides what the operator has to do about
+		// this, and only this process knows which it was.
+		//
+		// Non-existence is named as a possibility in both cases because the Hub
+		// deliberately will not distinguish it: asked anonymously for a
+		// repository that is not there, it answers 401 rather than 404, so that
+		// probing this endpoint cannot enumerate private repositories. A
+		// mistyped name and a gated one are genuinely the same response.
+		hint := "no Hugging Face token is configured — the repository may not exist, " +
+			"or may be private or gated"
+		if h.token != "" {
+			hint = "a token is configured, so the repository may not exist, or may be " +
+				"private, or gated on terms that account has not accepted"
+		}
+		return fmt.Errorf("%w: %s (%s)", ErrHubForbidden, hubErrorText(payload, resp.Status), hint)
+
+	case resp.StatusCode >= 500:
+		return fmt.Errorf("%w: %s", ErrHubUnavailable, resp.Status)
+
+	default:
+		return fmt.Errorf("%w: %s", ErrHubBadRequest, hubErrorText(payload, resp.Status))
+	}
+}
+
+// hubErrorText prefers the Hub's own explanation over the bare status line. It
+// says things like "Error parsing pagination cursor", which is the whole
+// diagnosis; the status alone is "400 Bad Request", which is none of it.
+func hubErrorText(payload []byte, status string) string {
+	var body struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(payload, &body); err == nil && strings.TrimSpace(body.Error) != "" {
+		return strings.TrimSpace(body.Error)
+	}
+	return status
+}
+
+// nextCursor reads the cursor out of a Link: <...>; rel="next" header.
+//
+// Only the cursor survives, never the URL. The header is a string from off the
+// machine, and re-requesting it verbatim would let whatever answered for the
+// Hub point this server's next request at an address of its choosing. The
+// cursor is fed back into a URL this package builds itself.
+func nextCursor(link string) string {
+	for _, part := range strings.Split(link, ",") {
+		target, rest, ok := strings.Cut(strings.TrimSpace(part), ">")
+		if !ok || !strings.Contains(rest, `rel="next"`) {
+			continue
+		}
+		u, err := url.Parse(strings.TrimPrefix(strings.TrimSpace(target), "<"))
+		if err != nil {
+			continue
+		}
+		if cursor := u.Query().Get("cursor"); cursor != "" {
+			return cursor
+		}
+	}
+	return ""
+}
+
+// repoPath escapes a repository id for use in a Hub URL.
+//
+// The id arrives from a search result, a tool call or a browser URL — which is
+// to say from outside — and it is interpolated into a path. Unescaped, a ".."
+// in it addresses a different endpoint entirely. One segment is allowed as well
+// as two, because the Hub's oldest models ("gpt2", "bert-base-uncased") have no
+// owner.
+func repoPath(id string) (string, error) {
+	trimmed := strings.Trim(strings.TrimSpace(id), "/")
+	parts := strings.Split(trimmed, "/")
+	if trimmed == "" || len(parts) > 2 {
+		return "", fmt.Errorf("%w: %q is not an \"owner/name\" repository id", ErrHubBadRequest, id)
+	}
+	escaped := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("%w: %q is not an \"owner/name\" repository id", ErrHubBadRequest, id)
+		}
+		escaped = append(escaped, url.PathEscape(part))
+	}
+	return strings.Join(escaped, "/"), nil
 }
 
 func licenseFromTags(tags []string) string {

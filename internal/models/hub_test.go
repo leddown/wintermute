@@ -167,10 +167,11 @@ func TestSearchAsksForTheFactsItDisplays(t *testing.T) {
 	  "siblings": [{"rfilename": "m-Q4_K_M.gguf"}, {"rfilename": "m-Q8_0.gguf"}]
 	}]`)
 
-	out, err := hub.Search(context.Background(), SearchOptions{Query: "qwen"})
+	page, err := hub.Search(context.Background(), SearchOptions{Query: "qwen"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	out := page.Models
 
 	asked := got.Query()["expand[]"]
 	for _, want := range []string{"gguf", "author", "gated", "lastModified", "siblings", "baseModels"} {
@@ -228,12 +229,12 @@ func TestSearchDecodesGatedBothWays(t *testing.T) {
 		`[{"id":"a/b","gated":"manual"}]`: "manual",
 	} {
 		hub, _ := hubRecorder(t, body)
-		out, err := hub.Search(context.Background(), SearchOptions{Query: "x"})
+		page, err := hub.Search(context.Background(), SearchOptions{Query: "x"})
 		if err != nil {
 			t.Fatalf("%s: %v", body, err)
 		}
-		if out[0].Gated != want {
-			t.Errorf("%s: want gated %q, got %q", body, want, out[0].Gated)
+		if page.Models[0].Gated != want {
+			t.Errorf("%s: want gated %q, got %q", body, want, page.Models[0].Gated)
 		}
 	}
 }
