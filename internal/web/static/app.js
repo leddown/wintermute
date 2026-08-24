@@ -3599,35 +3599,51 @@ function repoQuantRow(detail, q) {
   // The fit verdict is the whole reason this is worth showing in a list: it
   // says which of eight near-identical filenames will actually run here.
   const fit = q.fit || null;
+  const parts = q.parts || [];
   return el('div', { class: 'repo-quant' }, [
     el('span', { class: 'repo-quant-name', text: q.quant }),
     fit ? el('span', { class: `repo-fit ${fit.verdict || ''}`, text: fit.verdict || '' }) : null,
     fit && fit.total_mb
       ? el('span', { class: 'muted', text: `${bytes(fit.total_mb * 1024 * 1024)} to load` })
       : null,
-    el('button', {
-      class: 'ghost-btn', type: 'button', text: 'Download',
-      title: `Fetch ${q.filename} into the repository`,
-      onclick: (e) => startRepoDownload(detail, q, e.target).catch(showError),
-    }),
+    // Weights past about 50GB ship as shards. Saying so matters: it is several
+    // downloads rather than one, and none of them is a model on its own.
+    parts.length > 1 ? el('span', { class: 'muted', text: `${parts.length} files` }) : null,
+    q.incomplete
+      ? el('span', { class: 'error', text: 'incomplete upload — some shards are missing' })
+      : el('button', {
+        class: 'ghost-btn', type: 'button', text: 'Download',
+        title: parts.length > 1
+          ? `Fetch all ${parts.length} parts of ${q.quant} into the repository`
+          : `Fetch ${q.filename} into the repository`,
+        onclick: (e) => startRepoDownload(detail, q, e.target).catch(showError),
+      }),
   ]);
 }
 
 async function startRepoDownload(detail, q, button) {
   button.disabled = true;
+  // A split quantization is one model in several files, and it is only loadable
+  // once every shard has arrived. They are started together, as separate jobs,
+  // because that is what the progress panel can report on.
+  const files = (q.parts && q.parts.length) ? q.parts : [q.filename];
   try {
-    await api('/api/v1/repo/download', {
-      method: 'POST',
-      body: JSON.stringify({
-        hub_id: detail.id,
-        filename: q.filename,
-        // Passed through so the index records the Hub's own parse of the GGUF
-        // header rather than a guess made from the filename later.
-        quant: q.quant || '',
-        params_b: detail.params_b || 0,
-      }),
-    });
-    toast(`Downloading ${q.filename}. It carries on if you leave this page.`);
+    for (const filename of files) {
+      await api('/api/v1/repo/download', {
+        method: 'POST',
+        body: JSON.stringify({
+          hub_id: detail.id,
+          filename,
+          // Passed through so the index records the Hub's own parse of the GGUF
+          // header rather than a guess made from the filename later.
+          quant: q.quant || '',
+          params_b: detail.params_b || 0,
+        }),
+      });
+    }
+    toast(files.length > 1
+      ? `Downloading ${q.quant} in ${files.length} parts. It carries on if you leave this page.`
+      : `Downloading ${files[0]}. It carries on if you leave this page.`);
     const host = document.querySelector('.repo-jobs');
     if (host) {
       const { jobs } = await api('/api/v1/repo/jobs');
