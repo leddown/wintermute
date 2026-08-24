@@ -5100,6 +5100,56 @@ function renderAdminAppearance(body) {
   body.append(el('form', { class: 'row-form' },
     el('span', { class: 'muted', text: 'Theme' }), theme));
 
+  body.append(el('div', { class: 'group-head', text: 'Text brightness' }));
+  body.append(el('p', { class: 'muted', text:
+    'Every theme here is dark, and each palette was tuned on one screen. The ' +
+    'same colours on a phone in daylight, or on a panel with the contrast ' +
+    'wound down, can be genuinely hard to read. This lifts the text and the ' +
+    'secondary text towards white without touching the backgrounds, the ' +
+    'accents or the warning colours, so the theme still looks like itself. ' +
+    '100 is the palette exactly as designed; the palettes already clear AA ' +
+    'contrast at that setting, so this is for the screen rather than for the ' +
+    'colours.' }));
+
+  // A slider that takes effect as it moves, rather than the number-and-Save
+  // the rain uses: this is a setting judged by eye, on the text being read at
+  // the time, and having to press Save to see each guess makes that a chore.
+  const lift = el('input', {
+    type: 'range', class: 'lift-range',
+    min: String(WintermuteTheme.MIN_BRIGHTNESS),
+    max: String(WintermuteTheme.MAX_BRIGHTNESS),
+    step: '5',
+  });
+  const liftValue = el('span', { class: 'muted lift-value' });
+  const showLift = (n) => {
+    liftValue.textContent = n === WintermuteTheme.DEFAULT_BRIGHTNESS
+      ? `${n}% · palette default` : `${n}%`;
+  };
+  lift.value = String(WintermuteTheme.brightness());
+  showLift(WintermuteTheme.brightness());
+  // input fires while dragging and change when it is let go: the first shows
+  // the effect, the second is what gets written down.
+  lift.addEventListener('input', () => {
+    WintermuteTheme.applyBrightness(lift.value);
+    showLift(parseInt(lift.value, 10));
+  });
+  lift.addEventListener('change', () => {
+    showLift(WintermuteTheme.setBrightness(lift.value));
+    // Chaos paints its glitches from the palette it sampled, so it is told to
+    // look again rather than keeping the colours from before the change.
+    WintermuteChaos.repaint();
+  });
+  body.append(el('form', { class: 'row-form', onsubmit: (e) => e.preventDefault() }, [
+    el('span', { class: 'muted', text: 'Brightness' }), lift, liftValue,
+    el('button', {
+      class: 'ghost-btn', type: 'button', text: 'Reset',
+      onclick: () => {
+        lift.value = String(WintermuteTheme.DEFAULT_BRIGHTNESS);
+        showLift(WintermuteTheme.setBrightness(lift.value));
+      },
+    }),
+  ]));
+
   body.append(el('div', { class: 'group-head', text: 'Matrix rain' }));
   body.append(el('p', { class: 'muted', text:
     'The falling glyphs behind the panes, on the Matrix theme. ' +

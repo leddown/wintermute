@@ -9,4 +9,14 @@
 (function () {
   var saved = localStorage.getItem("wintermute-theme");
   if (saved) document.documentElement.dataset.theme = saved;
+
+  // The text brightness lift, for the same reason: applied after paint it is
+  // a visible flicker on every page load. The clamp is repeated from
+  // theme.js rather than shared because this file has to stand alone in
+  // <head>, ahead of every module — the same trade the theme read above makes.
+  var lift = parseInt(localStorage.getItem("wintermute-text-lift"), 10);
+  if (Number.isFinite(lift) && lift > 100) {
+    document.documentElement.style.setProperty(
+      "--text-lift", Math.min(175, lift) - 100 + "%");
+  }
 })();

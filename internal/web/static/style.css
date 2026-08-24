@@ -3,8 +3,8 @@
   --surface: #171a21;
   --surface-2: #1f232c;
   --border: #2a2f3a;
-  --text: #e6e8ec;
-  --muted: #8b93a3;
+  --text-base: #e6e8ec;
+  --muted-base: #8b93a3;
   --accent: #6ea8fe;
   --error: #ff8a8a;
   /* Gain and loss, for the portfolio's P&L figures. The loss colour is the
@@ -13,6 +13,30 @@
   --gain: #7ddc9a;
   --loss: #ff8a8a;
   --radius: 10px;
+
+  /* Text brightness, set from Admin → Appearance and stored in this browser.
+     0% is the palette exactly as designed. See the derivation below. */
+  --text-lift: 0%;
+}
+
+/* Every palette defines --text-base and --muted-base; --text and --muted are
+   derived from them once, here, so a single control lifts all four themes and
+   no rule below has to know the setting exists.
+
+   The plain assignment comes first as the fallback. If color-mix is not
+   understood the whole derived declaration is dropped, and a dropped custom
+   property does not fall back to the palette — it makes every colour that
+   uses it invalid, which on these backgrounds means an unreadable page. So
+   the lift is only ever applied where it is known to work. */
+:root {
+  --text: var(--text-base);
+  --muted: var(--muted-base);
+}
+@supports (color: color-mix(in srgb, red, blue)) {
+  :root {
+    --text: color-mix(in srgb, var(--text-base), #fff var(--text-lift));
+    --muted: color-mix(in srgb, var(--muted-base), #fff var(--text-lift));
+  }
 }
 
 /* ---------- Themes ----------
@@ -31,8 +55,8 @@
   --surface: #001a00;
   --surface-2: #002b00;
   --border: #00611a;
-  --text: #00ff41;
-  --muted: #00a82c;
+  --text-base: #00ff41;
+  --muted-base: #00a82c;
   --accent: #00ff41;
   --error: #ff3b3b;
   /* Gain keeps the phosphor green; a loss stays red, because a red number is
@@ -146,7 +170,7 @@
   --surface: #12100c;
   --surface-2: #1c1811;
   --border: #6b5528;
-  --text: #e4d3a6;
+  --text-base: #e4d3a6;
   /* Secondary text is the pale green of a failing indicator lamp rather than
      the brass it used to be.
      
@@ -165,7 +189,7 @@
      
      10.91:1 on the background, 9.65:1 on a panel — comfortably AAA, and still
      clearly subordinate to the parchment above it. */
-  --muted: #b3c69a;
+  --muted-base: #b3c69a;
   --accent: #d8a730;
   /* The old red failed outright: 3.42:1 on the background, under even the AA
      floor of 4.5, on the one colour reserved for the things that must not be
@@ -1228,6 +1252,11 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
   .repo-bar-fill.indeterminate { animation: none; }
   .repo-bar-fill { transition: none; }
 }
+
+/* The brightness slider is judged against the text beside it, so it gets room
+   to be dragged rather than the width a number input would take. */
+.lift-range { flex: 1 1 180px; min-width: 120px; max-width: 320px; }
+.lift-value { font-variant-numeric: tabular-nums; min-width: 150px; }
 
 .repo-h { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em;
   color: var(--muted); margin: 22px 0 10px; font-weight: 600; }
