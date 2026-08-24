@@ -133,6 +133,32 @@ func TestSafeJoinRefusesSymlinkOut(t *testing.T) {
 	}
 }
 
+// A pinned revision is what makes a download reproducible, and the Hub screen
+// now offers the choice — so the ref reaches this package from a browser. It
+// lands in the middle of the URL fetched, which is why it is confined the same
+// way a repository id is.
+func TestCleanRevision(t *testing.T) {
+	ok := map[string]string{
+		"":            "main",
+		"  ":          "main",
+		"main":        "main",
+		"/v0.3/":      "v0.3",
+		"refs/pr/3":   "refs/pr/3",
+		"feature/a b": "feature/a%20b",
+	}
+	for in, want := range ok {
+		got, err := cleanRevision(in)
+		if err != nil || got != want {
+			t.Errorf("cleanRevision(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"..", "../main", "refs/../../other", "a//b", "."} {
+		if got, err := cleanRevision(bad); err == nil {
+			t.Errorf("cleanRevision(%q) = %q, want an error", bad, got)
+		}
+	}
+}
+
 func TestCleanHubID(t *testing.T) {
 	ok := map[string]string{
 		"Qwen/Qwen3-8B-GGUF":       "Qwen/Qwen3-8B-GGUF",

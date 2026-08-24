@@ -2768,7 +2768,7 @@ async function renderAdmin() {
   const titles = {
     status: 'Status', config: 'Configuration', backends: 'Backends',
     hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
-    models: 'Models', repo: 'Repository', fleet: 'Fleet', memory: 'Memory',
+    models: 'Models', repo: 'Repository', hub: 'Hub', fleet: 'Fleet', memory: 'Memory',
     appearance: 'Appearance', faq: 'Help',
   };
   $('admin-title').textContent = titles[admin.tab];
@@ -2781,6 +2781,7 @@ async function renderAdmin() {
   if (admin.tab === 'tools') return renderAdminTools(body);
   if (admin.tab === 'models') return renderAdminModels(body);
   if (admin.tab === 'repo') return renderAdminRepo(body);
+  if (admin.tab === 'hub') return renderAdminHub(body);
   if (admin.tab === 'faq') return renderAdminFAQ(body);
   if (admin.tab === 'fleet') return renderAdminFleet(body);
   if (admin.tab === 'memory') return renderAdminMemory(body);
@@ -3469,7 +3470,9 @@ async function cancelRepoJob(id) {
 function startRepoPolling() {
   if (repoView.timer) return;
   repoView.timer = setInterval(async () => {
-    if (admin.tab !== 'repo') return stopRepoPolling();
+    // Downloads can be started from either screen, and the panel that reports
+    // them is the same one, so the poll follows it rather than one tab.
+    if (admin.tab !== 'repo' && admin.tab !== 'hub') return stopRepoPolling();
     if (document.hidden || repoView.busy) return;
     const host = document.querySelector('.repo-jobs');
     if (!host) return stopRepoPolling();
@@ -3645,7 +3648,7 @@ async function toggleRepoDetail(hubID, host, button) {
   for (const q of quants) host.append(repoQuantRow(detail, q));
 }
 
-function repoQuantRow(detail, q) {
+function repoQuantRow(detail, q, opts = {}) {
   // The fit verdict is the whole reason this is worth showing in a list: it
   // says which of eight near-identical filenames will actually run here.
   const fit = q.fit || null;
@@ -3672,15 +3675,16 @@ function repoQuantRow(detail, q) {
       ? el('span', { class: 'error', text: 'incomplete upload — some shards are missing' })
       : el('button', {
         class: 'ghost-btn', type: 'button', text: 'Download',
-        title: parts.length > 1
+        disabled: Boolean(opts.disabled),
+        title: opts.disabled ? opts.reason : (parts.length > 1
           ? `Fetch all ${parts.length} parts of ${q.quant} into the repository`
-          : `Fetch ${q.filename} into the repository`,
-        onclick: (e) => startRepoDownload(detail, q, e.target).catch(showError),
+          : `Fetch ${q.filename} into the repository`),
+        onclick: (e) => startRepoDownload(detail, q, e.target, opts.revision).catch(showError),
       }),
   ]);
 }
 
-async function startRepoDownload(detail, q, button) {
+async function startRepoDownload(detail, q, button, revision) {
   button.disabled = true;
   // A split quantization is one model in several files, and it is only loadable
   // once every shard has arrived. They are started together, as separate jobs,
@@ -3697,6 +3701,10 @@ async function startRepoDownload(detail, q, button) {
           // header rather than a guess made from the filename later.
           quant: q.quant || '',
           params_b: detail.params_b || 0,
+          // Empty means main. Pinning is what makes a download reproducible,
+          // and the Hub screen is the only place that can offer the choice
+          // because it is the only one that lists the refs.
+          revision: revision || '',
         }),
       });
     }
@@ -3853,6 +3861,502 @@ async function deleteRepoFile(f) {
   await refreshRepoFiles();
 }
 
+
+/* ---------- browsing the Hugging Face Hub ----------
+   The Repository tab answers "what do I have"; this one answers "what is out
+   there". They are separate screens because they are separate questions, and
+   the same split already exists between Models and Repository.
+
+   Every request goes through the server. The browser has no Hub token, it
+   would be metered against its own address, and it cannot grade a model
+   against this host's hardware. The server can do all three.
+
+   One repository is open at a time, and its panels are fetched only when the
+   tab holding them is first opened. That is not laziness: the file tree, the
+   card, the refs and the scan are four requests, and the anonymous allowance
+   is five hundred every five minutes. */
+
+const hubView = {
+  query: '', author: '', pipeline: '', library: '', sort: '', gguf: true,
+  results: null, next: '', vocab: null, rate: null, hasToken: false,
+  open: null, repoReady: false, repoNote: '',
+};
+
+async function renderAdminHub(body) {
+  stopRepoPolling();
+
+  const rateEl = el('div', { class: 'hub-rate' });
+  const filterEl = el('div', { class: 'hub-filters' });
+  const jobsEl = el('div', { class: 'repo-jobs' });
+  const resultsEl = el('div', { class: 'hub-results' });
+  body.append(rateEl, filterEl, jobsEl, resultsEl);
+
+  // The repository state decides whether a download can be offered at all.
+  // Its absence is not an error here — the Hub is perfectly browsable without
+  // anywhere to put what it holds.
+  const [status, repo, vocab] = await Promise.all([
+    api('/api/v1/hub/status').catch(() => ({})),
+    api('/api/v1/repo').catch(() => null),
+    hubView.vocab ? Promise.resolve(null) : api('/api/v1/hub/tags').catch(() => ({ tags: {} })),
+  ]);
+  if (vocab) hubView.vocab = vocab.tags || {};
+  if (status.rate_limit) hubView.rate = status.rate_limit;
+  hubView.hasToken = Boolean(status.has_token);
+
+  const st = (repo && repo.status) || {};
+  hubView.repoReady = Boolean(st.available && st.initialised);
+  hubView.repoNote = !repo
+    ? 'No model repository is configured on this server, so there is nowhere to download to.'
+    : (!st.configured ? 'No model repository is configured — see Admin → Repository.'
+      : (!st.available ? 'The model repository is not available right now — see Admin → Repository.'
+        : (!st.initialised ? 'The model repository has not been initialised — see Admin → Repository.'
+          : '')));
+
+  paintHubRate(rateEl);
+  paintHubFilters(filterEl, resultsEl);
+  if (repo && repo.jobs) {
+    paintRepoJobs(jobsEl, repo.jobs);
+    if (repo.jobs.some((j) => j.state === 'running')) startRepoPolling();
+  }
+  if (hubView.results) paintHubResults(resultsEl);
+}
+
+/* ---- what is left of the allowance ---- */
+
+// The Hub meters requests in five-minute windows and this server shares one
+// address with every browser pointed at it. Shown rather than discovered by
+// failing, because the failure arrives in the middle of a search and looks like
+// a bug in this page.
+function paintHubRate(host) {
+  host.innerHTML = '';
+  const rl = hubView.rate;
+  const token = hubView.hasToken
+    ? el('span', { class: 'hub-token ok', title:
+        'Requests are attributed to the configured account, which has its own '
+        + 'allowance and can reach gated repositories it has been granted.',
+      text: 'token configured' })
+    : el('span', { class: 'hub-token', title:
+        'Without a token the Hub counts requests against this server’s IP address, '
+        + 'shares that count with anything else on it, and refuses gated repositories. '
+        + 'Set HUGGINGFACE_TOKEN to raise it.',
+      text: 'anonymous' });
+
+  if (!rl || !rl.quota) {
+    host.append(el('div', { class: 'hub-rate-head' }, [token]));
+    return;
+  }
+  const used = Math.max(0, rl.quota - rl.remaining);
+  const pct = Math.min(100, Math.round((used / rl.quota) * 100));
+  host.append(
+    el('div', { class: 'hub-rate-head' }, [
+      token,
+      el('span', { class: 'muted', text:
+        `${rl.remaining} of ${rl.quota} Hub requests left, resetting in ${rl.reset_seconds}s` }),
+    ]),
+    el('div', { class: 'repo-bar' }, [
+      el('div', { class: `repo-bar-fill ${pct > 85 ? 'tight' : ''}`, style: `width:${pct}%` }),
+    ]),
+  );
+}
+
+/* ---- narrowing the Hub ---- */
+
+function paintHubFilters(host, resultsEl) {
+  host.innerHTML = '';
+
+  const search = el('input', {
+    class: 'repo-query', type: 'search', placeholder: 'Search the Hugging Face Hub…',
+    value: hubView.query, autocomplete: 'off', spellcheck: 'false',
+  });
+  const author = el('input', {
+    class: 'hub-input', type: 'text', placeholder: 'Author', value: hubView.author,
+    autocomplete: 'off', spellcheck: 'false',
+    title: 'One publisher, e.g. unsloth, Qwen, bartowski.',
+  });
+
+  const vocab = hubView.vocab || {};
+  const pipeline = hubSelect('Any task', vocab.pipeline_tag, hubView.pipeline);
+  const library = hubSelect('Any library', vocab.library, hubView.library);
+  const sort = el('select', { class: 'hub-input' }, [
+    ['', 'Most downloaded (30d)'],
+    ['downloadsAllTime', 'Most downloaded (all time)'],
+    ['trendingScore', 'Trending'],
+    ['likes', 'Most liked'],
+    ['lastModified', 'Recently updated'],
+    ['createdAt', 'Recently created'],
+  ].map(([v, label]) => el('option', { value: v, selected: hubView.sort === v, text: label })));
+
+  // GGUF is what these backends load, so it is the default. Turning it off is
+  // how you go looking at original weights — which this server cannot run, and
+  // says so on the card rather than pretending otherwise.
+  const gguf = el('input', { type: 'checkbox', id: 'hub-gguf' });
+  gguf.checked = hubView.gguf;
+
+  const run = (reset) => {
+    hubView.query = search.value.trim();
+    hubView.author = author.value.trim();
+    hubView.pipeline = pipeline.value;
+    hubView.library = library.value;
+    hubView.sort = sort.value;
+    hubView.gguf = gguf.checked;
+    if (reset) { hubView.results = null; hubView.next = ''; hubView.open = null; }
+    return runHubSearch(resultsEl, reset);
+  };
+
+  const form = el('form', {
+    class: 'hub-filter-form',
+    onsubmit: (e) => { e.preventDefault(); run(true).catch(showError); },
+  }, [
+    el('div', { class: 'hub-filter-row' }, [search, el('button', { class: 'ghost-btn', type: 'submit', text: 'Search' })]),
+    el('div', { class: 'hub-filter-row' }, [
+      author, pipeline, library, sort,
+      el('label', { class: 'hub-check' }, [gguf, el('span', { text: 'GGUF only' })]),
+    ]),
+  ]);
+
+  host.append(el('h3', { class: 'repo-h', text: 'Find a model' }), form);
+  if (hubView.repoNote) {
+    host.append(el('p', { class: 'muted', text: hubView.repoNote }));
+  }
+}
+
+function hubSelect(placeholder, options, current) {
+  const select = el('select', { class: 'hub-input' },
+    el('option', { value: '', text: placeholder }));
+  for (const o of options || []) {
+    select.append(el('option', {
+      value: o.id, selected: current === o.id, text: o.label || o.id,
+    }));
+  }
+  return select;
+}
+
+async function runHubSearch(host, reset) {
+  const params = new URLSearchParams();
+  if (hubView.query) params.set('q', hubView.query);
+  if (hubView.author) params.set('author', hubView.author);
+  if (hubView.pipeline) params.set('pipeline_tag', hubView.pipeline);
+  if (hubView.library) params.set('library', hubView.library);
+  if (hubView.sort) params.set('sort', hubView.sort);
+  if (!hubView.gguf) params.set('gguf', 'false');
+  params.set('limit', '20');
+  if (!reset && hubView.next) params.set('cursor', hubView.next);
+
+  if (reset) {
+    host.innerHTML = '';
+    host.append(el('p', { class: 'muted', text: 'Searching…' }));
+  }
+
+  const data = await api(`/api/v1/hub/search?${params.toString()}`);
+  if (data.rate_limit) hubView.rate = data.rate_limit;
+  hubView.results = reset ? (data.results || []) : (hubView.results || []).concat(data.results || []);
+  hubView.next = data.next || '';
+  paintHubResults(host);
+  const rateHost = document.querySelector('.hub-rate');
+  if (rateHost) paintHubRate(rateHost);
+}
+
+function paintHubResults(host) {
+  host.innerHTML = '';
+  const found = hubView.results || [];
+  if (!found.length) {
+    host.append(el('p', { class: 'muted', text:
+      'Nothing matched. Widen the filters, or clear "GGUF only" to see repositories '
+      + 'carrying the original weights.' }));
+    return;
+  }
+
+  host.append(el('div', { class: 'muted hub-count', text:
+    `${found.length} result${found.length === 1 ? '' : 's'}` }));
+  for (const m of found) host.append(hubResultCard(m));
+
+  if (hubView.next) {
+    host.append(el('button', {
+      class: 'ghost-btn hub-more', type: 'button', text: 'Load more',
+      onclick: (e) => {
+        e.target.disabled = true;
+        runHubSearch(host, false).catch((err) => { e.target.disabled = false; showError(err); });
+      },
+    }));
+  }
+}
+
+// One card. The facts are the ones that decide whether to open it at all: what
+// it is, whether it runs here, and whether it can be fetched without an
+// account.
+function hubResultCard(m) {
+  const params = m.params_b
+    ? `${Number(m.params_b).toFixed(m.params_b < 10 ? 1 : 0)}B` : null;
+  const caps = m.capabilities || [];
+  const what = [
+    params,
+    m.architecture || null,
+    m.pipeline_tag || null,
+    m.ctx_len ? `${compactCount(m.ctx_len)} ctx` : null,
+    caps.includes('tools') ? 'tools' : null,
+    caps.includes('vision') ? 'vision' : null,
+  ].filter(Boolean).join(' · ');
+  const who = [
+    m.license || null,
+    m.downloads ? `${compactCount(m.downloads)} downloads / 30d` : null,
+    m.downloads_all_time ? `${compactCount(m.downloads_all_time)} all time` : null,
+    m.likes ? `${compactCount(m.likes)} likes` : null,
+    m.updated_at ? `updated ${relativeTime(new Date(m.updated_at))}` : null,
+  ].filter(Boolean).join(' · ');
+
+  const panel = el('div', { class: 'hub-panel' });
+  const open = el('button', {
+    class: 'ghost-btn repo-download-btn', type: 'button',
+    text: hubView.open && hubView.open.id === m.id ? 'Close' : 'Open',
+    onclick: () => toggleHubRepo(m, panel, open).catch(showError),
+  });
+
+  const card = el('div', { class: 'repo-result' }, [
+    el('div', { class: 'repo-result-head' }, [
+      el('span', { class: 'repo-result-id', text: m.id }),
+      m.fit && m.fit.verdict
+        ? el('span', { class: `repo-fit ${m.fit.verdict}`, text: m.fit.verdict })
+        : null,
+      m.gated ? el('span', { class: 'repo-gated', title:
+        'This repository needs a token and its terms accepted before it can be fetched.',
+      text: 'gated' }) : null,
+      el('span', { class: 'repo-result-spacer' }),
+      m.quant_count
+        ? el('span', { class: 'muted', text: `${m.quant_count} quantisation${m.quant_count === 1 ? '' : 's'}` })
+        : null,
+      open,
+    ]),
+    what ? el('div', { class: 'muted', text: what }) : null,
+    who ? el('div', { class: 'muted', text: who }) : null,
+    m.base_model && m.base_model !== m.id
+      ? el('div', { class: 'muted repo-result-base', text: `quantised from ${m.base_model}` })
+      : null,
+    // Somewhere this can be tried without fetching it first.
+    (m.providers || []).length
+      ? el('div', { class: 'muted repo-result-base', text:
+          `served by ${(m.providers || []).filter((p) => p.status === 'live').map((p) => p.name).join(', ') || '—'}` })
+      : null,
+    panel,
+  ]);
+  if (hubView.open && hubView.open.id === m.id) paintHubRepo(panel);
+  return card;
+}
+
+/* ---- one repository, opened ---- */
+
+async function toggleHubRepo(m, panel, button) {
+  if (hubView.open && hubView.open.id === m.id) {
+    hubView.open = null;
+    panel.innerHTML = '';
+    button.textContent = 'Open';
+    return;
+  }
+  // Only one at a time. Four panels each is a lot of requests to leave open
+  // behind a page of results nobody scrolled back to.
+  hubView.open = { id: m.id, tab: 'quants', revision: '', cache: {} };
+  for (const other of document.querySelectorAll('.hub-panel')) other.innerHTML = '';
+  for (const other of document.querySelectorAll('.repo-download-btn')) other.textContent = 'Open';
+  button.textContent = 'Close';
+  await paintHubRepo(panel);
+}
+
+async function paintHubRepo(panel) {
+  const open = hubView.open;
+  if (!open) return;
+  panel.innerHTML = '';
+
+  const tabs = [
+    ['quants', 'Quantisations'],
+    ['files', 'Files'],
+    ['card', 'Model card'],
+    ['revisions', 'Revisions'],
+    ['security', 'Security'],
+  ];
+  const bar = el('div', { class: 'hub-tabs' }, tabs.map(([id, label]) => el('button', {
+    class: `hub-tab ${open.tab === id ? 'active' : ''}`, type: 'button', text: label,
+    onclick: () => { open.tab = id; paintHubRepo(panel).catch(showError); },
+  })));
+
+  const pinned = open.revision
+    ? el('span', { class: 'hub-pin', title:
+        'Files and downloads below are taken from this revision rather than main.',
+      text: `pinned to ${open.revision}` })
+    : null;
+
+  const content = el('div', { class: 'hub-panel-body' },
+    el('p', { class: 'muted', text: 'Loading…' }));
+  panel.append(el('div', { class: 'hub-tab-row' }, [bar, pinned]), content);
+
+  try {
+    await paintHubTab(content, open);
+  } catch (err) {
+    content.innerHTML = '';
+    content.append(el('p', { class: 'error', text: err.message }));
+  }
+}
+
+// Each tab fetches once and remembers. Pinning a revision drops the panels that
+// depend on it, because a file list from main is not the file list of a tag.
+async function hubFetch(open, key, path) {
+  if (open.cache[key]) return open.cache[key];
+  const data = await api(path);
+  if (data.rate_limit) {
+    hubView.rate = data.rate_limit;
+    const rateHost = document.querySelector('.hub-rate');
+    if (rateHost) paintHubRate(rateHost);
+  }
+  open.cache[key] = data;
+  return data;
+}
+
+function hubRev(open, sep = '?') {
+  return open.revision ? `${sep}revision=${encodeURIComponent(open.revision)}` : '';
+}
+
+async function paintHubTab(host, open) {
+  const id = encodeURI(open.id);
+
+  if (open.tab === 'quants') {
+    const key = `detail:${open.revision}`;
+    const { model } = await hubFetch(open, key, `/api/v1/hub/detail/${id}`);
+    host.innerHTML = '';
+    const quants = (model && model.quants) || [];
+    if (!quants.length) {
+      host.append(el('p', { class: 'muted', text:
+        'No GGUF files here — this repository carries the original weights, which these '
+        + 'backends cannot load directly. The Files tab lists everything in it.' }));
+      return;
+    }
+    const rows = el('div', { class: 'repo-quants' });
+    for (const q of quants) {
+      rows.append(repoQuantRow(model, q, {
+        revision: open.revision,
+        disabled: !hubView.repoReady,
+        reason: hubView.repoNote,
+      }));
+    }
+    host.append(rows);
+    return;
+  }
+
+  if (open.tab === 'files') {
+    const key = `tree:${open.revision}`;
+    const data = await hubFetch(open, key, `/api/v1/hub/tree/${id}${hubRev(open)}`);
+    host.innerHTML = '';
+    const files = data.files || [];
+    if (!files.length) {
+      host.append(el('p', { class: 'muted', text: 'This revision has no files.' }));
+      return;
+    }
+    for (const f of files) {
+      host.append(el('div', { class: 'hub-file' }, [
+        el('span', { class: 'hub-file-path', text: f.path }),
+        el('span', { class: 'repo-result-spacer' }),
+        // A digest is only published for files kept in LFS, which is every
+        // weight of consequence. Its absence is normal, not a fault.
+        f.sha256 ? el('span', { class: 'repo-badge', title: `sha256 ${f.sha256}`, text: 'lfs' }) : null,
+        f.last_commit && f.last_commit.date
+          ? el('span', { class: 'muted', text: relativeTime(new Date(f.last_commit.date)) })
+          : null,
+        el('span', { class: 'muted hub-file-size', text: f.type === 'directory' ? '' : bytes(f.size) }),
+      ]));
+    }
+    if (data.next) {
+      host.append(el('p', { class: 'muted', text:
+        'Only the first page is listed. Repositories this large are shards of one model; '
+        + 'the Quantisations tab groups them back together.' }));
+    }
+    return;
+  }
+
+  if (open.tab === 'card') {
+    const key = `card:${open.revision}`;
+    const { card } = await hubFetch(open, key, `/api/v1/hub/card/${id}${hubRev(open)}`);
+    host.innerHTML = '';
+    if (!card || !card.trim()) {
+      host.append(el('p', { class: 'muted', text: 'This repository has no model card.' }));
+      return;
+    }
+    host.append(el('p', { class: 'muted hub-card-note', text:
+      'Written by whoever published this repository. Treat it the way you would any page '
+      + 'off the internet: it is shown, not trusted, and nothing in it has been acted on.' }));
+    // Rendered into DOM nodes by the same subset renderer the FAQ uses. No
+    // innerHTML anywhere on the path, so raw HTML in a card appears as the text
+    // it is rather than becoming markup in this page.
+    host.append(el('div', { class: 'doc hub-card' }, renderMarkdown(card)));
+    return;
+  }
+
+  if (open.tab === 'revisions') {
+    const [refsData, commitsData] = await Promise.all([
+      hubFetch(open, 'refs', `/api/v1/hub/refs/${id}`),
+      hubFetch(open, `commits:${open.revision}`, `/api/v1/hub/commits/${id}?limit=10${hubRev(open, '&')}`),
+    ]);
+    host.innerHTML = '';
+
+    const refs = refsData.refs || {};
+    const choices = [{ name: '', label: 'main (default)' }]
+      .concat((refs.branches || []).filter((b) => b.name !== 'main').map((b) => ({ name: b.name, label: `branch ${b.name}` })))
+      .concat((refs.tags || []).map((t) => ({ name: t.name, label: `tag ${t.name}` })));
+
+    const picker = el('select', { class: 'hub-input' }, choices.map((c) => el('option', {
+      value: c.name, selected: open.revision === c.name, text: c.label,
+    })));
+    picker.addEventListener('change', () => {
+      open.revision = picker.value;
+      // Everything below depends on the revision, so it is discarded rather
+      // than shown against a ref it did not come from.
+      open.cache = { refs: refsData };
+      paintHubRepo(picker.closest('.hub-panel')).catch(showError);
+    });
+
+    host.append(
+      el('div', { class: 'hub-rev-pick' }, [
+        el('span', { class: 'muted', text: 'Fetch from' }), picker,
+      ]),
+      el('p', { class: 'muted', text:
+        'Pinning to a tag is what makes a download reproducible: main moves when the '
+        + 'publisher re-uploads, and a tag does not.' }),
+    );
+
+    const commits = commitsData.commits || [];
+    if (!commits.length) return;
+    host.append(el('h4', { class: 'repo-h', text: 'History' }));
+    for (const c of commits) {
+      host.append(el('div', { class: 'hub-commit' }, [
+        el('span', { class: 'hub-commit-title', text: c.title || c.id.slice(0, 12) }),
+        el('span', { class: 'repo-result-spacer' }),
+        (c.authors || []).length ? el('span', { class: 'muted', text: c.authors.join(', ') }) : null,
+        c.date ? el('span', { class: 'muted', text: relativeTime(new Date(c.date)) }) : null,
+      ]));
+    }
+    return;
+  }
+
+  // Security.
+  const { scan } = await hubFetch(open, 'scan', `/api/v1/hub/scan/${id}`);
+  host.innerHTML = '';
+  const issues = (scan && scan.files_with_issues) || [];
+
+  if (!scan || !scan.scans_done) {
+    // Not the same as clean, and must not be able to read as clean.
+    host.append(el('p', { class: 'muted', text:
+      'Hugging Face has not finished scanning this repository. That is not the same as a '
+      + 'clean result — it means there is not yet a result to show.' }));
+  } else if (!issues.length) {
+    host.append(el('p', { class: 'muted', text:
+      'Hugging Face’s scanners flagged nothing in this repository. That is their verdict '
+      + 'on the files, not a guarantee, and it says nothing about what the model will do.' }));
+  }
+
+  for (const f of issues) {
+    host.append(el('div', { class: 'hub-scan-issue' }, [
+      el('span', { class: `repo-badge ${['unsafe', 'suspicious'].includes(f.level) ? 'missing' : ''}`, text: f.level }),
+      el('span', { class: 'hub-file-path', text: f.path }),
+    ]));
+  }
+}
+
 /* ---------- the FAQ ----------
    Served as Markdown from the embedded assets and rendered here, rather than
    shipped as a second copy in HTML. One source, and it stays readable in the
@@ -3958,11 +4462,33 @@ function inlineMarkdown(text) {
     if (m.index > last) nodes.push(document.createTextNode(text.slice(last, m.index)));
     if (m[1] !== undefined) nodes.push(el('code', { class: 'doc-inline-code', text: m[1] }));
     else if (m[2] !== undefined) nodes.push(el('strong', { text: m[2] }));
-    else nodes.push(el('a', { href: m[4], target: '_blank', rel: 'noopener noreferrer', text: m[3] }));
+    else nodes.push(linkNode(m[3], m[4]));
     last = m.index + m[0].length;
   }
   if (last < text.length) nodes.push(document.createTextNode(text.slice(last)));
   return nodes;
+}
+
+// A link, unless the target is not a kind of URL worth following.
+//
+// The renderer above was written for the FAQ, which is our own file, and its
+// comment anticipates the day it is pointed at content from somewhere else.
+// That day is the model card: prose from a stranger's repository, in which
+// [text](javascript:...) is an ordinary thing to write and would otherwise
+// become a live script link. Anything that is not plainly http, https or mailto
+// is shown as the text it is, so nothing is hidden — it simply cannot be
+// clicked into running.
+function linkNode(text, href) {
+  let scheme = '';
+  try {
+    scheme = new URL(href, window.location.origin).protocol;
+  } catch {
+    return document.createTextNode(`${text} (${href})`);
+  }
+  if (!['http:', 'https:', 'mailto:'].includes(scheme)) {
+    return document.createTextNode(`${text} (${href})`);
+  }
+  return el('a', { href, target: '_blank', rel: 'noopener noreferrer', text });
 }
 
 // Recent server failures, at the top of the Status page because when there are
@@ -4165,6 +4691,33 @@ async function renderAdminConfig(body) {
   ]));
   body.append(el('div', { class: 'muted', text:
     'Secrets are never sent to this page — only whether they are set.' }));
+
+  // What the token can actually do, which is not something its value shows: a
+  // read token and a write one look identical, and a search failing on a gated
+  // repository is the first time the difference is usually noticed. Asked of
+  // the Hub rather than assumed, and best-effort — this is a detail on a page
+  // that is already useful without it.
+  if (!c.has_huggingface_token) {
+    body.append(el('p', { class: 'muted', text:
+      'Without a token the Hub counts requests against this server’s address, shares that '
+      + 'count with anything else using it, and refuses gated repositories. Set '
+      + 'HUGGINGFACE_TOKEN to raise the allowance and reach repositories you have been '
+      + 'granted.' }));
+    return;
+  }
+  try {
+    const { identity } = await api('/api/v1/hub/whoami');
+    body.append(facts([
+      ['Hugging Face account', identity.fullname || identity.name || '—'],
+      ['Token role', identity.role || '—'],
+      ['Organisations', (identity.orgs || []).join(', ') || '—'],
+      ['Scopes', (identity.permissions || []).join(', ') || '(not a fine-grained token)'],
+      ['Plan', identity.is_pro ? 'PRO' : 'free'],
+    ]));
+  } catch (err) {
+    body.append(el('p', { class: 'muted', text:
+      `A token is configured but the Hub would not say whose it is: ${err.message}` }));
+  }
 }
 
 // How long ago a backend was last probed. A status is only evidence about the

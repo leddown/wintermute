@@ -36,6 +36,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -96,7 +97,9 @@ type Request struct {
 	HubID    string `json:"hub_id"`
 	Filename string `json:"filename"`
 	// Revision defaults to main. Pinning a revision is what makes a download
-	// reproducible, so it is accepted even though the UI does not offer it yet.
+	// reproducible — main moves when a publisher re-uploads, a tag does not —
+	// and the Hub screen offers the choice because it is the one place that
+	// lists a repository's refs.
 	Revision string `json:"revision,omitempty"`
 	// Quant and ParamsB are what the caller already learned from the Hub's
 	// parsed GGUF header. Passing them through means the index records the
@@ -118,6 +121,11 @@ func (d *Downloader) Start(ctx context.Context, req Request) (*Job, error) {
 	}
 	hubID, err := cleanHubID(req.HubID)
 	if err != nil {
+		return nil, err
+	}
+	// Cleaned here rather than where the URL is built, so a revision this
+	// server will not act on is refused while there is still a caller to tell.
+	if req.Revision, err = cleanRevision(req.Revision); err != nil {
 		return nil, err
 	}
 	filename := store.RepoKey(req.Filename)
@@ -168,11 +176,8 @@ func (d *Downloader) run(ctx context.Context, jobID, root, relPath string, req R
 		return
 	}
 
-	revision := strings.TrimSpace(req.Revision)
-	if revision == "" {
-		revision = "main"
-	}
-	url := fmt.Sprintf("https://huggingface.co/%s/resolve/%s/%s", hubID, revision, filename)
+	// Start has already cleaned the revision and defaulted it to main.
+	url := fmt.Sprintf("https://huggingface.co/%s/resolve/%s/%s", hubID, req.Revision, filename)
 	part := dest + partSuffix
 
 	var digest string
@@ -540,6 +545,30 @@ func isHex(s string) bool {
 // It becomes a directory path on the operator's drive and part of a URL, so it
 // is checked against a conservative character set rather than trusted. Anything
 // with a path traversal, a scheme or a query in it is rejected outright.
+// cleanRevision confines the ref a download is pinned to, and defaults it to
+// main.
+//
+// It arrives from outside and is interpolated into the URL fetched, in the
+// segment between the repository and the filename — so ".." in it would fetch a
+// file from somewhere other than the repository the job says it came from. A
+// slash is legal here, because "refs/pr/3" is a real branch name, so it is
+// checked and escaped segment by segment rather than refused for having one.
+func cleanRevision(revision string) (string, error) {
+	rev := strings.Trim(strings.TrimSpace(revision), "/")
+	if rev == "" {
+		return "main", nil
+	}
+	parts := strings.Split(rev, "/")
+	escaped := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return "", fmt.Errorf("%w: %q is not a revision", ErrInvalidRequest, revision)
+		}
+		escaped = append(escaped, url.PathEscape(part))
+	}
+	return strings.Join(escaped, "/"), nil
+}
+
 func cleanHubID(id string) (string, error) {
 	id = strings.Trim(strings.TrimSpace(id), "/")
 	if id == "" {

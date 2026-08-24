@@ -1441,3 +1441,72 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
 @media (max-width: 640px) {
   .err-row { grid-template-columns: 1fr; gap: 3px; }
 }
+
+/* The Hub browser. Deliberately borrows the Repository screen's cards, fit
+   badges and progress bars: the two screens show the same kinds of thing and
+   inventing a second visual language for them would only make it harder to see
+   that a search result and a file on the drive are the same model. */
+.hub-rate { margin-bottom: 16px; }
+.hub-rate-head {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  font-size: 12px; margin-bottom: 6px; font-variant-numeric: tabular-nums;
+}
+.hub-token {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted);
+}
+.hub-token.ok { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
+
+.hub-filter-form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.hub-filter-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.hub-filter-row .repo-query { flex: 1; min-width: 220px; }
+.hub-input {
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 7px 9px; font: inherit; font-size: 13px; min-width: 0;
+}
+.hub-check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.hub-count { font-size: 12px; margin-bottom: 8px; }
+.hub-more { display: block; margin: 12px auto 0; }
+
+.hub-panel { margin-top: 10px; }
+.hub-tab-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.hub-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.hub-tab {
+  background: none; border: 1px solid transparent; border-bottom-color: var(--border);
+  color: var(--muted); font: inherit; font-size: 12px; cursor: pointer;
+  padding: 5px 10px; border-radius: var(--radius) var(--radius) 0 0;
+}
+.hub-tab:hover { color: var(--text); }
+.hub-tab.active {
+  color: var(--text); border-color: var(--border); border-bottom-color: transparent;
+  background: var(--surface-2);
+}
+.hub-pin {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--accent); color: var(--accent);
+}
+.hub-panel-body {
+  border: 1px solid var(--border); border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 12px; background: var(--surface-2);
+}
+
+.hub-file, .hub-commit, .hub-scan-issue {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 12px;
+}
+.hub-file:last-child, .hub-commit:last-child, .hub-scan-issue:last-child { border-bottom: none; }
+.hub-file-path {
+  font-family: ui-monospace, "Courier New", monospace;
+  overflow-wrap: anywhere; min-width: 0;
+}
+.hub-file-size { font-variant-numeric: tabular-nums; }
+.hub-commit-title { overflow-wrap: anywhere; min-width: 0; }
+
+.hub-rev-pick { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
+
+/* The card is somebody else's prose and can run to tens of kilobytes, so it is
+   given a reading measure and a ceiling rather than the run of the page. */
+.hub-card { max-width: 68ch; max-height: 60vh; overflow-y: auto; }
+.hub-card-note { font-size: 12px; margin-bottom: 10px; }
