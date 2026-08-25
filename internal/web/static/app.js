@@ -3878,6 +3878,9 @@ async function deleteRepoFile(f) {
 
 const hubView = {
   query: '', author: '', pipeline: '', library: '', sort: '', gguf: true,
+  // tags narrow the search at the Hub; maxGB narrows the results here. The two
+  // are deliberately different mechanisms — see hubTagPicker and hubMemStops.
+  tags: [], maxGB: 0,
   results: null, next: '', vocab: null, rate: null, hasToken: false,
   open: null, repoReady: false, repoNote: '',
 };
@@ -3977,7 +3980,14 @@ function paintHubFilters(host, resultsEl) {
   const vocab = hubView.vocab || {};
   const pipeline = hubSelect('Any task', vocab.pipeline_tag, hubView.pipeline);
   const library = hubSelect('Any library', vocab.library, hubView.library);
-  const sort = el('select', { class: 'hub-input' }, [
+  // Reordering applies on change rather than waiting for Search. The sort you
+  // just picked is the entire intent of the click, and a list that does not
+  // move until a second button is pressed reads as a broken control.
+  const sort = el('select', {
+    class: 'hub-input',
+    title: 'Reorders the search at the Hub, not just the results already loaded.',
+    onchange: () => run(true).catch(showError),
+  }, [
     ['', 'Most downloaded (30d)'],
     ['downloadsAllTime', 'Most downloaded (all time)'],
     ['trendingScore', 'Trending'],
@@ -3992,13 +4002,44 @@ function paintHubFilters(host, resultsEl) {
   const gguf = el('input', { type: 'checkbox', id: 'hub-gguf' });
   gguf.checked = hubView.gguf;
 
-  const run = (reset) => {
+  // Tags are a Hub-side filter, so changing them costs a request — which is
+  // why the picker applies once when it closes rather than on every tick.
+  const tags = hubTagPicker(() => run(true).catch(showError));
+
+  const memLabel = el('span', { class: 'hub-slider-label', text: hubMemLabel() });
+  const mem = el('input', {
+    class: 'hub-slider', type: 'range', min: '0', step: '1',
+    max: String(hubMemStops.length - 1), value: String(hubMemIndex(hubView.maxGB)),
+    title: 'Estimated footprint of the weights, KV cache and overhead at '
+      + 'Q4_K_M and 8K context — a prediction from the parameter count, not a '
+      + 'measurement. The Hub cannot filter on it, so this narrows the results '
+      + 'already loaded rather than the search.',
+  });
+  // The label tracks the drag; the list is repainted on release. Repainting
+  // every tick would tear down and rebuild an opened repository panel dozens of
+  // times on the way past it.
+  mem.addEventListener('input', () => {
+    hubView.maxGB = hubMemStops[Number(mem.value)] || 0;
+    memLabel.textContent = hubMemLabel();
+  });
+  mem.addEventListener('change', () => paintHubResults(resultsEl));
+
+  // Pulling the controls into the state is split out because the row can be
+  // rebuilt from under the operator — clicking a tag on a card does it — and a
+  // search box that quietly reverts to the last thing searched loses whatever
+  // was half-typed into it.
+  const sync = () => {
     hubView.query = search.value.trim();
     hubView.author = author.value.trim();
     hubView.pipeline = pipeline.value;
     hubView.library = library.value;
     hubView.sort = sort.value;
     hubView.gguf = gguf.checked;
+  };
+  hubView.sync = sync;
+
+  const run = (reset) => {
+    sync();
     if (reset) { hubView.results = null; hubView.next = ''; hubView.open = null; }
     return runHubSearch(resultsEl, reset);
   };
@@ -4009,8 +4050,11 @@ function paintHubFilters(host, resultsEl) {
   }, [
     el('div', { class: 'hub-filter-row' }, [search, el('button', { class: 'ghost-btn', type: 'submit', text: 'Search' })]),
     el('div', { class: 'hub-filter-row' }, [
-      author, pipeline, library, sort,
+      author, pipeline, library, sort, tags,
       el('label', { class: 'hub-check' }, [gguf, el('span', { text: 'GGUF only' })]),
+    ]),
+    el('div', { class: 'hub-filter-row hub-slider-row' }, [
+      el('span', { class: 'muted', text: 'Memory' }), mem, memLabel,
     ]),
   ]);
 
@@ -4031,6 +4075,148 @@ function hubSelect(placeholder, options, current) {
   return select;
 }
 
+/* ---- tags ----
+   The Hub indexes its tags by type and will hand over the whole vocabulary —
+   five and a half thousand languages, two and a half thousand datasets, eighty
+   licences. A control offering all of it is a control nobody reads, so these
+   are the groups that change what a model *is*, in the order someone shopping
+   for something to run locally would reach for them. Task and library have
+   their own selects already and are deliberately not repeated here.
+
+   The ids are fixed here rather than taken from the vocabulary because the
+   vocabulary fetch is allowed to fail — the picker still works when it does,
+   with the ids as their own labels. */
+const hubTagGroups = [
+  { key: 'other', label: 'Traits', ids: ['moe', 'merge', 'custom_code', '4-bit', '8-bit'] },
+  {
+    key: 'language', label: 'Language',
+    ids: ['en', 'zh', 'multilingual', 'fr', 'de', 'es', 'ja', 'ko', 'ru', 'pt', 'it', 'ar', 'hi'],
+  },
+  {
+    key: 'licence', label: 'Licence', vocab: 'license',
+    ids: ['license:apache-2.0', 'license:mit', 'license:llama3.3', 'license:llama3.2',
+      'license:llama3.1', 'license:gemma', 'license:cc-by-4.0', 'license:cc-by-nc-4.0'],
+  },
+];
+
+// One checkbox dropdown over those groups. A <details> rather than a hand-built
+// popover: it is keyboard-reachable and toggles without any state of its own.
+function hubTagPicker(onApply) {
+  const vocab = hubView.vocab || {};
+  const chosen = new Set(hubView.tags || []);
+  // What was last sent to the Hub. Compared on close so that opening the panel
+  // and changing nothing costs no request — and so that reverting a tick back
+  // to where it started costs none either.
+  let applied = [...chosen].sort().join('\u0000');
+
+  const summary = el('summary', { class: 'hub-input hub-tagpick-summary' });
+  const paintSummary = () => {
+    summary.textContent = chosen.size ? `Tags · ${chosen.size}` : 'Tags';
+    summary.classList.toggle('on', chosen.size > 0);
+  };
+  paintSummary();
+
+  const boxes = [];
+  const groups = hubTagGroups.map((g) => {
+    const known = vocab[g.vocab || g.key] || [];
+    const items = g.ids.map((id) => {
+      const box = el('input', { type: 'checkbox' });
+      box.checked = chosen.has(id);
+      box.addEventListener('change', () => {
+        if (box.checked) chosen.add(id); else chosen.delete(id);
+        paintSummary();
+      });
+      boxes.push(box);
+      const found = known.find((t) => t.id === id);
+      return el('label', { class: 'hub-tagpick-item' }, [
+        box, el('span', { text: (found && (found.label || found.id)) || id }),
+      ]);
+    });
+    return el('div', { class: 'hub-tagpick-group' }, [
+      el('div', { class: 'hub-tagpick-head', text: g.label }),
+      el('div', { class: 'hub-tagpick-items' }, items),
+    ]);
+  });
+
+  const clear = el('button', {
+    class: 'ghost-btn hub-tagpick-clear', type: 'button', text: 'Clear',
+    onclick: () => {
+      chosen.clear();
+      for (const b of boxes) b.checked = false;
+      paintSummary();
+    },
+  });
+
+  const details = el('details', { class: 'hub-tagpick' }, [
+    summary,
+    el('div', { class: 'hub-tagpick-panel' }, [
+      ...groups,
+      el('div', { class: 'hub-tagpick-foot' }, [
+        el('span', { class: 'muted', text: 'Applied when this closes.' }), clear,
+      ]),
+    ]),
+  ]);
+
+  // A <details> does not close when the click lands elsewhere, and a filter
+  // panel that stays open over the results it just changed is in the way. The
+  // listener exists only while the panel is open, so nothing outlives it.
+  const closeOutside = (e) => {
+    if (!details.contains(e.target)) details.open = false;
+  };
+
+  // Applied on close, once, rather than on every box: each change is a fresh
+  // Hub search, and the allowance is five hundred requests in five minutes.
+  details.addEventListener('toggle', () => {
+    if (details.open) {
+      document.addEventListener('click', closeOutside, true);
+      return;
+    }
+    document.removeEventListener('click', closeOutside, true);
+    const now = [...chosen].sort();
+    if (now.join('\u0000') === applied) return;
+    applied = now.join('\u0000');
+    hubView.tags = now;
+    onApply();
+  });
+  return details;
+}
+
+/* ---- memory ----
+   Stops rather than a linear range: the interesting decisions are all in the
+   first sixteen gigabytes — the difference between 6 and 8 decides whether a
+   card runs it — and nobody needs 90 GB resolved to the gigabyte. The trailing
+   0 is "no limit", and it is where the slider starts. */
+const hubMemStops = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64, 96, 0];
+
+function hubMemIndex(gb) {
+  const at = hubMemStops.indexOf(gb);
+  return at < 0 ? hubMemStops.length - 1 : at;
+}
+
+function hubMemLabel() {
+  return hubView.maxGB ? `${hubView.maxGB} GB or less` : 'Any size';
+}
+
+// Split the results against the limit.
+//
+// A model whose footprint is unknown is kept rather than hidden. The estimate
+// needs a parameter count, and when the Hub has no GGUF header and the name
+// does not say, there is none — hiding a repository on a fact this page does
+// not have would be the page inventing one. The count line says how many.
+function hubByMemory(found) {
+  if (!hubView.maxGB) return { shown: found, hidden: 0, unknown: 0 };
+  const limitMB = hubView.maxGB * 1024;
+  let hidden = 0;
+  let unknown = 0;
+  const shown = found.filter((m) => {
+    const total = m.fit && m.fit.total_mb;
+    if (!total) { unknown += 1; return true; }
+    if (total > limitMB) { hidden += 1; return false; }
+    return true;
+  });
+  return { shown, hidden, unknown };
+}
+
 async function runHubSearch(host, reset) {
   const params = new URLSearchParams();
   if (hubView.query) params.set('q', hubView.query);
@@ -4038,6 +4224,7 @@ async function runHubSearch(host, reset) {
   if (hubView.pipeline) params.set('pipeline_tag', hubView.pipeline);
   if (hubView.library) params.set('library', hubView.library);
   if (hubView.sort) params.set('sort', hubView.sort);
+  for (const t of hubView.tags || []) params.append('filter', t);
   if (!hubView.gguf) params.set('gguf', 'false');
   params.set('limit', '20');
   if (!reset && hubView.next) params.set('cursor', hubView.next);
@@ -4066,9 +4253,26 @@ function paintHubResults(host) {
     return;
   }
 
-  host.append(el('div', { class: 'muted hub-count', text:
-    `${found.length} result${found.length === 1 ? '' : 's'}` }));
-  for (const m of found) host.append(hubResultCard(m));
+  const { shown, hidden, unknown } = hubByMemory(found);
+
+  // Two different emptinesses, and telling them apart is the whole point: the
+  // Hub found nothing, or the Hub found things and the slider is hiding them.
+  // The advice for one is useless for the other.
+  if (!shown.length) {
+    host.append(el('p', { class: 'muted', text:
+      `All ${found.length} result${found.length === 1 ? '' : 's'} need more than `
+      + `${hubView.maxGB} GB. Raise the memory limit to see them.` }));
+    return;
+  }
+
+  const counted = [
+    hidden
+      ? `${shown.length} of ${found.length} results · ${hidden} over ${hubView.maxGB} GB`
+      : `${found.length} result${found.length === 1 ? '' : 's'}`,
+    unknown ? `${unknown} with no known footprint, shown anyway` : null,
+  ].filter(Boolean).join(' · ');
+  host.append(el('div', { class: 'muted hub-count', text: counted }));
+  for (const m of shown) host.append(hubResultCard(m));
 
   if (hubView.next) {
     host.append(el('button', {
@@ -4079,6 +4283,83 @@ function paintHubResults(host) {
       },
     }));
   }
+}
+
+/* ---- the tags on a card ----
+   A repository carries fifteen or twenty tags and most of them are already on
+   the card as their own fact: the licence is in the second line, the base model
+   is under it, the architecture and the task are in the first, and the library
+   and the GGUF flag are controls above the list. Repeating those spends a line
+   to say nothing. What is left is what the Hub knows and this page does not —
+   the languages, the publisher's own marks, and whether it is a chat model. */
+const hubTagNoise = new Set([
+  // Already shown, or the mechanism that found the result in the first place.
+  'gguf', 'transformers', 'safetensors', 'pytorch', 'tf', 'jax', 'onnx', 'peft',
+  'diffusers', 'sentence-transformers', 'tensorboard', 'timm', 'keras', 'mlx',
+  'transformers.js', 'adapter-transformers',
+  // Hosting and bookkeeping. True of most of the Hub and decides nothing here.
+  'endpoints_compatible', 'autotrain_compatible', 'text-generation-inference',
+  'text-embeddings-inference', 'eval-results', 'model-index', 'has_space',
+  'co2_eq_emissions',
+]);
+
+// Whole families of machine-generated tags: one per citation, per dataset, per
+// base model. Useful to the Hub's own indexes, unreadable on a card.
+const hubTagNoisePrefixes = [
+  'base_model:', 'license:', 'region:', 'deploy:', 'arxiv:', 'dataset:',
+  'doi:', 'bucket:',
+];
+
+// Ten is about a line and a half at this size. The rest are counted rather than
+// dropped silently, and named in the title.
+const hubCardTagCap = 10;
+
+function hubCardTags(m) {
+  const shown = new Set([m.pipeline_tag, m.architecture].filter(Boolean));
+  return (m.tags || []).filter((t) => typeof t === 'string' && t
+    && !shown.has(t) && !hubTagNoise.has(t)
+    && !hubTagNoisePrefixes.some((prefix) => t.startsWith(prefix)));
+}
+
+// Rendered as buttons because every one of them is a valid Hub filter, and
+// "more like this one" is the question a tag on a card is asked. Clicking one
+// that is already filtering removes it again.
+function hubTagChips(m) {
+  const tags = hubCardTags(m);
+  if (!tags.length) return null;
+  const active = new Set(hubView.tags || []);
+  const head = tags.slice(0, hubCardTagCap);
+  const rest = tags.slice(hubCardTagCap);
+  return el('div', { class: 'hub-card-tags' }, [
+    ...head.map((t) => el('button', {
+      class: `hub-card-tag ${active.has(t) ? 'on' : ''}`, type: 'button', text: t,
+      title: active.has(t) ? `Stop filtering on ${t}.` : `Narrow the search to ${t}.`,
+      onclick: () => toggleHubTag(t),
+    })),
+    rest.length
+      ? el('span', { class: 'muted hub-card-tag-more', title: rest.join(', '),
+        text: `+${rest.length}` })
+      : null,
+  ]);
+}
+
+// Adding a tag from a card changes the same state the picker owns, so the
+// picker is rebuilt rather than left showing a selection that is no longer the
+// one being searched.
+function toggleHubTag(tag) {
+  if (hubView.sync) hubView.sync();
+  const now = new Set(hubView.tags || []);
+  if (now.has(tag)) now.delete(tag); else now.add(tag);
+  hubView.tags = [...now].sort();
+  hubView.results = null;
+  hubView.next = '';
+  hubView.open = null;
+
+  const filterHost = document.querySelector('.hub-filters');
+  const resultsHost = document.querySelector('.hub-results');
+  if (!resultsHost) return;
+  if (filterHost) paintHubFilters(filterHost, resultsHost);
+  runHubSearch(resultsHost, true).catch(showError);
 }
 
 // One card. The facts are the ones that decide whether to open it at all: what
@@ -4136,6 +4417,7 @@ function hubResultCard(m) {
       ? el('div', { class: 'muted repo-result-base', text:
           `served by ${(m.providers || []).filter((p) => p.status === 'live').map((p) => p.name).join(', ') || '—'}` })
       : null,
+    hubTagChips(m),
     panel,
   ]);
   if (hubView.open && hubView.open.id === m.id) paintHubRepo(panel);

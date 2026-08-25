@@ -246,6 +246,194 @@
   text-transform: uppercase;
 }
 
+/* ---------- 40K: the Hub's results as salvaged data-slates ----------
+
+   Only under this theme, and only on the Hub. The Repository screen lists what
+   this machine owns and keeps in order; the Hub is ten thousand strangers'
+   cogitator dumps, and under a gothic palette it should look like it was dug
+   out of one — cracked plate, corroded edges, a scan that gave up years ago.
+
+   The whole effect is paint. Nothing here moves anything in the flow or
+   intercepts a click, and every card straightens and wipes clean on hover or
+   focus: a ruined slate is a joke that stops being funny at the second one
+   somebody actually needed to read. That is also why the grime is layered over
+   the panel and never over the glyphs — the text underneath is untouched. */
+:root[data-theme="40k"] .hub-results .repo-result {
+  position: relative;
+  border-radius: 1px;
+  border-color: #5d4a22;
+  border-left: 3px solid #7a5f22;
+  border-bottom-color: #2b2311;
+  background:
+    radial-gradient(130% 90% at 6% 0%, rgba(216, 167, 48, 0.06), transparent 62%),
+    radial-gradient(70% 60% at 94% 100%, rgba(0, 0, 0, 0.6), transparent 72%),
+    linear-gradient(178deg, var(--surface-2), var(--surface) 58%, #0c0a07);
+  box-shadow:
+    inset 0 0 0 1px rgba(0, 0, 0, 0.55),
+    inset 0 26px 44px -32px rgba(216, 167, 48, 0.28),
+    inset 0 -30px 40px -34px rgba(0, 0, 0, 0.9);
+  /* Eaten edges. border-image over a plain rule because corrosion does not
+     stop neatly at a colour — it takes bites. */
+  border-image: repeating-linear-gradient(41deg,
+    #7a5f22 0 7px, rgba(122, 95, 34, 0.15) 7px 11px,
+    #4a3c1a 11px 19px, rgba(0, 0, 0, 0.6) 19px 22px) 1;
+  /* Pieces missing: the top-left corner, a bite out of the left edge, a chunk
+     off the bottom. The right edge is cut only below the head row and never by
+     more than a few pixels at the top — Open and the badges live up there, and
+     a control you cannot click is a broken card in the wrong sense. */
+  /* Wound clockwise, and the left edge is walked bottom-to-top: a point out of
+     order here does not draw a notch, it shears a wedge off the whole side and
+     takes the first glyph of the id with it. */
+  clip-path: polygon(
+    14px 0, calc(100% - 11px) 0, 100% 11px,
+    100% 46%, calc(100% - 7px) 50%, 100% 54%,
+    100% 100%, 46px 100%, 26px calc(100% - 9px), 0 calc(100% - 22px),
+    0 34%, 7px 30%, 0 26%, 0 14px);
+  /* The bites are cut out of the padding, never out of the text. */
+  padding: 13px 18px 15px 21px;
+  transform: rotate(-0.8deg) translateY(1px);
+  filter: saturate(0.86) contrast(1.05);
+  transition: transform 140ms ease, filter 140ms ease;
+}
+
+/* No two slates out of the same heap sit the same way. The counts run over the
+   result list as a whole — the count line and the Load more button are in it —
+   so which card draws which ruin does not repeat on a page. */
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(3n) {
+  transform: rotate(0.95deg) translateX(3px);
+  clip-path: polygon(
+    0 14px, 19px 0, calc(100% - 30px) 0, calc(100% - 14px) 8px, 100% 6px,
+    100% calc(100% - 26px), calc(100% - 9px) calc(100% - 14px), 100% 100%,
+    62px 100%, 40px calc(100% - 11px), 0 100%,
+    0 70%, 8px 66%, 0 62%);
+}
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(4n + 1) {
+  transform: rotate(0.28deg) translateX(-4px);
+  clip-path: polygon(
+    10px 0, 100% 0, 100% 38%, calc(100% - 10px) 41%, 100% 44%,
+    100% calc(100% - 18px), calc(100% - 34px) 100%, 30px 100%,
+    0 calc(100% - 14px), 0 20%, 7px 16%, 0 12%, 0 10px);
+  border-image: repeating-linear-gradient(128deg,
+    #8a4a22 0 5px, rgba(0, 0, 0, 0.7) 5px 9px,
+    #6b5528 9px 17px, rgba(107, 85, 40, 0.2) 17px 21px) 1;
+}
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(5n + 3) {
+  transform: rotate(-1.15deg) translateX(-2px);
+  clip-path: polygon(
+    16px 0, calc(100% - 8px) 0, 100% 9px, 100% 100%,
+    18px 100%, 0 calc(100% - 26px), 0 52%, 9px 48%, 0 44%, 0 16px);
+}
+
+/* Dead scan lines, and one band where the raster gave out altogether. */
+:root[data-theme="40k"] .hub-results .repo-result::before {
+  content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+  background:
+    repeating-linear-gradient(to bottom,
+      rgba(0, 0, 0, 0.34) 0 1px, transparent 1px 3px),
+    /* Bands where the raster gave out, and one that only half survived. */
+    linear-gradient(to bottom, transparent 0 27.5%,
+      rgba(0, 0, 0, 0.62) 27.5% 29.4%, transparent 29.4%),
+    linear-gradient(to bottom, transparent 0 61.4%,
+      rgba(0, 0, 0, 0.7) 61.4% 64.6%, transparent 64.6%),
+    linear-gradient(to bottom, transparent 0 82%,
+      rgba(216, 167, 48, 0.09) 82% 83.1%, transparent 83.1%),
+    /* Dropout: whole blocks of the line lost between the head and the facts. */
+    linear-gradient(90deg, transparent 0 46%, rgba(0, 0, 0, 0.55) 46% 58%,
+      transparent 58% 79%, rgba(0, 0, 0, 0.4) 79% 86%, transparent 86%)
+      0 44% / 100% 5px no-repeat;
+  opacity: 0.78;
+  animation: slate-fritz 9s steps(1) infinite;
+  transition: opacity 140ms ease;
+}
+/* Out of phase, or the whole list blinks like one machine. */
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(3n)::before { animation-delay: -3.1s; }
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(4n + 1)::before { animation-delay: -5.7s; }
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(5n + 3)::before { animation-delay: -7.4s; }
+
+/* Cracks in the plate and rust where it was handled. */
+:root[data-theme="40k"] .hub-results .repo-result::after {
+  content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
+  background:
+    /* A crack is a lit edge with a dark gap beside it, never a drawn line. */
+    linear-gradient(101deg, transparent 0 38.6%,
+      rgba(0, 0, 0, 0.55) 38.6% 38.85%,
+      rgba(240, 226, 190, 0.42) 38.85% 39.15%, transparent 39.15%),
+    linear-gradient(77deg, transparent 0 70.8%,
+      rgba(0, 0, 0, 0.45) 70.8% 71.05%,
+      rgba(240, 226, 190, 0.3) 71.05% 71.3%, transparent 71.3%),
+    /* Where it branches off the first one. */
+    linear-gradient(151deg, transparent 0 56%,
+      rgba(240, 226, 190, 0.22) 56% 56.25%, transparent 56.25%),
+    linear-gradient(24deg, transparent 0 21.5%,
+      rgba(240, 226, 190, 0.16) 21.5% 21.7%, transparent 21.7%),
+    /* Scorched at one end, corroded at the other, handled everywhere. */
+    radial-gradient(58px 30px at 99% 4%, rgba(20, 12, 6, 0.85), transparent 72%),
+    radial-gradient(34px 15px at 92% 12%, rgba(138, 74, 34, 0.45), transparent 70%),
+    radial-gradient(64px 30px at 2% 96%, rgba(93, 74, 34, 0.5), transparent 74%),
+    radial-gradient(90px 44px at 22% 108%, rgba(0, 0, 0, 0.6), transparent 70%),
+    radial-gradient(120px 60px at 78% -12%, rgba(0, 0, 0, 0.5), transparent 70%);
+  transition: opacity 140ms ease;
+}
+
+/* The cracks run at different angles on different slates, or the whole list
+   looks like one sheet that broke once. */
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(3n)::after {
+  transform: scaleX(-1);
+}
+:root[data-theme="40k"] .hub-results .repo-result:nth-child(4n + 1)::after {
+  transform: scale(-1, -1);
+}
+
+/* The id is the one glyph run the failing tube cannot hold registration on. */
+:root[data-theme="40k"] .hub-results .repo-result-id {
+  position: relative; z-index: 2;
+  letter-spacing: 0.03em;
+  text-shadow: 1px 0 rgba(255, 95, 86, 0.4), -1px 0 rgba(216, 167, 48, 0.32);
+}
+
+/* Wiped clean. Focus counts as well as hover, so the keyboard gets the legible
+   card too and not only the mouse. */
+:root[data-theme="40k"] .hub-results .repo-result:hover,
+:root[data-theme="40k"] .hub-results .repo-result:focus-within {
+  transform: none;
+  filter: brightness(1.1);
+}
+:root[data-theme="40k"] .hub-results .repo-result:hover::before,
+:root[data-theme="40k"] .hub-results .repo-result:focus-within::before {
+  opacity: 0.22; animation: none;
+}
+:root[data-theme="40k"] .hub-results .repo-result:hover::after,
+:root[data-theme="40k"] .hub-results .repo-result:focus-within::after {
+  opacity: 0.3;
+}
+:root[data-theme="40k"] .hub-results .repo-result:hover .repo-result-id,
+:root[data-theme="40k"] .hub-results .repo-result:focus-within .repo-result-id {
+  text-shadow: none;
+}
+
+/* Tags as stencilled stamps rather than pills. */
+:root[data-theme="40k"] .hub-card-tag {
+  border-radius: 0; border-style: dashed; border-color: #5d4a22;
+  text-transform: uppercase; letter-spacing: 0.07em; font-size: 10px;
+}
+:root[data-theme="40k"] .hub-card-tag.on { border-style: solid; }
+
+/* An irregular stutter rather than a pulse: a lamp about to go, not a beacon.
+   Held at full for nine tenths of the cycle so reading is not a strobe. */
+@keyframes slate-fritz {
+  0%, 95.4% { opacity: 0.72; }
+  95.8% { opacity: 0.3; }
+  96.4% { opacity: 0.86; }
+  97% { opacity: 0.44; }
+  97.6%, 100% { opacity: 0.72; }
+}
+
+/* Asked for stillness, the slates are still ruined — they just stop failing. */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme="40k"] .hub-results .repo-result::before { animation: none; }
+  :root[data-theme="40k"] .hub-results .repo-result { transition: none; }
+}
+
 /* ---------- fritz overlay ----------
 
    The 40K theme's failing-CRT layer, driven by /fritz.js. Fixed over the whole
@@ -1466,6 +1654,65 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
   padding: 7px 9px; font: inherit; font-size: 13px; min-width: 0;
 }
 .hub-check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+
+/* The tag picker. A <details> holding an absolutely positioned panel, so the
+   row below it does not jump when the panel opens. */
+.hub-tagpick { position: relative; }
+.hub-tagpick-summary {
+  display: inline-block; cursor: pointer; user-select: none;
+  color: var(--muted); list-style: none;
+}
+.hub-tagpick-summary::-webkit-details-marker { display: none; }
+.hub-tagpick-summary::after { content: ' \25be'; }
+.hub-tagpick-summary:hover { color: var(--text); }
+.hub-tagpick-summary.on { color: var(--accent); border-color: var(--accent); }
+.hub-tagpick-panel {
+  position: absolute; z-index: 20; top: calc(100% + 4px); left: 0;
+  min-width: 320px; max-width: min(520px, 92vw);
+  max-height: 60vh; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 10px 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+.hub-tagpick-group + .hub-tagpick-group { margin-top: 10px; }
+.hub-tagpick-head {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  color: var(--muted); margin-bottom: 5px;
+}
+.hub-tagpick-items { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+.hub-tagpick-item {
+  display: flex; align-items: center; gap: 5px;
+  font-size: 12px; color: var(--text); cursor: pointer;
+}
+.hub-tagpick-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 12px; padding-top: 8px; border-top: 1px solid var(--border);
+  font-size: 11px;
+}
+.hub-tagpick-clear { font-size: 12px; padding: 3px 10px; }
+
+.hub-slider-row { font-size: 12px; }
+.hub-slider { flex: 1; max-width: 320px; accent-color: var(--accent); }
+.hub-slider-label {
+  font-size: 12px; color: var(--text); min-width: 110px;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 640px) {
+  .hub-tagpick-panel { min-width: 0; width: min(92vw, 360px); }
+  .hub-slider { max-width: none; }
+}
+/* The tags a repository carries, minus everything the card already says. Each
+   is a button because each is a valid Hub filter — see hubTagChips. */
+.hub-card-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.hub-card-tag {
+  background: none; border: 1px solid var(--border); border-radius: 999px;
+  color: var(--muted); font: inherit; font-size: 11px; line-height: 1.7;
+  padding: 0 8px; cursor: pointer;
+}
+.hub-card-tag:hover { color: var(--text); border-color: var(--muted); }
+.hub-card-tag.on { color: var(--accent); border-color: var(--accent); }
+.hub-card-tag-more { font-size: 11px; padding: 0 4px; }
+
 .hub-count { font-size: 12px; margin-bottom: 8px; }
 .hub-more { display: block; margin: 12px auto 0; }
 
