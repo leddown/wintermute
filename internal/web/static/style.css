@@ -248,17 +248,19 @@
 
 /* ---------- 40K: the Hub's results as salvaged data-slates ----------
 
-   Only under this theme, and only on the Hub. The Repository screen lists what
-   this machine owns and keeps in order; the Hub is ten thousand strangers'
-   cogitator dumps, and under a gothic palette it should look like it was dug
-   out of one — cracked plate, corroded edges, a scan that gave up years ago.
+   Only under this theme, and only on results fetched from the Hub — both the
+   places that search it: Admin -> Hub, and the Add a model box on Repository.
+   What this machine owns stays in order, so the downloaded files and the job
+   rows on that same screen are untouched; it is ten thousand strangers'
+   cogitator dumps that arrive looking dug out of one — cracked plate, corroded
+   edges, a scan that gave up years ago.
 
    The whole effect is paint. Nothing here moves anything in the flow or
    intercepts a click, and every card straightens and wipes clean on hover or
    focus: a ruined slate is a joke that stops being funny at the second one
    somebody actually needed to read. That is also why the grime is layered over
    the panel and never over the glyphs — the text underneath is untouched. */
-:root[data-theme="40k"] .hub-results .repo-result {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result {
   position: relative;
   border-radius: 1px;
   border-color: #5d4a22;
@@ -299,7 +301,7 @@
 /* No two slates out of the same heap sit the same way. The counts run over the
    result list as a whole — the count line and the Load more button are in it —
    so which card draws which ruin does not repeat on a page. */
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(3n) {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(3n) {
   transform: rotate(0.95deg) translateX(3px);
   clip-path: polygon(
     0 14px, 19px 0, calc(100% - 30px) 0, calc(100% - 14px) 8px, 100% 6px,
@@ -307,7 +309,7 @@
     62px 100%, 40px calc(100% - 11px), 0 100%,
     0 70%, 8px 66%, 0 62%);
 }
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(4n + 1) {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(4n + 1) {
   transform: rotate(0.28deg) translateX(-4px);
   clip-path: polygon(
     10px 0, 100% 0, 100% 38%, calc(100% - 10px) 41%, 100% 44%,
@@ -317,7 +319,7 @@
     #8a4a22 0 5px, rgba(0, 0, 0, 0.7) 5px 9px,
     #6b5528 9px 17px, rgba(107, 85, 40, 0.2) 17px 21px) 1;
 }
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(5n + 3) {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(5n + 3) {
   transform: rotate(-1.15deg) translateX(-2px);
   clip-path: polygon(
     16px 0, calc(100% - 8px) 0, 100% 9px, 100% 100%,
@@ -325,7 +327,7 @@
 }
 
 /* Dead scan lines, and one band where the raster gave out altogether. */
-:root[data-theme="40k"] .hub-results .repo-result::before {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result::before {
   content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
   background:
     repeating-linear-gradient(to bottom,
@@ -346,12 +348,12 @@
   transition: opacity 140ms ease;
 }
 /* Out of phase, or the whole list blinks like one machine. */
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(3n)::before { animation-delay: -3.1s; }
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(4n + 1)::before { animation-delay: -5.7s; }
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(5n + 3)::before { animation-delay: -7.4s; }
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(3n)::before { animation-delay: -3.1s; }
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(4n + 1)::before { animation-delay: -5.7s; }
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(5n + 3)::before { animation-delay: -7.4s; }
 
 /* Cracks in the plate and rust where it was handled. */
-:root[data-theme="40k"] .hub-results .repo-result::after {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result::after {
   content: ""; position: absolute; inset: 0; z-index: 1; pointer-events: none;
   background:
     /* A crack is a lit edge with a dark gap beside it, never a drawn line. */
@@ -377,15 +379,15 @@
 
 /* The cracks run at different angles on different slates, or the whole list
    looks like one sheet that broke once. */
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(3n)::after {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(3n)::after {
   transform: scaleX(-1);
 }
-:root[data-theme="40k"] .hub-results .repo-result:nth-child(4n + 1)::after {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:nth-child(4n + 1)::after {
   transform: scale(-1, -1);
 }
 
 /* The id is the one glyph run the failing tube cannot hold registration on. */
-:root[data-theme="40k"] .hub-results .repo-result-id {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result-id {
   position: relative; z-index: 2;
   letter-spacing: 0.03em;
   text-shadow: 1px 0 rgba(255, 95, 86, 0.4), -1px 0 rgba(216, 167, 48, 0.32);
@@ -393,21 +395,21 @@
 
 /* Wiped clean. Focus counts as well as hover, so the keyboard gets the legible
    card too and not only the mouse. */
-:root[data-theme="40k"] .hub-results .repo-result:hover,
-:root[data-theme="40k"] .hub-results .repo-result:focus-within {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:hover,
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:focus-within {
   transform: none;
   filter: brightness(1.1);
 }
-:root[data-theme="40k"] .hub-results .repo-result:hover::before,
-:root[data-theme="40k"] .hub-results .repo-result:focus-within::before {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:hover::before,
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:focus-within::before {
   opacity: 0.22; animation: none;
 }
-:root[data-theme="40k"] .hub-results .repo-result:hover::after,
-:root[data-theme="40k"] .hub-results .repo-result:focus-within::after {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:hover::after,
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:focus-within::after {
   opacity: 0.3;
 }
-:root[data-theme="40k"] .hub-results .repo-result:hover .repo-result-id,
-:root[data-theme="40k"] .hub-results .repo-result:focus-within .repo-result-id {
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:hover .repo-result-id,
+:root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result:focus-within .repo-result-id {
   text-shadow: none;
 }
 
@@ -430,8 +432,8 @@
 
 /* Asked for stillness, the slates are still ruined — they just stop failing. */
 @media (prefers-reduced-motion: reduce) {
-  :root[data-theme="40k"] .hub-results .repo-result::before { animation: none; }
-  :root[data-theme="40k"] .hub-results .repo-result { transition: none; }
+  :root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result::before { animation: none; }
+  :root[data-theme="40k"] :is(.hub-results, .repo-results) .repo-result { transition: none; }
 }
 
 /* ---------- fritz overlay ----------

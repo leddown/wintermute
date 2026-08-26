@@ -71,7 +71,7 @@ Because an unmounted drive leaves its mount point behind as an ordinary empty
 directory. Without a check, a download would fill the server's root filesystem
 while reporting success.
 
-Pressing **Initialise** in Admin → Repository writes a `.wintermute-repo` marker
+Pressing **Initialise** in Huginn → Repository writes a `.wintermute-repo` marker
 onto the drive itself. No marker, no writing. Deleting the marker does not delete
 any weights; it just stops the server writing there.
 
@@ -163,7 +163,7 @@ machine at a time.
 
 ### How do I put a model on a node?
 
-Admin → Fleet, then the store panel on that node's card. Assigning records intent
+Huginn → Fleet, then the store panel on that node's card. Assigning records intent
 only — nothing is transferred and nothing connects to the node. The agent notices
 on its next report and fetches for itself, usually within a minute.
 

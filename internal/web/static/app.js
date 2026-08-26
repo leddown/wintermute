@@ -146,6 +146,7 @@ const loaders = {
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
   utilities: () => loadUtilities(),
+  huginn: () => renderHuginn(),
   admin: () => renderAdmin(),
 };
 
@@ -166,6 +167,10 @@ function switchView(name) {
   // The activity gauges poll on a timer. Leaving the view has to stop it, or
   // the server keeps being asked for /proc readings nobody is looking at.
   if (name !== 'utilities') stopActivityPolling();
+  // Same rule for the download poll, which lives in Huginn now: leaving the
+  // view stops it rather than leaving it asking about jobs behind a hidden
+  // section. Its own guard only knows which tab is selected, not which view.
+  if (name !== 'huginn') stopRepoPolling();
   if (!loaded.has(name) && loaders[name]) {
     loaded.add(name);
     loaders[name]().catch((err) => { loaded.delete(name); showError(err); });
@@ -2766,9 +2771,8 @@ function facts(pairs) {
 async function renderAdmin() {
   const body = $('admin-body');
   const titles = {
-    status: 'Status', config: 'Configuration', backends: 'Backends',
-    hardware: 'Hardware', tools: 'Tools', clients: 'Clients',
-    models: 'Models', repo: 'Repository', hub: 'Hub', fleet: 'Fleet', memory: 'Memory',
+    status: 'Status', config: 'Configuration', hardware: 'Hardware',
+    tools: 'Tools', clients: 'Clients', memory: 'Memory',
     appearance: 'Appearance', faq: 'Help',
   };
   $('admin-title').textContent = titles[admin.tab];
@@ -2776,19 +2780,56 @@ async function renderAdmin() {
 
   if (admin.tab === 'status') return renderAdminStatus(body);
   if (admin.tab === 'config') return renderAdminConfig(body);
-  if (admin.tab === 'backends') return renderAdminBackends(body);
   if (admin.tab === 'hardware') return renderAdminHardware(body);
   if (admin.tab === 'tools') return renderAdminTools(body);
-  if (admin.tab === 'models') return renderAdminModels(body);
-  if (admin.tab === 'repo') return renderAdminRepo(body);
-  if (admin.tab === 'hub') return renderAdminHub(body);
   if (admin.tab === 'faq') return renderAdminFAQ(body);
-  if (admin.tab === 'fleet') return renderAdminFleet(body);
   if (admin.tab === 'memory') return renderAdminMemory(body);
   // Purely local, unlike every other tab here: it reads and writes
   // localStorage and asks the server nothing.
   if (admin.tab === 'appearance') return renderAdminAppearance(body);
   return renderAdminClients(body);
+}
+
+/* ---------- huginn ----------
+   The models themselves: the backends that run them, the repository they are
+   kept in, which ones are loaded, the Hub they come from, and the fleet of
+   hosts carrying them.
+
+   A second view rather than more tabs under Admin. The renderers are the ones
+   Admin already had and are unchanged — each takes the body to draw into, so
+   moving a pane between views is a matter of which nav dispatches it and which
+   element it is handed. What did have to move with them is the refresh: an
+   action inside one of these panes redraws its own view, and calling
+   renderAdmin() from here would paint a Huginn pane into the Admin body. */
+
+const huginn = { tab: 'backends' };
+
+for (const li of document.querySelectorAll('#huginn-nav li')) {
+  li.addEventListener('click', () => {
+    huginn.tab = li.dataset.tab;
+    for (const other of document.querySelectorAll('#huginn-nav li')) {
+      other.classList.toggle('active', other === li);
+    }
+    renderHuginn().catch(showError);
+    closeSidebar();
+  });
+}
+$('huginn-refresh').addEventListener('click', () => renderHuginn().catch(showError));
+
+async function renderHuginn() {
+  const body = $('huginn-body');
+  const titles = {
+    backends: 'Backends', repo: 'Repository', models: 'Models',
+    hub: 'Hub', fleet: 'Fleet',
+  };
+  $('huginn-title').textContent = titles[huginn.tab];
+  body.innerHTML = '';
+
+  if (huginn.tab === 'repo') return renderAdminRepo(body);
+  if (huginn.tab === 'models') return renderAdminModels(body);
+  if (huginn.tab === 'hub') return renderAdminHub(body);
+  if (huginn.tab === 'fleet') return renderAdminFleet(body);
+  return renderAdminBackends(body);
 }
 
 // The fleet: remote hosts reporting what they are doing.
@@ -3006,7 +3047,7 @@ function nodeAssignControl(n, assignments, repoFiles) {
     return repoFiles && repoFiles.length
       ? null
       : el('p', { class: 'muted', text:
-          'Nothing in the model repository to assign yet — see Admin → Repository.' });
+          'Nothing in the model repository to assign yet — see Huginn → Repository.' });
   }
 
   const select = el('select', { class: 'champion-select' }, [
@@ -3032,7 +3073,7 @@ async function assignModel(node, relPath) {
     body: JSON.stringify({ rel_path: relPath }),
   });
   toast(`${relPath} assigned to ${node}. It will fetch it on its next report.`);
-  await renderAdmin();
+  await renderHuginn();
 }
 
 async function unassignModel(node, relPath) {
@@ -3044,7 +3085,7 @@ async function unassignModel(node, relPath) {
     method: 'POST',
     body: JSON.stringify({ rel_path: relPath }),
   });
-  await renderAdmin();
+  await renderHuginn();
 }
 
 // A gauge reads as a bar as well as a number, so a machine in trouble is
@@ -3277,7 +3318,7 @@ async function controlModel(backend, modelID, load) {
   await api('/api/v1/backends')
     .then((data) => { state.backends = data.backends || []; })
     .catch(() => { /* the models list is still worth rendering */ });
-  await renderAdmin();
+  await renderHuginn();
   const held = (res.resident || []).length;
   toast(load
     ? `${modelID} loaded on ${backend}. ${held} model${held === 1 ? '' : 's'} resident there.`
@@ -3306,7 +3347,7 @@ async function setChampion(task, modelID) {
     method: 'POST',
     body: JSON.stringify({ task, model_id: modelID }),
   });
-  await renderAdmin();
+  await renderHuginn();
 }
 
 
@@ -3406,7 +3447,7 @@ function paintRepoStatus(host, status) {
 async function initRepo() {
   await api('/api/v1/repo/init', { method: 'POST' });
   toast('Repository initialised.');
-  await renderAdmin();
+  await renderHuginn();
 }
 
 /* ---- downloads in flight ---- */
@@ -3472,7 +3513,7 @@ function startRepoPolling() {
   repoView.timer = setInterval(async () => {
     // Downloads can be started from either screen, and the panel that reports
     // them is the same one, so the poll follows it rather than one tab.
-    if (admin.tab !== 'repo' && admin.tab !== 'hub') return stopRepoPolling();
+    if (huginn.tab !== 'repo' && huginn.tab !== 'hub') return stopRepoPolling();
     if (document.hidden || repoView.busy) return;
     const host = document.querySelector('.repo-jobs');
     if (!host) return stopRepoPolling();
@@ -3910,9 +3951,9 @@ async function renderAdminHub(body) {
   hubView.repoReady = Boolean(st.available && st.initialised);
   hubView.repoNote = !repo
     ? 'No model repository is configured on this server, so there is nowhere to download to.'
-    : (!st.configured ? 'No model repository is configured — see Admin → Repository.'
-      : (!st.available ? 'The model repository is not available right now — see Admin → Repository.'
-        : (!st.initialised ? 'The model repository has not been initialised — see Admin → Repository.'
+    : (!st.configured ? 'No model repository is configured — see Huginn → Repository.'
+      : (!st.available ? 'The model repository is not available right now — see Huginn → Repository.'
+        : (!st.initialised ? 'The model repository has not been initialised — see Huginn → Repository.'
           : '')));
 
   paintHubRate(rateEl);
@@ -5037,7 +5078,7 @@ async function renderAdminBackends(body) {
     try {
       await api('/api/v1/backends/refresh', { method: 'POST' });
       toast('Backends re-probed');
-      await renderAdmin();
+      await renderHuginn();
     } catch (err) {
       showError(err);
     } finally {
@@ -5060,7 +5101,7 @@ function removeBackendButton(name) {
     // — is the one that would stop someone clicking.
     confirmDelete(`the "${name}" backend (conversations that used it are kept)`, async () => {
       await api(`/api/v1/backends/${encodeURIComponent(name)}`, { method: 'DELETE' });
-      await renderAdmin();
+      await renderHuginn();
     });
   });
   return btn;
@@ -5110,7 +5151,7 @@ function addBackendForm(d) {
         }),
       });
       toast(`Backend "${name.value.trim()}" added`);
-      await renderAdmin();
+      await renderHuginn();
     } catch (err) {
       showError(err);
     }

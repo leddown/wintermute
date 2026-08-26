@@ -51,6 +51,7 @@
         <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="utilities">Utilities</button>
+        <button class="view-btn" data-view="huginn">Huginn</button>
         <button class="view-btn" data-view="admin">Admin</button>
       </nav>
       <button id="logout" class="link-btn">Sign out</button>
@@ -208,14 +209,9 @@
           <ul id="admin-nav">
             <li data-tab="status" class="active">Status</li>
             <li data-tab="config">Configuration</li>
-            <li data-tab="backends">Backends</li>
             <li data-tab="hardware">Hardware</li>
             <li data-tab="tools">Tools</li>
             <li data-tab="clients">Clients</li>
-            <li data-tab="models">Models</li>
-            <li data-tab="repo">Repository</li>
-            <li data-tab="hub">Hub</li>
-            <li data-tab="fleet">Fleet</li>
             <li data-tab="memory">Memory</li>
             <li data-tab="appearance">Appearance</li>
             <li data-tab="faq">Help</li>
@@ -229,6 +225,36 @@
             </div>
           </div>
           <div id="admin-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- Huginn: everything to do with the models themselves — where they run,
+           what is on the drive, what is out there, and which other hosts are
+           carrying any of it. Its own view rather than five tabs under Admin,
+           because Admin answers "why is the server behaving like this?" and
+           none of these do: they are the working screens, used daily, and they
+           had outgrown being a footnote to a diagnostics pane. -->
+      <section class="view" data-view="huginn">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Huginn</span></div>
+          <ul id="huginn-nav">
+            <li data-tab="backends" class="active">Backends</li>
+            <li data-tab="repo">Repository</li>
+            <li data-tab="models">Models</li>
+            <li data-tab="hub">Hub</li>
+            <li data-tab="fleet">Fleet</li>
+          </ul>
+          <p id="huginn-hint" class="hint muted">Where models run, what is on the
+            drive, what the Hub has, and which hosts are carrying it.</p>
+        </aside>
+        <main class="pane">
+          <div class="pane-head">
+            <h2 id="huginn-title">Backends</h2>
+            <div class="pane-actions">
+              <button id="huginn-refresh" class="ghost-btn">Refresh</button>
+            </div>
+          </div>
+          <div id="huginn-body" class="pane-body"></div>
         </main>
       </section>
 
