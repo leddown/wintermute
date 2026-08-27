@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -18,11 +19,12 @@ func withAgentDir(t *testing.T, srv *Server) string {
 	t.Helper()
 	dir := t.TempDir()
 	for name, body := range map[string]string{
-		"wintermute-node.amd64":   "\x7fELF not really",
-		"wintermute-node.arm64":   "\x7fELF not really either",
-		"wintermute-node.service": "[Unit]\nDescription=test\n",
-		"node.env.example":        "WINTERMUTE_SERVER=\n",
-		"SHA256SUMS":              "deadbeef  wintermute-node.amd64\n",
+		"wintermute-node.amd64":     "\x7fELF not really",
+		"wintermute-node.arm64":     "\x7fELF not really either",
+		"wintermute-node.service":   "[Unit]\nDescription=test\n",
+		"wintermute-node-update.sh": "#!/bin/sh\nexit 0\n",
+		"node.env.example":          "WINTERMUTE_SERVER=\n",
+		"SHA256SUMS":                "deadbeef  wintermute-node.amd64\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
 			t.Fatal(err)
@@ -60,8 +62,13 @@ func TestAgentFileServesOnlyTheAllowlist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if rec := get(t, handler, "/api/v1/node-agent/wintermute-node.amd64", token); rec.Code != http.StatusOK {
-		t.Fatalf("a listed file gave %d: %s", rec.Code, rec.Body.String())
+	// Every listed name, not just the binary: the installer fetches all of
+	// them, and one missing from the allowlist fails on the far machine
+	// halfway through an install running as root.
+	for name := range nodeAgentFiles {
+		if rec := get(t, handler, "/api/v1/node-agent/"+name, token); rec.Code != http.StatusOK {
+			t.Errorf("listed file %q gave %d: %s", name, rec.Code, rec.Body.String())
+		}
 	}
 
 	// Every shape of escape, none of which needs to be reasoned about
@@ -263,6 +270,48 @@ func TestInstallScriptIsValidShell(t *testing.T) {
 		}
 		if !strings.Contains(string(out), "root") {
 			t.Errorf("the refusal does not say why:\n%s", out)
+		}
+	}
+}
+
+// Everything the installer fetches must be a name the server will serve.
+//
+// The two lists are edited in different files, and a name added to one and not
+// the other fails in the worst place available: halfway through an install
+// running as root on a machine at the other end of the house, with the service
+// already stopped.
+func TestInstallerFetchesOnlyServableNames(t *testing.T) {
+	fetched := regexp.MustCompile(`(?m)^\s*fetch\s+"?([A-Za-z0-9._${}-]+)"?`)
+
+	matches := fetched.FindAllStringSubmatch(nodeInstallScript, -1)
+	if len(matches) < 3 {
+		t.Fatalf("found %d fetch calls in the installer; the pattern has stopped matching", len(matches))
+	}
+
+	seen := map[string]bool{}
+	for _, m := range matches {
+		// The binary is fetched by architecture, so one line stands for two
+		// names. Both have to be servable.
+		names := []string{m[1]}
+		if strings.Contains(m[1], "$ARCH") {
+			names = []string{
+				strings.ReplaceAll(m[1], "$ARCH", "amd64"),
+				strings.ReplaceAll(m[1], "$ARCH", "arm64"),
+			}
+		}
+		for _, name := range names {
+			seen[name] = true
+			if _, ok := nodeAgentFiles[name]; !ok {
+				t.Errorf("the installer fetches %q, which nodeAgentFiles will not serve", name)
+			}
+		}
+	}
+
+	// And the other way: a file built and shipped that nothing ever asks for is
+	// dead weight in the distribution directory and in SHA256SUMS.
+	for name := range nodeAgentFiles {
+		if !seen[name] {
+			t.Errorf("nodeAgentFiles serves %q, which the installer never fetches", name)
 		}
 	}
 }

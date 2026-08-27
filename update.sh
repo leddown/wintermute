@@ -85,9 +85,12 @@ sudo install -m 0644 "$BUILD_DIR/wintermute-node.amd64" "$AGENT_DIR/wintermute-n
 sudo install -m 0644 "$BUILD_DIR/wintermute-node.arm64" "$AGENT_DIR/wintermute-node.arm64"
 sudo install -m 0644 "$REPO_ROOT/deploy/wintermute-node.service" "$AGENT_DIR/wintermute-node.service"
 sudo install -m 0644 "$REPO_ROOT/deploy/wintermute-node.env.example" "$AGENT_DIR/node.env.example"
+# The node's end of the update. It goes out with the binary so a host that has
+# the agent can pull the next one without a token being found again.
+sudo install -m 0644 "$REPO_ROOT/deploy/wintermute-node-update.sh" "$AGENT_DIR/wintermute-node-update.sh"
 # Names relative to the directory, so the installer's awk match is on the file
 # name alone rather than on wherever this happened to build.
-(cd "$AGENT_DIR" && sudo sh -c 'sha256sum wintermute-node.amd64 wintermute-node.arm64 wintermute-node.service node.env.example > SHA256SUMS')
+(cd "$AGENT_DIR" && sudo sh -c 'sha256sum wintermute-node.amd64 wintermute-node.arm64 wintermute-node.service wintermute-node-update.sh node.env.example > SHA256SUMS')
 sudo chmod 0644 "$AGENT_DIR/SHA256SUMS"
 echo "    built linux/amd64 and linux/arm64 into $AGENT_DIR"
 

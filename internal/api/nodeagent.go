@@ -36,13 +36,17 @@ import (
 // An allowlist rather than a sanitised path join. The alternative is a rule
 // about what a name may contain, and every such rule is one encoding trick away
 // from serving something else on a box that also holds the conversation
-// database — a listing of four known files has no such failure mode.
+// database — a listing of known file names has no such failure mode.
 var nodeAgentFiles = map[string]string{
 	"wintermute-node.amd64":   "application/octet-stream",
 	"wintermute-node.arm64":   "application/octet-stream",
 	"wintermute-node.service": "text/plain; charset=utf-8",
-	"node.env.example":        "text/plain; charset=utf-8",
-	"SHA256SUMS":              "text/plain; charset=utf-8",
+	// The node's end of the update: installed alongside the binary, it reads
+	// the address and token out of node.env and asks for install.sh again. It
+	// is fetched by an operator running that script, never by the agent.
+	"wintermute-node-update.sh": "text/plain; charset=utf-8",
+	"node.env.example":          "text/plain; charset=utf-8",
+	"SHA256SUMS":                "text/plain; charset=utf-8",
 }
 
 func (s *Server) registerNodeAgentRoutes(authed func(string, http.HandlerFunc)) {

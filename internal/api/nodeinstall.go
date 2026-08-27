@@ -35,6 +35,7 @@ RUNTIME=""
 
 BIN_DIR="/usr/local/bin"
 BIN="$BIN_DIR/wintermute-node"
+UPDATER="$BIN_DIR/wintermute-node-update"
 ENV_DIR="/etc/wintermute"
 ENV_FILE="$ENV_DIR/node.env"
 UNIT="/etc/systemd/system/wintermute-node.service"
@@ -138,6 +139,14 @@ chmod 755 "$BIN.new"
 mv -f "$BIN.new" "$BIN"
 say "    installed $BIN"
 
+# The node's end of the update. Installed here so a later update is one command
+# on the host with no arguments, rather than a curl line with a token in it that
+# has to be reconstructed months after the token was last seen.
+fetch wintermute-node-update.sh "$TMP/wintermute-node-update"
+chmod 755 "$TMP/wintermute-node-update"
+mv -f "$TMP/wintermute-node-update" "$UPDATER"
+say "    installed $UPDATER"
+
 mkdir -p "$ENV_DIR"
 # Kept beside the real one as documentation: every optional setting, with the
 # reasoning, which is worth more on the host than in a repository the operator
@@ -219,6 +228,11 @@ echo "Done. This host now reports to $SERVER."
 echo
 echo "  systemctl status wintermute-node     is it running"
 echo "  journalctl -u wintermute-node -f     what it is saying"
+echo
+echo "To update this host later, with no arguments and no token to find again:"
+echo
+echo "  sudo wintermute-node-update --check    is there a newer build"
+echo "  sudo wintermute-node-update            take it"
 echo
 echo "On the server, add this machine's name to the backend that serves models"
 echo "here, so fit verdicts are computed against this hardware:"
