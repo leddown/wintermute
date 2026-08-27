@@ -178,6 +178,10 @@ sudo wintermute-node-update
 `--check` says whether a newer build is waiting and stops. Updating replaces the
 agent and restarts the service, leaving `node.env` and the model store alone.
 
+The Fleet screen shows which agent each host is running and marks the ones
+behind this server's build, so a fleet part-way through an upgrade can be seen
+to be part-way through an upgrade.
+
 ### Can I run an agent that only reports metrics?
 
 Yes, and that is the default. Leave `WINTERMUTE_NODE_STORE` unset and the agent

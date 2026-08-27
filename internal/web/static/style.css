@@ -1262,6 +1262,14 @@ button.host-chip.control:hover { border-color: var(--accent); color: var(--accen
 .node-state { font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid; }
 .node-state.ok { color: var(--gain, #3fb950); border-color: var(--gain, #3fb950); }
 .node-state.out { color: var(--error, #ff5f56); border-color: var(--error, #ff5f56); }
+/* Behind, not broken: the host is reporting perfectly, it is just running an
+   older agent than this server hands out. So it takes --accent, the theme's own
+   "look here" colour, rather than the error red — and it sits beside the
+   reporting chip rather than replacing it. There is no --warn token, and
+   inventing one for a single chip would mean defining it in all four palettes
+   or hard-coding an amber that belongs to none of them. */
+.node-state.behind { color: var(--accent); border-color: var(--accent); }
+.node-agent { font-size: 11px; font-variant-numeric: tabular-nums; }
 
 .node-gauges { display: flex; gap: 16px; flex-wrap: wrap; align-items: center; }
 .node-gauge { display: flex; align-items: center; gap: 6px; font-size: 12px; }

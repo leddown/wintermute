@@ -284,7 +284,18 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "list nodes", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "nodes": list})
+	// The build this server was compiled from, which is also the build of the
+	// agent binaries sitting in the distribution directory: update.sh compiles
+	// both on one pass from one tree. So a node whose reported build differs
+	// from this is a node with an update waiting, and the fleet view can say so
+	// without a version registry to keep in step with anything.
+	//
+	// It is advisory. The authoritative check is the checksum comparison
+	// wintermute-node-update --check makes against SHA256SUMS on the host
+	// itself, which cannot be fooled by a server rebuilt without its agent.
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured": true, "nodes": list, "agent_build": node.Build(),
+	})
 }
 
 // handleNodeSamples returns one node's recent readings at full resolution.

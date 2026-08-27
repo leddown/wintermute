@@ -160,6 +160,11 @@ in the model store alone.
 Rebuild here first — `sudo ./update.sh` — or the nodes will pull the same
 version they already have.
 
+The Fleet screen names the agent each host is running, and marks the ones older
+than the build this server is handing out. That is a glance rather than a
+verdict: the answer that counts is `--check` on the host itself, which compares
+checksums and cannot be misled by a server rebuilt without its agent.
+
 ## When it goes wrong
 
 | What you see | What it means | What to do |

@@ -53,8 +53,10 @@ import (
 )
 
 // version identifies the agent to the server, so a fleet part-way through an
-// upgrade can be seen to be part-way through an upgrade.
-const version = "1"
+// upgrade can be seen to be part-way through an upgrade. It is the commit this
+// was built from — see node.Build, and the note there about why it used to be
+// a constant and why that did not work.
+var version = node.Build()
 
 func main() {
 	if err := run(); err != nil {

@@ -3279,7 +3279,7 @@ async function renderAdminFleet(body) {
 
   for (const n of data.nodes) {
     body.append(nodeCard(n, residentByBackend.get(n.name) || [],
-      (assigned.assignments || {})[n.name] || [], repo.files || []));
+      (assigned.assignments || {})[n.name] || [], repo.files || [], data.agent_build));
   }
   // The instructions above only appear while the fleet is empty, which is the
   // one time nobody needs to look them up. Adding the second machine is when
@@ -3315,7 +3315,7 @@ function fleetGuideLink() {
     document.createTextNode('.'));
 }
 
-function nodeCard(n, resident, assignments, repoFiles) {
+function nodeCard(n, resident, assignments, repoFiles, serverBuild) {
   const s = n.latest;
   const seen = n.last_seen_at ? new Date(n.last_seen_at) : null;
   const ageMs = seen ? Date.now() - seen.getTime() : Infinity;
@@ -3376,6 +3376,7 @@ function nodeCard(n, resident, assignments, repoFiles) {
       stale
         ? el('span', { class: 'node-state out', text: `out of contact · ${relativeTime(seen)}` })
         : el('span', { class: 'node-state ok', text: 'reporting' }),
+      agentBuildChip(n.agent_version, serverBuild),
     ]),
     el('div', { class: 'model-facts', text: facts }),
     cards,
@@ -3383,6 +3384,39 @@ function nodeCard(n, resident, assignments, repoFiles) {
     models,
     nodeStorePanel(n, assignments || [], repoFiles || []),
   ]);
+}
+
+// What agent a host is running, and whether it is the one this server is
+// handing out.
+//
+// The server's build and the agent binaries in its distribution directory come
+// off the same pass over the same tree, so a host reporting something else has
+// an update waiting. Advisory only: the answer that counts is the checksum
+// comparison `wintermute-node-update --check` makes on the host itself, which
+// a server rebuilt without its agent cannot mislead.
+//
+// An unrecorded build is not an out-of-date one. A binary compiled outside a
+// checkout cannot say which commit it came from, and accusing it of being
+// behind would be an answer invented rather than found — so it is shown, and
+// nothing is claimed about it.
+function agentBuildChip(build, serverBuild) {
+  const known = (v) => v && v !== 'unknown';
+  if (!build) return null;
+  if (known(build) && known(serverBuild) && build !== serverBuild) {
+    return el('span', {
+      class: 'node-state behind',
+      title: `This host runs agent ${build}. This server is handing out ${serverBuild}.\n\n`
+        + 'On that host:  sudo wintermute-node-update',
+      text: `agent ${build} · update waiting`,
+    });
+  }
+  return el('span', {
+    class: 'muted node-agent',
+    title: known(build) && known(serverBuild)
+      ? 'The same build this server is handing out.'
+      : 'This agent did not record which commit it was built from, so it cannot be compared.',
+    text: `agent ${build}`,
+  });
 }
 
 // A node's own library of weights, and what it has been assigned.

@@ -103,6 +103,13 @@ steps: it reads the address and token out of `/etc/wintermute/node.env`, asks
 the server for `install.sh` and runs that, so a node updating always runs the
 *current* installer rather than whichever one shipped with the version it is on.
 
+Each agent reports the commit it was built from — recorded by `go build` from
+the checkout rather than set by a linker flag some build path would eventually
+forget. The server and the agents it hands out come off one pass over one tree,
+so the Fleet view can mark a host whose build is not the one on offer. That is a
+glance; `--check` compares checksums on the host itself and is the answer that
+counts, since it cannot be misled by a server rebuilt without its agent.
+
 The original `curl … | sudo sh` line still works and does the same thing. Three
 things are deliberately left alone by either route:
 
