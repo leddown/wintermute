@@ -3244,10 +3244,22 @@ async function renderAdminFleet(body) {
   }
   if (!data.nodes.length) {
     body.append(
-      el('p', { class: 'muted', text: 'No hosts are reporting yet. On each machine:' }),
+      // The address is taken from the one this browser reached the server on,
+      // because that is the same address the installer will bake into itself —
+      // see handleNodeInstallScript(). Printing a placeholder here invites the
+      // one that does not work from the node: localhost.
+      el('p', { class: 'muted', text:
+        'No hosts are reporting yet. Name the machine on the server, then run one command on it:' }),
       el('pre', { class: 'wrap', text:
-        'wintermuted -add-client rig -kind node      # on the server, once per host\n'
-        + 'wintermute-node -server https://…:8080 -token wm_…   # on the host' }),
+        'wintermuted -add-client rig -kind node      # on the server, once per host\n\n'
+        + '# on the host, with the token that printed:\n'
+        + 'curl -fsSL -H "Authorization: Bearer $TOKEN" \\\n'
+        + `  ${location.origin}/api/v1/node-agent/install.sh \\\n`
+        + '  | sudo sh -s -- --token "$TOKEN"' }),
+      el('p', { class: 'hint muted', text:
+        'The installer fetches the agent this server built, writes /etc/wintermute/node.env, '
+        + 'installs the systemd unit and starts it. Re-run it to update. On a host that will '
+        + 'also hold weights, add --store /srv/models --runtime llamacpp.' }),
     );
     return;
   }

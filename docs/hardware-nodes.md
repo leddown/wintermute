@@ -30,14 +30,29 @@ One command on the new host. The server builds the agent and serves it, so
 nothing is copied by hand and no Go toolchain is needed on the node:
 
 ```bash
-# on the server: name the machine, and keep the token it prints
-wintermuted -add-client tycho -kind node
+# on the server: name the machine, and run the line it prints on that machine
+sudo scripts/add-node.sh tycho
+```
 
-# on the node, with that token
+`add-node.sh` issues the token, checks the agent has actually been built here
+before it does, and prints the install command with the address filled in. The
+two halves by hand are:
+
+```bash
+# on the server
+sudo wintermuted -add-client tycho -kind node
+
+# on the node, with the token that printed
 curl -fsSL -H "Authorization: Bearer $TOKEN" \
   https://wintermute.lan:8088/api/v1/node-agent/install.sh \
   | sudo sh -s -- --token "$TOKEN"
 ```
+
+`-add-client` reads the database out of `/etc/wintermute/wintermute.env` and
+puts its `-wal`/`-shm` files back under the service account afterwards, so it
+does the right thing from a checkout and under `sudo`. It will not create a
+database: a token issued into a fresh one is a token the server will reject,
+and that failure shows up later, somewhere else, as `invalid token`.
 
 The name given to `-add-client` is how the machine is identified everywhere
 after this: in the Fleet view, in model assignments, and in the `node` field of
@@ -58,9 +73,25 @@ which is otherwise the first thing to go wrong: `ProtectSystem=strict` hides a
 store outside the state directory, and the symptom is permission denied on a
 directory that is plainly writable from a shell.
 
-**Re-run the same command to update.** It replaces the binary and restarts the
-service, and on an update the token can be omitted — it is read from the env
-file already on the host. Three things are deliberately left alone:
+### Updating a host
+
+The install leaves a puller behind, so a later update is one command on the
+node with no arguments and no token to find again:
+
+```bash
+sudo wintermute-node-update --check    # is the server holding a newer build?
+sudo wintermute-node-update            # take it
+```
+
+`--check` compares the installed binary against the server's `SHA256SUMS` and
+exits 0 when the node is current, 10 when an update is waiting — so a loop over
+hosts can skip the ones with nothing to do. It carries no copy of the install
+steps: it reads the address and token out of `/etc/wintermute/node.env`, asks
+the server for `install.sh` and runs that, so a node updating always runs the
+*current* installer rather than whichever one shipped with the version it is on.
+
+The original `curl … | sudo sh` line still works and does the same thing. Three
+things are deliberately left alone by either route:
 
 - `node.env`, which holds the token and the choices made about this machine.
 - A unit file that differs from the shipped one, since a local edit is usually
@@ -72,7 +103,12 @@ file already on the host. Three things are deliberately left alone:
 
 It is not an update channel. The agent never fetches its own executable, and
 nothing in the install path is reachable from its reporting loop — an operator
-runs the script, the same way they would run any installer.
+runs the script, the same way they would run any installer. That includes
+`wintermute-node-update`: it is a convenience for the person standing at the
+keyboard, not a thing the fleet does to itself. **Putting it on a systemd timer
+converts it into an update channel** — a server that could replace the binary
+running as a service on every node, unattended, would be root on the whole
+fleet the moment it was compromised. That is a decision to take knowingly.
 
 That is the same line [Design decisions](#design-decisions) draws around the
 agent generally. The server can already make a node download a *model file* it
@@ -90,7 +126,8 @@ list of four files by exact name, and refuse to write an installer at all for a
 
 `scripts/setup.sh` and `update.sh` cross-compile the agent for `linux/amd64` and
 `linux/arm64` on the same pass that builds the server, into
-`WINTERMUTE_NODE_AGENT_DIR`. A node therefore installs an agent built from the
+`WINTERMUTE_NODE_AGENT_DIR`, alongside the unit file, the env template and the
+puller the nodes install. A node therefore installs an agent built from the
 commit the server is running, which is the only version pairing worth having.
 No cgo anywhere in the tree, so both architectures are a pair of environment
 variables — the same property that makes the Windows client a single build.

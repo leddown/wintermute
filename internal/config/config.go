@@ -538,6 +538,12 @@ func envDuration(key string, fallback time.Duration) (time.Duration, error) {
 }
 
 // loadDotEnv reads a minimal KEY=VALUE file. A missing file is not an error.
+// LoadEnvFile applies one env file to the process environment. Exported for
+// the management commands, which have to reach the database the *service*
+// reads and therefore have to be able to name its env file explicitly — see
+// cmd/wintermuted/database.go.
+func LoadEnvFile(path string) error { return loadDotEnv(path) }
+
 func loadDotEnv(path string) error {
 	f, err := os.Open(path)
 	if err != nil {

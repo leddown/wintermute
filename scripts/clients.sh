@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
 # Manage wintermute client tokens: list, issue, revoke.
 #
-# This exists because `wintermuted -add-client` reads WINTERMUTE_DB straight
-# from its own environment and falls back to a *relative* "wintermute.db". The
-# env file the service uses is a systemd EnvironmentFile, so an interactive
-# shell never sees it — running the flag by hand from a checkout silently
-# creates a second database in the current directory and registers the client
-# there. The token is real, it is just in a database the server never opens, so
-# the browser UI answers "invalid token" and nothing explains why.
+# `wintermuted` now resolves the database out of the service's env file itself
+# and hands the -wal/-shm sidecars back after running under sudo, so the flags
+# are safe to type directly — see cmd/wintermuted/database.go. This script is
+# no longer load-bearing for that.
 #
-# So this script resolves the database out of the env file the service actually
-# uses, and runs the binary as the service user so SQLite's -wal/-shm sidecars
-# keep their ownership.
+# It stays because it is still the better front door: it refuses a relative
+# path and a missing file outright rather than opening what it is given, names
+# which database it used, and runs as the service user instead of repairing
+# ownership afterwards. Belt as well as braces, on the path that hands out
+# credentials.
 set -euo pipefail
 
 SERVICE_USER="${WINTERMUTE_SERVICE_USER:-wintermute}"
@@ -24,13 +23,17 @@ Usage: clients.sh <command> [args]
 
   list                      show registered clients, when created, last seen
   add <name> [kind]         register a client and print its token once
-                            kind: harness (default) or browser
+                            kind: harness (default), browser or node
   revoke <name>             remove a client; its token stops working at once
   delete <name>             alias for revoke
 
 The browser UI wants a token like any other client. Kind is recorded for the
 audit trail and nothing else, so a harness token will log the UI in just fine —
 use `browser` anyway so `list` stays readable.
+
+A fleet node authenticates as a client too, and the name given here is how that
+machine is identified everywhere afterwards. `add-node.sh` is the shorter road:
+it issues the token and prints the one command to run on the host.
 
 Overrides: WINTERMUTE_ENV_FILE, WINTERMUTE_DB, WINTERMUTE_BIN,
 WINTERMUTE_SERVICE_USER.
@@ -128,8 +131,8 @@ add)
   fi
   NAME="$1"
   KIND="${2:-harness}"
-  if [[ $KIND != harness && $KIND != browser ]]; then
-    echo "error: kind must be 'harness' or 'browser', got '$KIND'" >&2
+  if [[ $KIND != harness && $KIND != browser && $KIND != node ]]; then
+    echo "error: kind must be 'harness', 'browser' or 'node', got '$KIND'" >&2
     exit 2
   fi
   run_as_service -add-client "$NAME" -kind "$KIND"

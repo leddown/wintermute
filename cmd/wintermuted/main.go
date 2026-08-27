@@ -243,16 +243,23 @@ func printCounts(label string, counts map[string]int64) {
 
 // manage handles the database-only subcommands. Opening the store applies
 // migrations, which is what makes -migrate-only work with no extra code.
+//
+// Which database that is, and putting its files back the way they were found
+// when this ran under sudo, are both in database.go — see the note there about
+// the trap this used to set.
 func manage(log *slog.Logger, addClient, kind string, list bool, revoke string) error {
-	path := os.Getenv("WINTERMUTE_DB")
-	if path == "" {
-		path = "wintermute.db"
-	}
-	st, err := store.Open(path)
+	// -migrate-only is how a database comes into existence; the client
+	// commands must never create one, because a token issued into a fresh
+	// database is a token nothing will accept.
+	creating := addClient == "" && !list && revoke == ""
+	st, dbPath, err := openManaged(!creating)
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() {
+		st.Close()
+		handBackDatabase(dbPath)
+	}()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -271,8 +278,24 @@ func manage(log *slog.Logger, addClient, kind string, list bool, revoke string) 
 			return err
 		}
 		fmt.Printf("Registered client %q (%s).\n\n  %s\n\n", client.Name, client.Kind, token)
-		fmt.Println("This token is shown once and stored only as a hash. Put it in the client's")
-		fmt.Println("config file, or paste it into the browser UI.")
+		fmt.Println("This token is shown once and stored only as a hash.")
+		// A node does not have a config file to paste into: it is handed the
+		// token by an installer, run on the machine being added. Saying so
+		// here is the difference between the next step being obvious and
+		// being looked up.
+		if client.Kind == store.KindNode {
+			fmt.Printf(`
+Run this on %s, against the address that host can reach this server on:
+
+  curl -fsSL -H "Authorization: Bearer %s" \
+    http://SERVER/api/v1/node-agent/install.sh | sudo sh -s -- --token "%s"
+
+scripts/add-node.sh does the whole of this in one step, with the address
+filled in and the agent build checked before the token is issued.
+`, client.Name, token, token)
+			return nil
+		}
+		fmt.Println("Put it in the client's config file, or paste it into the browser UI.")
 		return nil
 
 	case revoke != "":
@@ -302,7 +325,7 @@ func manage(log *slog.Logger, addClient, kind string, list bool, revoke string) 
 		return w.Flush()
 
 	default:
-		log.Info("migrations applied", "database", path)
+		log.Info("migrations applied", "database", dbPath)
 		return nil
 	}
 }
