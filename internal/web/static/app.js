@@ -3244,23 +3244,30 @@ async function renderAdminFleet(body) {
   }
   if (!data.nodes.length) {
     body.append(
-      // The address is taken from the one this browser reached the server on,
-      // because that is the same address the installer will bake into itself —
-      // see handleNodeInstallScript(). Printing a placeholder here invites the
-      // one that does not work from the node: localhost.
       el('p', { class: 'muted', text:
-        'No hosts are reporting yet. Name the machine on the server, then run one command on it:' }),
+        'No hosts are reporting yet. One command here names the machine and prints '
+        + 'the one to run on it:' }),
+      el('pre', { class: 'wrap', text: 'sudo scripts/add-node.sh rig' }),
+      el('p', { class: 'hint muted', text:
+        'add-node.sh checks the agent has been built on this server before it issues '
+        + 'anything — otherwise that failure lands on the far machine, at the end, after '
+        + 'the token has already been spent. It then prints the install line with the '
+        + 'address and token filled in. On a host that will also hold weights, add '
+        + '--store /srv/models --runtime ollama.' }),
+      // Kept for a server whose checkout is not to hand, and because seeing the
+      // two halves is what makes the script legible. The address is the one this
+      // browser reached the server on, which is what the installer bakes into
+      // itself — see handleNodeInstallScript(). A placeholder here invites the
+      // one address that cannot work from a node: localhost.
+      el('p', { class: 'muted', text: 'By hand, the same thing is:' }),
       el('pre', { class: 'wrap', text:
-        'wintermuted -add-client rig -kind node      # on the server, once per host\n\n'
+        'sudo wintermuted -add-client rig -kind node      # on the server, once per host\n\n'
         + '# on the host, with the token that printed:\n'
         + 'curl -fsSL -H "Authorization: Bearer $TOKEN" \\\n'
         + `  ${location.origin}/api/v1/node-agent/install.sh \\\n`
         + '  | sudo sh -s -- --token "$TOKEN"' }),
-      el('p', { class: 'hint muted', text:
-        'The installer fetches the agent this server built, writes /etc/wintermute/node.env, '
-        + 'installs the systemd unit and starts it. Re-run it to update. On a host that will '
-        + 'also hold weights, add --store /srv/models --runtime llamacpp.' }),
     );
+    body.append(fleetGuideLink());
     return;
   }
 
@@ -3268,6 +3275,38 @@ async function renderAdminFleet(body) {
     body.append(nodeCard(n, residentByBackend.get(n.name) || [],
       (assigned.assignments || {})[n.name] || [], repo.files || []));
   }
+  // The instructions above only appear while the fleet is empty, which is the
+  // one time nobody needs to look them up. Adding the second machine is when
+  // the question comes back, and by then the page is a list of cards with no
+  // way in.
+  body.append(fleetGuideLink());
+}
+
+// A way back to the full instructions, on a page that otherwise only explains
+// itself when it is empty.
+function fleetGuideLink() {
+  return el('p', { class: 'hint muted' },
+    document.createTextNode('Adding a machine, updating an agent, and what to do when it '
+      + 'goes wrong: see '),
+    el('a', {
+      href: '#',
+      text: 'Utilities → Guides → Adding a node',
+      onclick: (e) => {
+        e.preventDefault();
+        util.tab = 'node-guide';
+        for (const li of document.querySelectorAll('.util-tabs li')) {
+          li.classList.toggle('active', li.dataset.tab === 'node-guide');
+        }
+        // switchView renders the view itself the first time it is opened, and
+        // the tab is already set by then. On every later visit it does not, so
+        // the render has to happen here — asked for twice, the guide would be
+        // fetched twice.
+        const already = loaded.has('utilities');
+        switchView('utilities');
+        if (already) renderUtilities().catch(showError);
+      },
+    }),
+    document.createTextNode('.'));
 }
 
 function nodeCard(n, resident, assignments, repoFiles) {
@@ -5123,13 +5162,26 @@ async function paintHubTab(host, open) {
    to innerHTML is a cross-site scripting hole waiting for the day somebody
    points it at content from somewhere else. */
 
-async function renderAdminFAQ(body) {
-  const res = await fetch('/FAQ.md', { headers: { Authorization: `Bearer ${state.token}` } });
+// renderDoc puts one of the embedded Markdown documents into a pane.
+//
+// {{server}} is replaced with the address this browser reached the server on,
+// so a command in a guide can be copied and run rather than read and edited.
+// It is the same address the node installer bakes into itself, and it is the
+// one thing a written-down placeholder always gets wrong: the address that is
+// obvious while writing the document is localhost, which is right here and
+// useless on the machine the command is for.
+async function renderDoc(body, path, label) {
+  const res = await fetch(path, { headers: { Authorization: `Bearer ${state.token}` } });
   if (!res.ok) {
-    body.append(el('p', { class: 'error', text: `Could not load the FAQ (${res.status}).` }));
+    body.append(el('p', { class: 'error', text: `Could not load ${label} (${res.status}).` }));
     return;
   }
-  body.append(el('div', { class: 'doc' }, renderMarkdown(await res.text())));
+  const text = (await res.text()).replaceAll('{{server}}', location.origin);
+  body.append(el('div', { class: 'doc' }, renderMarkdown(text)));
+}
+
+async function renderAdminFAQ(body) {
+  return renderDoc(body, '/FAQ.md', 'the FAQ');
 }
 
 // A deliberately small Markdown subset: headings, paragraphs, lists, fenced
@@ -5179,8 +5231,17 @@ function renderMarkdown(text) {
     if (/^\s*[-*]\s+/.test(line)) {
       const items = [];
       while (i < lines.length && /^\s*[-*]\s+/.test(lines[i])) {
-        items.push(el('li', {}, inlineMarkdown(lines[i].replace(/^\s*[-*]\s+/, ''))));
-        i++;
+        const parts = [lines[i++].replace(/^\s*[-*]\s+/, '')];
+        // Soft wrapping applies inside a list item as much as inside a
+        // paragraph. Without this an item wrapped across two lines renders as
+        // a one-item list followed by a stray paragraph, and the next bullet
+        // starts a second list — so a hard-wrapped list comes out as a column
+        // of disconnected fragments.
+        while (i < lines.length && lines[i].trim() && /^\s/.test(lines[i])
+               && !/^\s*[-*]\s+/.test(lines[i]) && !lines[i].trimStart().startsWith('```')) {
+          parts.push(lines[i++].trim());
+        }
+        items.push(el('li', {}, inlineMarkdown(parts.join(' '))));
       }
       out.push(el('ul', { class: 'doc-list' }, items));
       continue;
@@ -6635,6 +6696,7 @@ const UTIL_TITLES = {
   diagnostics: 'Diagnostics', activity: 'Activity', usage: 'API usage',
   backup: 'Backup', maintenance: 'Maintenance',
   canaries: 'Canaries', events: 'Connection attempts', alerts: 'Email alerts',
+  'node-guide': 'Adding a machine to the fleet',
 };
 
 // The sidebar hint follows the group in view: the housekeeping note is wrong
@@ -6646,6 +6708,8 @@ const UTIL_HINTS = {
   twire: 'Canaries impersonate common services on their usual ports. Nothing ' +
     'on a home network should connect to them, so any hit is a strong sign of ' +
     'scanning or probing.',
+  guides: 'Written for someone doing it for the first time. The commands are ' +
+    'filled in with this server\u2019s own address, so they can be copied as they are.',
 };
 
 async function loadUtilities() {
@@ -6670,6 +6734,13 @@ async function renderUtilities() {
   const body = $('util-body');
   body.textContent = '';
   $('util-title').textContent = UTIL_TITLES[util.tab];
+
+  // The guides are documents rather than pages of live data, so they take the
+  // pane without any of the machinery below.
+  if (util.tab === 'node-guide') {
+    $('util-hint').textContent = UTIL_HINTS.guides;
+    return renderDoc(body, '/adding-a-node.md', 'the guide');
+  }
 
   if (util.tab === 'canaries' || util.tab === 'events' || util.tab === 'alerts') {
     $('util-hint').textContent = UTIL_HINTS.twire;
