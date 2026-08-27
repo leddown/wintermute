@@ -142,8 +142,7 @@ function start(me) {
 // not cost four extra round trips for panes nobody looked at.
 const loaded = new Set();
 const loaders = {
-  tasks: () => renderTasks(),
-  scratch: () => loadPads(),
+  workspace: () => openWorkspace(),
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
   utilities: () => loadUtilities(),
@@ -174,7 +173,7 @@ function switchView(name) {
   if (name !== 'huginn') stopRepoPolling();
   // The pad saves on a timer, and switching view is quicker than the timer.
   // Leaving it holding unwritten keystrokes is how a scratch pad loses work.
-  if (name !== 'scratch') flushPad();
+  if (name !== 'workspace') flushPad();
   if (!loaded.has(name) && loaders[name]) {
     loaded.add(name);
     loaders[name]().catch((err) => { loaded.delete(name); showError(err); });
@@ -1109,7 +1108,7 @@ $('composer').addEventListener('submit', async (e) => {
     // A turn may have created or changed a list through the task tools, so the
     // Tasks view is stale from here on. Marking it unloaded is cheaper than
     // refetching a pane nobody is looking at.
-    loaded.delete('tasks');
+    loaded.delete('workspace');
   } catch (err) {
     showError(err);
   } finally {
@@ -1359,6 +1358,60 @@ $('agent-chat').addEventListener('click', async () => {
   await newSession();
   toast(`New chat as ${agent.name}`);
 });
+
+/* ================= WORKSPACE ================= */
+//
+// Two groups under one tab in the bar: the tasks and the scratch pad. Same
+// shape as Core — the sidebar swaps along with the pane, because a list of
+// task lists says nothing beside a pad and a list of pads says nothing beside
+// an agenda.
+//
+// Each half loads on its first open rather than when the view does, so
+// arriving at the tasks does not also fetch every pad.
+
+const ws = { pane: 'tasks', tasksLoaded: false, padsLoaded: false };
+
+// Returns the load, so the caller decides what a failure means: a tab click
+// reports it, and the view loader lets switchView() mark the view unloaded so
+// the next visit tries again.
+function showWorkspacePane(name) {
+  // The pad saves on a timer and a tab click is quicker than the timer. This
+  // is the same rule switchView() applies on the way out of the view; the tab
+  // strip is the other way to leave the pad holding unwritten keystrokes.
+  if (ws.pane === 'scratch' && name !== 'scratch') flushPad();
+  ws.pane = name;
+  for (const li of document.querySelectorAll('#workspace-nav li')) {
+    li.classList.toggle('active', li.dataset.pane === name);
+  }
+  for (const node of document.querySelectorAll('.view[data-view="workspace"] .ws-pane')) {
+    node.hidden = node.dataset.pane !== name;
+  }
+  return loadWorkspacePane(name);
+}
+
+function loadWorkspacePane(name) {
+  const flag = name === 'scratch' ? 'padsLoaded' : 'tasksLoaded';
+  if (ws[flag]) return Promise.resolve();
+  ws[flag] = true;
+  return (name === 'scratch' ? loadPads() : renderTasks())
+    .catch((err) => { ws[flag] = false; throw err; });
+}
+
+// The view's own loader. Reaching it means the whole view is stale — either it
+// has never been opened or a turn changed something behind it — so both halves
+// are marked unloaded and whichever is on screen is fetched now.
+function openWorkspace() {
+  ws.tasksLoaded = false;
+  ws.padsLoaded = false;
+  return showWorkspacePane(ws.pane);
+}
+
+for (const li of document.querySelectorAll('#workspace-nav li')) {
+  li.addEventListener('click', () => {
+    showWorkspacePane(li.dataset.pane).catch(showError);
+    closeSidebar();
+  });
+}
 
 /* ================= TASKS ================= */
 
@@ -2172,7 +2225,7 @@ $('pad-download').addEventListener('click', () => {
 // Ctrl/Cmd-S is what everyone presses in a text box, and the browser's own
 // answer to it — save this page to disk — is never what was meant.
 document.addEventListener('keydown', (e) => {
-  if (state.view !== 'scratch') return;
+  if (state.view !== 'workspace' || ws.pane !== 'scratch') return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
     e.preventDefault();
     savePad().catch(showError);

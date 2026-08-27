@@ -132,7 +132,7 @@ host has), `list_models` (what each backend is serving, with a fit verdict),
 the Hugging Face Hub, results annotated with whether they'd run here).
 
 **Server-side, tasks** — `list_todo_lists`, `create_todo_list`, `add_todo_task`:
-read and build the task lists the Tasks view shows. Short on purpose — creating
+read and build the task lists Workspace → Tasks shows. Short on purpose — creating
 a list is reversible and touches nothing anyone audits.
 
 **Client-side** — `list_directory` (read), `stat_path` (read),

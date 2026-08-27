@@ -47,8 +47,7 @@
       </div>
       <nav id="views" class="views">
         <button class="view-btn active" data-view="core">Core</button>
-        <button class="view-btn" data-view="tasks">Tasks</button>
-        <button class="view-btn" data-view="scratch">Scratch</button>
+        <button class="view-btn" data-view="workspace">Workspace</button>
         <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="utilities">Utilities</button>
@@ -133,29 +132,49 @@
         </main>
       </section>
 
-      <!-- Tasks -->
-      <section class="view" data-view="tasks">
+      <!-- Workspace: what is being kept track of and what is being written
+           down. Tasks and the scratch pad were two tabs in the bar and are one
+           now, on the Core view's pane-swap shape — each group's sidebar
+           travels with its pane, because a list of task lists means nothing
+           beside a pad and neither does the reverse. -->
+      <section class="view" data-view="workspace">
         <aside class="sidebar">
-          <div class="sidebar-head">
-            <span class="muted">Lists</span>
-            <button id="new-list" class="link-btn">New</button>
-          </div>
-          <ul id="lists"></ul>
-          <div class="sidebar-head" style="margin-top:16px;">
-            <span class="muted">Views</span>
-          </div>
-          <ul id="task-views">
-            <li data-scope="agenda">Agenda</li>
-            <li data-scope="all">All open tasks</li>
-            <li data-scope="notes">Notes</li>
-            <li data-scope="calendar">Calendar</li>
+          <div class="sidebar-head"><span class="muted">Workspace</span></div>
+          <ul id="workspace-nav" class="pane-tabs">
+            <li data-pane="tasks" class="active">Tasks</li>
+            <li data-pane="scratch">Scratch</li>
           </ul>
-          <label class="check muted">
-            <input id="show-archived" type="checkbox"> Show archived lists
-          </label>
+
+          <div class="ws-pane" data-pane="tasks">
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Lists</span>
+              <button id="new-list" class="link-btn">New</button>
+            </div>
+            <ul id="lists"></ul>
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Views</span>
+            </div>
+            <ul id="task-views">
+              <li data-scope="agenda">Agenda</li>
+              <li data-scope="all">All open tasks</li>
+              <li data-scope="notes">Notes</li>
+              <li data-scope="calendar">Calendar</li>
+            </ul>
+            <label class="check muted">
+              <input id="show-archived" type="checkbox"> Show archived lists
+            </label>
+          </div>
+
+          <div class="ws-pane" data-pane="scratch" hidden>
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Pads</span>
+              <button id="new-pad" class="link-btn">New</button>
+            </div>
+            <ul id="pads"></ul>
+          </div>
         </aside>
 
-        <main class="pane">
+        <main class="pane ws-pane" data-pane="tasks">
           <div class="pane-head">
             <h2 id="tasks-title">Agenda</h2>
             <div class="pane-actions">
@@ -176,20 +195,11 @@
           </form>
           <div id="tasks-body" class="pane-body"></div>
         </main>
-      </section>
 
-      <!-- Scratch: free text with a name on it. Notes next door are one line
-           with a status; this is where a reply gets pasted and worked over. -->
-      <section class="view" data-view="scratch">
-        <aside class="sidebar">
-          <div class="sidebar-head">
-            <span class="muted">Pads</span>
-            <button id="new-pad" class="link-btn">New</button>
-          </div>
-          <ul id="pads"></ul>
-        </aside>
-
-        <main class="pane">
+        <!-- The scratch pad: free text with a name on it. Notes next door are
+             one line with a status; this is where a reply gets pasted and
+             worked over. -->
+        <main class="pane ws-pane" data-pane="scratch" hidden>
           <div class="pane-head">
             <input id="pad-title" class="pad-title" placeholder="Untitled"
                    autocomplete="off" spellcheck="false" aria-label="Pad title" disabled>
