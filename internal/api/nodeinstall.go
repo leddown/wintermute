@@ -17,6 +17,7 @@ const nodeInstallScript = `#!/bin/sh
 # /etc/wintermute/node.env alone -- that file holds this host's token and the
 # choices made about this machine.
 #
+#   TOKEN=wm_...
 #   curl -fsSL -H "Authorization: Bearer $TOKEN" SERVER/api/v1/node-agent/install.sh \
 #     | sudo sh -s -- --token "$TOKEN"
 #

@@ -68,10 +68,16 @@ hostname the machine reports — a node that could name itself could file
 telemetry under another one's name.
 
 The script checks step 1 for you before it issues anything, then prints the
-exact command to run on the node, with the address and the token already filled
-in. Copy that command.
+exact lines to run on the node, with the address and the token already filled in.
 
-If the address it guesses is not one the node can reach, say so:
+It also **checks the address before printing it**, by asking this server for the
+installer with the token it just issued. That matters when something sits in
+front of this server: a reverse proxy publishes port 80 or 443 and forwards to
+whatever `WINTERMUTE_ADDR` binds, so the listen port is precisely the address a
+node cannot reach. The script tries the plain address first and tells you which
+one it verified.
+
+If the node reaches this server by a name this machine does not, say so:
 
 ```
 sudo scripts/add-node.sh tycho --server {{server}}
@@ -93,13 +99,20 @@ with `sudo scripts/clients.sh revoke tycho`.
 
 ## Step 3 — install the agent, on the node
 
-Paste the command from step 2. It looks like this:
+Paste the two lines from step 2. They look like this:
 
 ```
-curl -fsSL -H "Authorization: Bearer wm_..." \
-  {{server}}/api/v1/node-agent/install.sh \
-  | sudo sh -s -- --token "wm_..."
+TOKEN=wm_...
+
+curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  {{server}}/api/v1/node-agent/install.sh | sudo sh -s -- --token "$TOKEN"
 ```
+
+The token is on its own line for a reason. Written into the command directly it
+appears twice, making one line long enough for a terminal to wrap — and pasting
+a wrapped line brings the wrap back as **spaces inside the token**. The header
+then carries something that is not the token, and the server answers `401` while
+working perfectly. If you meet a 401, this is almost always why.
 
 The installer creates a service user, downloads the agent for that machine's
 architecture, checks it against the server's checksums, writes
@@ -151,8 +164,8 @@ version they already have.
 
 | What you see | What it means | What to do |
 | --- | --- | --- |
-| `Connection refused` | Nothing is listening at that address. A wrong port is the usual reason. | Check the address, including the port. This server is at `{{server}}`. |
-| `401` with `invalid token` | The token is not in the database this server reads. | Issue a new one with step 2. Do not run `wintermuted -add-client` from a checkout with `WINTERMUTE_DB` unset — see below. |
+| `Connection refused` | Nothing is listening at that address. A port taken from `WINTERMUTE_ADDR` is the usual reason: with a reverse proxy in front, that is the port the proxy talks to, not the one the world does. | Use the address this page is served on: `{{server}}`. |
+| `401` with `invalid token` | Either the token was mangled on its way into the command, or it is not in the database this server reads. | Check the header carries the whole token and nothing else — see below. Then issue a fresh one with step 2. |
 | `401` with `missing bearer token` | The header did not arrive. Something between the node and here is stripping it. | Check any reverse proxy in front of this server forwards `Authorization`. |
 | `503` about the agent distribution | The server has no agent to hand over. | Step 1. |
 | `404` naming a file | The distribution directory is incomplete. | Run `sudo ./update.sh` here. |
@@ -161,14 +174,33 @@ version they already have.
 
 ### About that `invalid token`
 
-`wintermuted -add-client` used to default to a **relative** `wintermute.db`. Run
-from a checkout, it wrote a second database in that directory and registered the
-client there — a real token, in a file the server never opens. The only symptom
-was `invalid token` arriving later from somewhere else.
+Two different things produce it, and they look identical.
 
-It now reads the database out of `/etc/wintermute/wintermute.env`, says which
-one it used, and refuses to create a new one. If you are on an older build, this
-is almost certainly what happened.
+**The token was broken by the paste.** This is much the commoner of the two.
+Written into the command directly, a 46-character token appears twice and makes
+a line long enough for the terminal to wrap — and pasting a wrapped line brings
+the wrap back as spaces, inside the token, inside the header. The server is
+working perfectly and says `invalid token` because what arrived is not one. This
+is why step 2 puts the token on its own line. If you have a long command from
+somewhere else, check the header against the `--token` at the end: if they are
+not identical, that is the fault.
+
+**The token is in a different database.** `wintermuted -add-client` used to
+default to a *relative* `wintermute.db`. Run from a checkout, it wrote a second
+database in that directory and registered the client there — a real token, in a
+file the server never opens. It now reads the database out of
+`/etc/wintermute/wintermute.env`, says which one it used, and refuses to create
+a new one, so this only happens on an older build.
+
+To tell them apart, ask the server who you are:
+
+```
+TOKEN=wm_...
+
+curl -s -H "Authorization: Bearer $TOKEN" {{server}}/api/v1/me
+```
+
+A name and a kind come back if the token is good.
 
 ## What the agent does, and does not do
 

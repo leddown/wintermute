@@ -284,15 +284,22 @@ func manage(log *slog.Logger, addClient, kind string, list bool, revoke string) 
 		// here is the difference between the next step being obvious and
 		// being looked up.
 		if client.Kind == store.KindNode {
+			// The token goes on its own line rather than into the command
+			// twice. Inline, that is one line long enough for a terminal to
+			// wrap, and pasting a wrapped line brings the wrap back as spaces
+			// — in the middle of the Authorization header, where it reads as
+			// an invalid token from a server that is working perfectly.
 			fmt.Printf(`
-Run this on %s, against the address that host can reach this server on:
+Run these two lines on %s, against the address that host reaches this server on:
 
-  curl -fsSL -H "Authorization: Bearer %s" \
-    http://SERVER/api/v1/node-agent/install.sh | sudo sh -s -- --token "%s"
+  TOKEN=%s
 
-scripts/add-node.sh does the whole of this in one step, with the address
-filled in and the agent build checked before the token is issued.
-`, client.Name, token, token)
+  curl -fsSL -H "Authorization: Bearer $TOKEN" \
+    http://SERVER/api/v1/node-agent/install.sh | sudo sh -s -- --token "$TOKEN"
+
+scripts/add-node.sh does the whole of this in one step: it checks the agent has
+been built here, checks the address really serves the installer, and fills it in.
+`, client.Name, token)
 			return nil
 		}
 		fmt.Println("Put it in the client's config file, or paste it into the browser UI.")

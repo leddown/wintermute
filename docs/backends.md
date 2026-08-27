@@ -250,9 +250,9 @@ needs — so a backend can name the machine it runs on:
 }
 ```
 
-`node` is the name the host was registered under with
-`wintermuted -add-client <name> -kind node`. Getting the agent onto that host is
-one command — see
+`node` is the name the host was registered under as a fleet node. Registering it
+and getting the agent onto it is one command on this server —
+`sudo scripts/add-node.sh tycho`, which prints the line to run over there; see
 [Installing the agent](hardware-nodes.md#installing-the-agent). With it declared, every verdict on
 the Hub, the Repository and the Models list is computed against *that* machine's
 reported hardware, and the badge names it — `fits · tycho`. A model is graded

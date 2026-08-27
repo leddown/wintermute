@@ -39,9 +39,11 @@ Usage: add-node.sh <name> [options]
                       hostname the agent reports — a node that could name
                       itself could write telemetry attributed to another one.
 
-  --server <url>      the address the node will reach this server on. Guessed
-                      from the system hostname and WINTERMUTE_ADDR when it is
-                      not given, which is a guess worth checking.
+  --server <url>      the address the node will reach this server on. Worked
+                      out and checked when not given: candidates are tried
+                      against this server's own install endpoint and the one
+                      that answers is used. Pass this when the node reaches the
+                      server by a name this machine does not, or cannot check.
   --store <path>      the host will also hold weights, kept here.
   --runtime <name>    what serves models there: ollama or llamacpp.
                       Only meaningful with --store.
@@ -145,21 +147,32 @@ if [[ ${#missing[@]} -gt 0 ]]; then
 fi
 
 # ---- where will the node reach this server? ----
+#
+# WINTERMUTE_ADDR is what wintermuted binds, which is not what a node connects
+# to the moment anything sits in front of it. A reverse proxy publishes port 80
+# or 443 and forwards to the listener, so the listen port is precisely the
+# address that will not work — and the failure is a connection refused on the
+# far machine, after the token has been spent.
+#
+# So the guess is a list, and it is checked below rather than trusted.
 
-if [[ -z $SERVER ]]; then
+HOSTNAME_FQ="$(hostname -f 2>/dev/null || hostname)"
+CANDIDATES=()
+if [[ -n $SERVER ]]; then
+  CANDIDATES=("$SERVER")
+  GUESSED=0
+else
+  GUESSED=1
+  # Plain http on the default port first: a proxy in front is the common
+  # arrangement and it is the one the listen port gets wrong.
+  CANDIDATES=("http://$HOSTNAME_FQ" "https://$HOSTNAME_FQ")
   ADDR="$(env_value WINTERMUTE_ADDR)"
   PORT="${ADDR##*:}"
-  [[ -n $PORT && $PORT =~ ^[0-9]+$ ]] || PORT=8080
-  HOSTNAME_FQ="$(hostname -f 2>/dev/null || hostname)"
-  # http, not https: a server behind a reverse proxy is the case that needs the
-  # override, and guessing https for one that is not produces an installer that
-  # cannot reach the machine that served it. Better to be plainly wrong in the
-  # direction the operator will notice.
-  SERVER="http://$HOSTNAME_FQ:$PORT"
-  GUESSED=1
-else
-  GUESSED=0
+  if [[ -n $PORT && $PORT =~ ^[0-9]+$ ]]; then
+    CANDIDATES+=("http://$HOSTNAME_FQ:$PORT")
+  fi
 fi
+SERVER="${CANDIDATES[0]}"
 
 if [[ ! $SERVER =~ ^https?://[A-Za-z0-9._-]+(:[0-9]{1,5})?$ ]]; then
   echo "error: --server must be http:// or https:// with a plain host and optional port." >&2
@@ -185,6 +198,26 @@ if [[ -z $TOKEN ]]; then
   exit 1
 fi
 
+# ---- does that address actually serve the installer? ----
+#
+# Asked here, with the real token, rather than left for the node to find out.
+# This server reaching itself is not proof the node can, but an address that
+# fails from here will certainly fail there, and it is the only check available
+# on the machine the operator is standing at.
+REACHED=""
+if command -v curl >/dev/null 2>&1; then
+  for c in "${CANDIDATES[@]}"; do
+    if curl -fsS --max-time 5 -o /dev/null \
+      -H "Authorization: Bearer $TOKEN" "$c/api/v1/node-agent/install.sh" 2>/dev/null; then
+      REACHED="$c"
+      break
+    fi
+  done
+fi
+if [[ -n $REACHED ]]; then
+  SERVER="$REACHED"
+fi
+
 EXTRA=""
 [[ -n $STORE ]] && EXTRA=" --store $STORE"
 [[ -n $RUNTIME ]] && EXTRA="$EXTRA --runtime $RUNTIME"
@@ -193,18 +226,38 @@ cat <<EOF
 
 Registered node "$NAME".
 
-Run this on that machine:
+Run these two lines on that machine:
 
-  curl -fsSL -H "Authorization: Bearer $TOKEN" \\
-    $SERVER/api/v1/node-agent/install.sh \\
-    | sudo sh -s -- --token "$TOKEN"$EXTRA
+  TOKEN=$TOKEN
+
+  curl -fsSL -H "Authorization: Bearer \$TOKEN" \\
+    $SERVER/api/v1/node-agent/install.sh | sudo sh -s -- --token "\$TOKEN"$EXTRA
+
+The token is on its own line on purpose. Inline it is a single command long
+enough for a terminal to wrap, and pasting a wrapped line brings the wrap back
+as spaces -- in the middle of the header, where it reads as an invalid token
+from a server that is working perfectly.
 
 EOF
 
-if [[ $GUESSED -eq 1 ]]; then
+if [[ -n $REACHED ]]; then
   cat <<EOF
-The address above was guessed from this machine's hostname and WINTERMUTE_ADDR.
-Check the node can reach it; pass --server if it cannot.
+That address was checked from here just now: it served the installer for this
+token. If the node reaches this server by some other name, pass --server.
+
+EOF
+elif [[ $GUESSED -eq 1 ]]; then
+  cat <<EOF
+WARNING: none of the addresses tried served the installer from this machine:
+$(printf '  %s\n' "${CANDIDATES[@]}")
+The first is printed above. Check it, and pass --server if it is wrong.
+
+EOF
+else
+  cat <<EOF
+WARNING: $SERVER did not serve the installer when checked from here. That can
+be split-horizon DNS, in which case it is fine and the node will manage. If it
+is not, the node will fail with a connection refused or a 401.
 
 EOF
 fi

@@ -122,21 +122,30 @@ a share if you gave it one.
 
 The share is for you — dragging files onto the drive from a desktop.
 
+### How do I add a node?
+
+One command on the server, which prints the one to run on the machine:
+
+```
+sudo scripts/add-node.sh rig-01
+```
+
+The name is how that machine is identified everywhere. It is never taken from
+the hostname the agent reports, because a node that could name itself could
+write telemetry attributed to another.
+
+The full walkthrough, with what to do when it goes wrong, is under
+**Utilities → Guides → Adding a node**.
+
 ### What do I set on a node?
 
-Issue a token on the server first. The name is how that machine is identified
-everywhere; it is never taken from the hostname the agent reports, because a node
-that could name itself could write telemetry attributed to another.
+Nothing, to start with. The installer writes `/etc/wintermute/node.env` with the
+server and the token, and leaves that file alone on every later update.
+
+You edit it to change what the agent does beyond reporting. An Ollama host that
+should also hold weights:
 
 ```
-wintermuted -add-client rig-01 -kind node
-```
-
-Then on the node, an Ollama host:
-
-```
-WINTERMUTE_SERVER=https://wintermute.lan:8088
-WINTERMUTE_TOKEN=wm_…
 WINTERMUTE_NODE_STORE=/srv/models
 WINTERMUTE_NODE_RUNTIME=ollama
 ```
@@ -144,15 +153,30 @@ WINTERMUTE_NODE_RUNTIME=ollama
 or a llama.cpp host:
 
 ```
-WINTERMUTE_SERVER=https://wintermute.lan:8088
-WINTERMUTE_TOKEN=wm_…
 WINTERMUTE_NODE_STORE=/srv/models
 WINTERMUTE_NODE_RUNTIME=llamacpp
 WINTERMUTE_NODE_LLAMA_SWAP_CONFIG=/etc/llama-swap/wintermute.yaml
 WINTERMUTE_NODE_LLAMA_SERVER_ARGS=--n-gpu-layers 99
 ```
 
+Passing `--store` and `--runtime` to the installer writes those two for you, and
+`--store` also grants the service write access to the path — without which the
+directory is invisible to the agent however writable it looks from a shell.
+Restart with `systemctl restart wintermute-node` after editing by hand.
+
 Every setting has a command-line flag too — run `wintermute-node -h`.
+
+### How do I update a node?
+
+Rebuild on the server with `sudo ./update.sh`, then on the node:
+
+```
+sudo wintermute-node-update --check
+sudo wintermute-node-update
+```
+
+`--check` says whether a newer build is waiting and stops. Updating replaces the
+agent and restarts the service, leaving `node.env` and the model store alone.
 
 ### Can I run an agent that only reports metrics?
 

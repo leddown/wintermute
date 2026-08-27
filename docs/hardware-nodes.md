@@ -43,10 +43,23 @@ two halves by hand are:
 sudo wintermuted -add-client tycho -kind node
 
 # on the node, with the token that printed
+TOKEN=wm_...
+
 curl -fsSL -H "Authorization: Bearer $TOKEN" \
-  https://wintermute.lan:8088/api/v1/node-agent/install.sh \
-  | sudo sh -s -- --token "$TOKEN"
+  https://wintermute.lan/api/v1/node-agent/install.sh | sudo sh -s -- --token "$TOKEN"
 ```
+
+The token is assigned on its own line rather than written into the command
+twice. Inline, that is one line long enough for a terminal to wrap, and pasting
+a wrapped line brings the wrap back as spaces — inside the `Authorization`
+header, where the server answers `401 invalid token` while working perfectly.
+It is the likeliest cause of that error by some margin.
+
+`add-node.sh` also works the address out rather than assuming it. It tries the
+plain host before the port from `WINTERMUTE_ADDR`, because a reverse proxy
+publishes 80 or 443 and forwards to the listener — so the listen port is exactly
+the address a node cannot reach — and it confirms the choice by fetching the
+installer with the token it just issued.
 
 `-add-client` reads the database out of `/etc/wintermute/wintermute.env` and
 puts its `-wal`/`-shm` files back under the service account afterwards, so it

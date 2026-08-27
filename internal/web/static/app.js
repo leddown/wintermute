@@ -3260,9 +3260,15 @@ async function renderAdminFleet(body) {
       // itself — see handleNodeInstallScript(). A placeholder here invites the
       // one address that cannot work from a node: localhost.
       el('p', { class: 'muted', text: 'By hand, the same thing is:' }),
+      // The token is assigned on its own line rather than written into the
+      // command twice. Inline it makes one line long enough for a terminal to
+      // wrap, and a paste of a wrapped line brings the wrap back as spaces —
+      // into the middle of the header, where it reads as an invalid token from
+      // a server that is working perfectly.
       el('pre', { class: 'wrap', text:
-        'sudo wintermuted -add-client rig -kind node      # on the server, once per host\n\n'
+        'sudo wintermuted -add-client rig -kind node   # on the server, once per host\n\n'
         + '# on the host, with the token that printed:\n'
+        + 'TOKEN=wm_...\n'
         + 'curl -fsSL -H "Authorization: Bearer $TOKEN" \\\n'
         + `  ${location.origin}/api/v1/node-agent/install.sh \\\n`
         + '  | sudo sh -s -- --token "$TOKEN"' }),

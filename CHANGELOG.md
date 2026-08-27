@@ -1,5 +1,94 @@
 # Change Log
 
+## 2026-08-27 (Adding a node stops being a research project)
+
+Adding a machine to the fleet took a token from one command, an agent binary
+copied by hand, a unit file, and an address the operator had to know. Every step
+of that could fail on the far machine, at the end, after the token had been
+spent. It is now one command on the server and two lines on the node.
+
+**`scripts/add-node.sh`** does the server half. It checks the agent has actually
+been built here *before* issuing anything, registers the machine, works out the
+address and confirms it by fetching the installer with the token it just issued,
+then prints the lines to run over there.
+
+The address is worked out rather than assumed because `WINTERMUTE_ADDR` is what
+wintermuted *binds*, which is not what a node connects to the moment anything
+sits in front of it. A reverse proxy publishes 80 or 443 and forwards to the
+listener, making the listen port precisely the address that will not work.
+
+**The token goes on its own line.** Written into the command directly it appears
+twice, making one line long enough for a terminal to wrap — and pasting a
+wrapped line brings the wrap back as spaces, inside the token, inside the
+`Authorization` header. The server then answers `401 invalid token` while
+working perfectly, which is indistinguishable from a genuinely wrong token and
+much commoner. Every place that prints this command now assigns the token first.
+
+**`wintermute-node-update`** is installed on each node beside the agent, so a
+later update is one argumentless command on the host rather than a curl line
+rebuilt around a token that was shown once. It carries no copy of the install
+steps: it reads the address and token out of `node.env` and asks the server for
+`install.sh`, so a node updating runs the *current* installer. `--check`
+compares against the server's `SHA256SUMS` and exits 10 when an update is
+waiting, so a loop over hosts can skip the ones with nothing to do.
+
+This is still not an update channel. The agent never fetches its own executable
+and nothing in its reporting loop can reach the puller — an operator runs it.
+Putting it on a timer is what would convert it into one, and then a compromised
+server is root on every node in the fleet.
+
+### `wintermuted -add-client` no longer sets a trap
+
+It read `WINTERMUTE_DB` from its own environment and fell back to a *relative*
+`wintermute.db`. The service's config is a systemd `EnvironmentFile`, which an
+interactive shell never sees, so the flag typed in a checkout created a second
+database there and registered the client into it. The token was real; it was
+just in a file the server never opens, and the only symptom was `invalid token`
+arriving later from somewhere else.
+
+It now resolves the database out of `/etc/wintermute/wintermute.env` before a
+checkout's `.env`, says which one it used, and refuses to create one for a
+client command — `-migrate-only` may still, since that is how a database comes
+into existence. It also hands the `-wal`/`-shm` files back to the account that
+owns the database, because SQLite creates them as whoever is running and a
+`sudo` invocation otherwise left the service unable to write.
+
+`scripts/clients.sh` existed to work around all of that. It stays as the better
+front door — it refuses relative paths outright and runs as the service user —
+but it is no longer load-bearing, and it can issue a `node` token now, which it
+could not.
+
+### Help that can be found
+
+**Utilities → Guides → Adding a node** is the walkthrough: what a node is, what
+is needed first, the steps with the checks between them, updating later, and a
+table of every failure this took to find. Markdown in the repo rendered in the
+browser, the way the FAQ already is, with `{{server}}` substituted for this
+server's own address at render time — a written-down address always gets this
+wrong in the same direction, since the one that is obvious while writing is
+localhost.
+
+The Fleet screen explained itself only while it was empty, which is the one time
+nobody needs it explained; the pointer to the guide now renders either way.
+
+Also fixes the Markdown renderer, which consumed one line per list item, so a
+hard-wrapped list rendered as a column of one-item lists with stray paragraphs
+between them. The FAQ has no lists, so this was invisible until something else
+was written.
+
+### Also
+
+- **Scratch**, a text pad, under **Workspace**. Free text with a name on it,
+  saved on a timer: somewhere for a reply to go and be worked over, since the
+  transcript is a log and is replayed to the model verbatim. Every message in
+  the transcript carries a button that puts it there.
+- **Workspace** — the tasks and the pad under one tab in the bar rather than
+  two, on the Core view's pane-swap shape, each group's sidebar travelling with
+  its pane.
+- The task pane's header read the list name out of a list it loaded *after*
+  rendering, so renaming a list changed the sidebar row and left the heading
+  above the tasks showing the old name.
+
 ## 2026-08-14 (Portfolio: the investment ledger moves in from morpheus)
 
 `internal/fintech` — a transaction ledger with holdings derived from it, AI
