@@ -48,6 +48,7 @@
       <nav id="views" class="views">
         <button class="view-btn active" data-view="core">Core</button>
         <button class="view-btn" data-view="tasks">Tasks</button>
+        <button class="view-btn" data-view="scratch">Scratch</button>
         <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="utilities">Utilities</button>
@@ -174,6 +175,38 @@
             <button type="submit">Add</button>
           </form>
           <div id="tasks-body" class="pane-body"></div>
+        </main>
+      </section>
+
+      <!-- Scratch: free text with a name on it. Notes next door are one line
+           with a status; this is where a reply gets pasted and worked over. -->
+      <section class="view" data-view="scratch">
+        <aside class="sidebar">
+          <div class="sidebar-head">
+            <span class="muted">Pads</span>
+            <button id="new-pad" class="link-btn">New</button>
+          </div>
+          <ul id="pads"></ul>
+        </aside>
+
+        <main class="pane">
+          <div class="pane-head">
+            <input id="pad-title" class="pad-title" placeholder="Untitled"
+                   autocomplete="off" spellcheck="false" aria-label="Pad title" disabled>
+            <div class="pane-actions">
+              <span id="pad-state" class="muted pad-state"></span>
+              <button id="pad-copy" class="ghost-btn" hidden>Copy</button>
+              <button id="pad-save" class="ghost-btn" hidden>Save</button>
+              <button id="pad-download" class="ghost-btn" hidden>Download</button>
+              <button id="pad-delete" class="ghost-btn danger" hidden>Delete</button>
+            </div>
+          </div>
+          <div class="pad-wrap">
+            <textarea id="pad-text" class="pad-text" spellcheck="true" disabled
+                      aria-label="Pad text"
+                      placeholder="Nothing open. Pick a pad on the left, or make a new one."></textarea>
+            <div class="pad-foot"><span id="pad-count" class="muted"></span></div>
+          </div>
         </main>
       </section>
 

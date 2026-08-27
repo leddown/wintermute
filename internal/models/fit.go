@@ -5,6 +5,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Verdict grades whether a model will run on the detected hardware.
@@ -156,6 +157,11 @@ type Fit struct {
 	TotalVRAMMB float64 `json:"total_vram_mb"`
 
 	Verdict Verdict `json:"verdict"`
+	// Host names the machine this verdict is about, copied from the hardware
+	// it was graded against. Empty means this server. On a fleet the verdict
+	// is meaningless without it: "fits" is a statement about one machine, and
+	// which one is the thing the reader is deciding.
+	Host string `json:"host,omitempty"`
 	// GPULayers is how many of the model's layers fit, when the verdict is
 	// partial. It is what you would pass to --n-gpu-layers.
 	GPULayers   int `json:"gpu_layers,omitempty"`
@@ -184,6 +190,9 @@ func (f Fit) Headroom() float64 { return f.FreeVRAMMB - f.TotalMB }
 // from the wrong machine is worse than no answer.
 func EstimateFit(in FitInput, hw *Hardware) Fit {
 	fit := Fit{Estimated: false}
+	if hw != nil {
+		fit.Host = hw.Host
+	}
 
 	quant := strings.ToUpper(strings.TrimSpace(in.Quant))
 	bpw, known := quantBPW[quant]
@@ -237,7 +246,7 @@ func EstimateFit(in FitInput, hw *Hardware) Fit {
 	// The footprint above is a property of the model and is worth keeping. What
 	// follows is not: verdict, free VRAM and throughput are all statements about
 	// a particular machine, and this host is not it.
-	if hw == nil || !hw.RunsInference {
+	if hw == nil || !hw.RunsInference || hw.Stale(time.Now()) {
 		fit.Verdict = VerdictUnknown
 		fit.Estimated = true
 		fit.Notes = append(fit.Notes, unknownHostNote(hw))
@@ -326,9 +335,37 @@ func unknownHostNote(hw *Hardware) string {
 		return "No hardware profile was supplied, so whether this fits cannot be judged. " +
 			"The memory footprint above is a property of the model and holds anywhere."
 	}
+	if hw.Stale(time.Now()) {
+		return fmt.Sprintf("%s last reported %s ago, so its free memory is not known well "+
+			"enough to judge by. The footprint above holds anywhere; start the agent to get "+
+			"a verdict back.", orHere(hw.Host), roundDuration(time.Since(hw.ReportedAt)))
+	}
+	if hw.Host != "" {
+		return fmt.Sprintf("No backend is declared to run on %s, so it is not treated as a "+
+			"machine that would run this model. Set \"node\": %q on the backend serving it.",
+			hw.Host, hw.Host)
+	}
 	return "This server runs no local backend, so the models run on another machine " +
 		"whose GPU and memory are not visible from here. The memory footprint above " +
-		"is a property of the model and holds anywhere; whether it fits is unknown."
+		"is a property of the model and holds anywhere; whether it fits is unknown. " +
+		"A fleet node can be graded instead by declaring which node a backend runs on."
+}
+
+// orHere names a host for a sentence, for the local machine as well as a node.
+func orHere(host string) string {
+	if host == "" {
+		return "This server"
+	}
+	return host
+}
+
+// roundDuration renders an age the way someone reads it off a screen, not to
+// the nanosecond.
+func roundDuration(d time.Duration) time.Duration {
+	if d < time.Minute {
+		return d.Round(time.Second)
+	}
+	return d.Round(time.Minute)
 }
 
 func finishCPUOnly(fit Fit, in FitInput, hw *Hardware) Fit {
@@ -395,4 +432,77 @@ func addArchNotes(fit *Fit, gpu *GPU, quant string) {
 				"i-quant kernels are less optimized on Pascal than k-quants. Q4_K_M is usually faster at a similar size; benchmark before committing.")
 		}
 	}
+}
+
+/* ---- grading against more than one machine ----
+
+   A verdict was a single answer while there was a single machine to give it
+   about. On a fleet it is one answer per host, and the question a reader
+   actually has — "does anything I own run this?" — is answered by the best of
+   them together with the name of the machine that earned it. */
+
+// verdictRank orders verdicts from worst to best, so the most favourable one
+// can be picked without spelling the comparison out at each call site.
+//
+// VerdictNo outranks VerdictUnknown deliberately. "This machine was measured
+// and will not run it" is a fact the reader can act on; "nobody looked" is
+// not, and letting an unmeasured host outrank a measured one would replace the
+// only real answer available with silence.
+func verdictRank(v Verdict) int {
+	switch v {
+	case VerdictFits:
+		return 4
+	case VerdictTight:
+		return 3
+	case VerdictPartial:
+		return 2
+	case VerdictNo:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// EstimateFleetFit grades one model against every candidate machine, in the
+// order given.
+//
+// With no candidates it still returns one result: the footprint is a property
+// of the model and is worth having even when there is nothing to judge it
+// against, and a caller that got an empty slice back would have to special-case
+// the very situation the note inside already explains.
+func EstimateFleetFit(in FitInput, hosts []*Hardware) []Fit {
+	if len(hosts) == 0 {
+		return []Fit{EstimateFit(in, nil)}
+	}
+	out := make([]Fit, 0, len(hosts))
+	for _, hw := range hosts {
+		out = append(out, EstimateFit(in, hw))
+	}
+	return out
+}
+
+// BestFit picks the most favourable verdict from a graded set, breaking ties on
+// expected throughput — between two machines that both fit it, the faster one
+// is the one worth naming.
+func BestFit(fits []Fit) Fit {
+	var best Fit
+	for i, f := range fits {
+		if i == 0 {
+			best = f
+			continue
+		}
+		switch {
+		case verdictRank(f.Verdict) > verdictRank(best.Verdict):
+			best = f
+		case verdictRank(f.Verdict) == verdictRank(best.Verdict) && f.TokensPerSec > best.TokensPerSec:
+			best = f
+		}
+	}
+	return best
+}
+
+// FleetFit grades a model against every candidate and returns the best verdict.
+// It is the two calls above in the order every caller wants them.
+func FleetFit(in FitInput, hosts []*Hardware) Fit {
+	return BestFit(EstimateFleetFit(in, hosts))
 }

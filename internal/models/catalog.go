@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"wintermute/internal/node"
 	"wintermute/internal/store"
 )
 
@@ -33,6 +34,10 @@ type Catalog struct {
 	// separate from prober because it is the one thing here that changes a
 	// backend's state rather than reading it.
 	control *Controller
+
+	// fleet is the telemetry store, when the server has one. It is read for
+	// node hardware and never written — see fleet.go.
+	fleet *node.Store
 
 	mu       sync.Mutex
 	hardware *Hardware
@@ -457,5 +462,9 @@ func (c *Catalog) Recommend(ctx context.Context, req PlanRequest) (*Plan, error)
 		}
 		installed = filtered
 	}
-	return Recommend(req, c.Hardware(ctx), installed), nil
+	// The best-equipped machine that could run a model, which on a fleet is
+	// rarely this one. A plan recommends a single model to run, so it is graded
+	// against a single host — and grading it against the API server would rule
+	// out everything the fleet exists to run.
+	return Recommend(req, c.PrimaryHost(ctx), installed), nil
 }

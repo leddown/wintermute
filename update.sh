@@ -14,6 +14,10 @@ ENV_FILE="${WINTERMUTE_ENV_FILE:-/etc/wintermute/wintermute.env}"
 BIN_DIR="${WINTERMUTE_BIN_DIR:-/usr/local/bin}"
 SERVER_BIN="$BIN_DIR/wintermuted"
 CLIENT_BIN="$BIN_DIR/wintermute"
+# Where the built fleet agent is left for new hosts to install from. It has to
+# match WINTERMUTE_NODE_AGENT_DIR in the env file, and the check below says so
+# when it does not.
+AGENT_DIR="${WINTERMUTE_NODE_AGENT_DIR:-/var/lib/wintermute/node-agent}"
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -63,6 +67,40 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 sudo install -m 0755 "$BUILD_DIR/wintermuted" "$SERVER_BIN"
 sudo install -m 0755 "$BUILD_DIR/wintermute" "$CLIENT_BIN"
 echo "    installed $SERVER_BIN and $CLIENT_BIN"
+
+# Built here rather than fetched from anywhere: the agent a node installs is
+# compiled from the same commit as the server it will report to, on the one
+# machine that is guaranteed to have the toolchain. Both architectures, because
+# a home fleet is usually a mix of an x86 box with the GPU and an ARM board or
+# two, and cross-compiling costs nothing with no cgo in the tree.
+echo "==> Building the fleet agent for new nodes"
+build_agent() {
+  local arch="$1"
+  (cd "$REPO_ROOT" && GOOS=linux GOARCH="$arch" go build -o "$BUILD_DIR/wintermute-node.$arch" ./cmd/wintermute-node)
+}
+build_agent amd64
+build_agent arm64
+sudo mkdir -p "$AGENT_DIR"
+sudo install -m 0644 "$BUILD_DIR/wintermute-node.amd64" "$AGENT_DIR/wintermute-node.amd64"
+sudo install -m 0644 "$BUILD_DIR/wintermute-node.arm64" "$AGENT_DIR/wintermute-node.arm64"
+sudo install -m 0644 "$REPO_ROOT/deploy/wintermute-node.service" "$AGENT_DIR/wintermute-node.service"
+sudo install -m 0644 "$REPO_ROOT/deploy/wintermute-node.env.example" "$AGENT_DIR/node.env.example"
+# Names relative to the directory, so the installer's awk match is on the file
+# name alone rather than on wherever this happened to build.
+(cd "$AGENT_DIR" && sudo sh -c 'sha256sum wintermute-node.amd64 wintermute-node.arm64 wintermute-node.service node.env.example > SHA256SUMS')
+sudo chmod 0644 "$AGENT_DIR/SHA256SUMS"
+echo "    built linux/amd64 and linux/arm64 into $AGENT_DIR"
+
+CONFIGURED_AGENT_DIR="$(env_value WINTERMUTE_NODE_AGENT_DIR)"
+if [ -z "$CONFIGURED_AGENT_DIR" ]; then
+  echo "    note: WINTERMUTE_NODE_AGENT_DIR is not set in $ENV_FILE, so the server"
+  echo "          will not offer the install script. Add:"
+  echo "            WINTERMUTE_NODE_AGENT_DIR=$AGENT_DIR"
+elif [ "$CONFIGURED_AGENT_DIR" != "$AGENT_DIR" ]; then
+  echo "    warning: built into $AGENT_DIR but the server reads $CONFIGURED_AGENT_DIR;"
+  echo "             new nodes would install a stale agent. Set WINTERMUTE_NODE_AGENT_DIR"
+  echo "             to match, or re-run with WINTERMUTE_NODE_AGENT_DIR=$CONFIGURED_AGENT_DIR"
+fi
 
 echo "==> Applying database migrations"
 # As the service user: run as root, the database and its -wal/-shm files end up

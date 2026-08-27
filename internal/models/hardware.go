@@ -42,8 +42,12 @@ type NPU struct {
 	Note       string `json:"note,omitempty"`
 }
 
-// Hardware is the host's inference-relevant capability.
+// Hardware is a host's inference-relevant capability.
 type Hardware struct {
+	// Host names the machine this profile describes. Empty means this server,
+	// which is what every profile was before the fleet could be graded — so an
+	// older reader seeing no name is reading the same thing it always did.
+	Host             string    `json:"host,omitempty"`
 	GPUs             []GPU     `json:"gpus"`
 	NPUs             []NPU     `json:"npus,omitempty"`
 	CPUModel         string    `json:"cpu_model,omitempty"`
@@ -63,6 +67,32 @@ type Hardware struct {
 	// DetectHardware cannot know this; it is set by the Catalog, which is the
 	// only thing that sees both the host and the backend list.
 	RunsInference bool `json:"runs_inference"`
+
+	// ReportedAt is when a fleet node last sent the readings this profile was
+	// built from. Zero for the local host, whose figures are read directly and
+	// are current by construction. A node's are not: it pushes on an interval
+	// and may have stopped, and free VRAM from an hour ago is not a fact about
+	// now — see Stale.
+	ReportedAt time.Time `json:"reported_at,omitempty"`
+}
+
+// fleetStale is how old a node's last reading may be before its live figures —
+// free VRAM above all — stop being evidence about the present.
+//
+// Generous against the agent's own cadence: it collects every fifteen seconds
+// and pushes every minute by default, so five minutes is several missed pushes
+// rather than one late one. The failure this guards is quiet: a node powered
+// off last night still has a plausible-looking profile in the database, and
+// grading a model against its idle VRAM would answer confidently for a machine
+// that is not running.
+const fleetStale = 5 * time.Minute
+
+// Stale reports whether this profile's live figures are too old to judge by.
+func (h *Hardware) Stale(now time.Time) bool {
+	if h == nil || h.ReportedAt.IsZero() {
+		return false
+	}
+	return now.Sub(h.ReportedAt) > fleetStale
 }
 
 // PrimaryGPU returns the GPU with the most total memory, or nil.

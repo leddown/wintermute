@@ -9,7 +9,7 @@ a paragraph.
 | [Quickstart](quickstart.md) | You want the shortest path from a clean checkout to renaming a file |
 | [Running open-weight models](local-models.md) | You're setting up the machine that serves models — drivers, llama.cpp, quantisation, what fits in 8 GB |
 | [Running several backends](backends.md) | You have (or want) more than one model source, and want to know whether that makes anything faster |
-| [Hardware reporting from remote hosts](hardware-nodes.md) | You run the server away from the GPUs and want fit estimates back — a design, not yet built |
+| [Hardware reporting from remote hosts](hardware-nodes.md) | You run the server away from the GPUs and want fit estimates back — install the agent with one curl, declare `node` on the backend, and the machine that runs the model is the one graded |
 
 ## Where the pieces live
 

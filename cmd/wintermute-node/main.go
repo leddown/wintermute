@@ -71,6 +71,7 @@ func run() error {
 		push     = flag.Duration("push", envDuration("WINTERMUTE_NODE_PUSH", time.Minute), "how often to send what has been collected")
 		spool    = flag.String("spool", envOr("WINTERMUTE_NODE_SPOOL", defaultSpool()), "file holding readings not yet delivered")
 		once     = flag.Bool("once", false, "take one reading, send it, and exit — for checking the setup")
+		showVer  = flag.Bool("version", false, "print the agent version and exit")
 
 		storeDir = flag.String("store", envOr("WINTERMUTE_NODE_STORE", ""),
 			"directory holding this host's model weights; empty means this node only reports metrics")
@@ -86,6 +87,14 @@ func run() error {
 			"extra flags appended to every generated llama-server command, e.g. \"--n-gpu-layers 99\"")
 	)
 	flag.Parse()
+
+	// Before the -server/-token check: an installer that has just written this
+	// binary to disk wants to know it runs and what it is, and it has no
+	// configuration to offer yet.
+	if *showVer {
+		fmt.Println("wintermute-node", version)
+		return nil
+	}
 
 	if strings.TrimSpace(*server) == "" || strings.TrimSpace(*token) == "" {
 		return errors.New("-server and -token are required (or WINTERMUTE_SERVER and WINTERMUTE_TOKEN)")

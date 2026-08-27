@@ -215,6 +215,17 @@ type Config struct {
 	// memory is snapshotted on a schedule, so telemetry beside it would
 	// inflate every backup for data already past its usefulness.
 	MetricsDatabasePath string
+	// NodeAgentDir holds the built agent binaries and unit files the install
+	// script hands to a new node. Empty disables the install endpoints, and
+	// the server runs as it did before them.
+	//
+	// It is a directory of build output rather than anything embedded, because
+	// the binaries are ~15MB per architecture and would otherwise ride along
+	// in every wintermuted build. scripts/setup.sh and update.sh fill it on
+	// the same pass that builds the server, which is the only moment the
+	// toolchain is guaranteed to be present and the source is guaranteed to
+	// match what is about to run.
+	NodeAgentDir string
 	// NodeRawRetention is how long full-resolution samples are kept before
 	// they are folded into buckets and deleted. Short on purpose: nothing
 	// outside this window should ever read a raw row.
@@ -376,6 +387,7 @@ func Load() (*Config, error) {
 		RecallIndexInterval:   recallInterval,
 
 		MetricsDatabasePath: strings.TrimSpace(os.Getenv("WINTERMUTE_METRICS_DB")),
+		NodeAgentDir:        strings.TrimSpace(os.Getenv("WINTERMUTE_NODE_AGENT_DIR")),
 		NodeRawRetention:    rawRetention,
 		NodeMinuteRetention: minuteRetention,
 		NodeHourRetention:   hourRetention,
@@ -404,6 +416,12 @@ func Load() (*Config, error) {
 	// otherwise, which for a service is wherever systemd happened to start it.
 	if cfg.ModelRepoPath != "" && !filepath.IsAbs(cfg.ModelRepoPath) {
 		return nil, errors.New("WINTERMUTE_MODEL_REPO must be an absolute path")
+	}
+	// Same reason again: a service started by systemd has no working directory
+	// worth resolving against, and a relative path here would serve a new node
+	// a binary from wherever the unit happened to land.
+	if cfg.NodeAgentDir != "" && !filepath.IsAbs(cfg.NodeAgentDir) {
+		return nil, errors.New("WINTERMUTE_NODE_AGENT_DIR must be an absolute path")
 	}
 	// Half a memory configuration is worse than none: an embedder URL with no
 	// model name would pin the index to an empty name.

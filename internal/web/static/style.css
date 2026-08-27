@@ -825,6 +825,61 @@ button:disabled { opacity: .5; cursor: default; }
 .pane-actions { display: flex; align-items: center; gap: 8px; }
 .pane-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
 
+/* ---- the scratch pad ----
+   The pane is one text box and nothing else, so it does not use .pane-body:
+   that scrolls a padded block, and here the textarea has to be the thing that
+   fills and scrolls, or a long document leaves the pad's own footer floating
+   halfway up the page. */
+.pad-wrap { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+.pad-text {
+  flex: 1;
+  width: 100%;
+  border: none; border-radius: 0; background: var(--bg);
+  padding: 20px max(20px, calc(50% - 420px));
+  font-size: 14.5px; line-height: 1.7;
+  resize: none;
+}
+.pad-text:focus { border: none; }
+.pad-text:disabled { opacity: 1; color: var(--muted); }
+.pad-foot {
+  display: flex; justify-content: flex-end; gap: 12px;
+  padding: 6px 20px; border-top: 1px solid var(--border);
+  background: var(--surface); font-size: 11.5px;
+}
+/* The title is edited in place in the header, so it is a bare input that
+   looks like the heading it replaced until it has focus. */
+.pad-title {
+  flex: 1; min-width: 0;
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  padding: 4px 8px; margin: -4px -8px;
+  font-size: 16px; font-weight: 600;
+}
+.pad-title:focus { outline: none; border-color: var(--accent); }
+.pad-title:disabled { opacity: .5; }
+.pad-state { font-size: 11.5px; white-space: nowrap; }
+
+/* Two lines a row: the name, and enough of the text to tell two pads called
+   Untitled apart — which is what most of them will be called. */
+#pads li { display: grid; grid-template-columns: 1fr auto; gap: 2px 6px; white-space: normal; }
+.pad-name { grid-column: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pad-peek {
+  grid-column: 1 / -1; font-size: 11.5px; opacity: .7;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#pads li:hover .session-del { opacity: 1; }
+
+/* The button that carries a reply out of the transcript and into a pad. It
+   sits on the message's own label line, dimmed like the delete controls: it is
+   on every assistant message, and at full strength it would be a column of
+   links running down the side of the conversation. */
+.msg .role { display: flex; align-items: center; gap: 8px; }
+.to-pad {
+  background: none; border: none; padding: 0;
+  font: inherit; font-size: 11px; text-transform: none; letter-spacing: 0;
+  color: var(--muted); opacity: .55; cursor: pointer;
+}
+.msg:hover .to-pad, .to-pad:focus-visible { opacity: 1; color: var(--accent); }
+
 .row-form {
   display: flex; gap: 8px; padding: 12px 20px;
   border-bottom: 1px solid var(--border); background: var(--surface);
@@ -1501,16 +1556,20 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* The fit verdict is why a list of eight near-identical filenames is readable
-   at all: it says which one will actually run on this hardware. */
+   at all: it says which one will actually run, and on which machine. The name
+   rides inside the pill rather than beside it so the two cannot be read apart
+   — a verdict separated from its host is worse than no verdict. */
 .repo-fit { font-size: 11px; padding: 2px 8px; border-radius: 999px;
-  border: 1px solid var(--border); color: var(--muted); }
+  border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .repo-fit.fits { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }
 /* Tight and partial both run; they are warnings, not refusals, and colouring
    them like a failure would send the operator past a model that works. */
 .repo-fit.tight, .repo-fit.partial { border-color: var(--accent); color: var(--accent); }
 .repo-fit.no { border-color: var(--error); color: var(--error); }
-/* "unknown" means the hardware was never measured, which is a statement about
-   this server rather than about the model. It stays muted. */
+/* "unknown" means no machine that would run this was measured — this server
+   serves no models itself, or the node that does has stopped reporting. It is
+   a statement about the fleet rather than about the model, so it stays muted
+   rather than red: nobody looked is not the same answer as it will not run. */
 .repo-fit.unknown { border-color: var(--border); color: var(--muted); }
 
 .repo-file.missing { border-style: dashed; opacity: 0.75; }

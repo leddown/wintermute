@@ -301,8 +301,14 @@ type HubModel struct {
 	Capabilities []Capability `json:"capabilities,omitempty"`
 	// Quants lists the quantized files in the repository.
 	Quants []HubQuant `json:"quants,omitempty"`
-	// Fit is attached against the current hardware when requested.
+	// Fit is the best verdict across every machine that could run this model,
+	// naming the one that earned it. On a server with no fleet that is this
+	// host and Fit.Host is empty, exactly as before.
 	Fit *Fit `json:"fit,omitempty"`
+	// HostFits is that grading per machine, at the default quantization. It is
+	// what turns "fits" into an answer someone can act on — which box to load
+	// it on — and is short: a home fleet is a handful of machines.
+	HostFits []Fit `json:"host_fits,omitempty"`
 }
 
 // HubProvider is one hosted provider serving a model.
@@ -463,7 +469,7 @@ func (g *hubGated) UnmarshalJSON(b []byte) error {
 
 // model maps a decoded record onto what this program shows. hw grades each
 // quantization when it is non-nil.
-func (r hubRecord) model(hw *Hardware, contextTokens int) HubModel {
+func (r hubRecord) model(hosts []*Hardware, contextTokens int) HubModel {
 	m := HubModel{
 		ID:               r.ID,
 		Author:           r.Author,
@@ -513,12 +519,16 @@ func (r hubRecord) model(hw *Hardware, contextTokens int) HubModel {
 	quants := groupQuants(r.Siblings)
 	m.QuantCount = len(quants)
 	for _, q := range quants {
-		if hw != nil && m.ParamsB > 0 {
-			fit := EstimateFit(FitInput{
+		if len(hosts) > 0 && m.ParamsB > 0 {
+			// The best machine for this quantization, which is not necessarily
+			// the best machine for the repository: a smaller quant can fit a
+			// card the default one does not, and that is the whole reason this
+			// list is worth reading file by file.
+			fit := FleetFit(FitInput{
 				ParamsB:       m.ParamsB,
 				Quant:         q.Quant,
 				ContextTokens: contextTokens,
-			}, hw)
+			}, hosts)
 			q.Fit = &fit
 		}
 		m.Quants = append(m.Quants, q)
@@ -531,13 +541,20 @@ func (r hubRecord) model(hw *Hardware, contextTokens int) HubModel {
 		return quantBPW[m.Quants[i].Quant] < quantBPW[m.Quants[j].Quant]
 	})
 
-	if hw != nil && m.ParamsB > 0 {
-		fit := EstimateFit(FitInput{
+	if len(hosts) > 0 && m.ParamsB > 0 {
+		in := FitInput{
 			ParamsB:       m.ParamsB,
 			Quant:         DefaultQuant,
 			ContextTokens: contextTokens,
-		}, hw)
-		m.Fit = &fit
+		}
+		graded := EstimateFleetFit(in, hosts)
+		best := BestFit(graded)
+		m.Fit = &best
+		// Only worth carrying when there is a choice to report. With one
+		// machine the badge already says everything the list would.
+		if len(graded) > 1 {
+			m.HostFits = graded
+		}
 	}
 	return m
 }
@@ -575,10 +592,11 @@ type SearchOptions struct {
 	// Cursor continues a previous page. It is the opaque value from a prior
 	// SearchPage.Next and nothing else; see nextCursor.
 	Cursor string
-	// Hardware grades each result for fit when it is set, the same way the
-	// detail view does. A search that cannot say whether a model runs here is
-	// most of the way to useless.
-	Hardware      *Hardware
+	// Hosts are the machines each result is graded against, the same way the
+	// detail view does it. A search that cannot say whether a model runs here
+	// is most of the way to useless — and on a fleet "here" is several
+	// machines, none of them necessarily this one.
+	Hosts         []*Hardware
 	ContextTokens int
 }
 
@@ -662,7 +680,7 @@ func (h *Hub) Search(ctx context.Context, opts SearchOptions) (SearchPage, error
 
 	out := make([]HubModel, 0, len(raw))
 	for _, r := range raw {
-		m := r.model(opts.Hardware, opts.ContextTokens)
+		m := r.model(opts.Hosts, opts.ContextTokens)
 		// The per-file list is what the detail request is for: it is long,
 		// most of it is scrolled past, and only there does it carry sizes.
 		// The count of it survives, because that is a fact worth seeing.
@@ -673,8 +691,8 @@ func (h *Hub) Search(ctx context.Context, opts SearchOptions) (SearchPage, error
 }
 
 // Detail fetches one repository, including its GGUF metadata and the list of
-// quantized files. When hw is non-nil each quantization is graded for fit.
-func (h *Hub) Detail(ctx context.Context, id string, hw *Hardware, contextTokens int) (*HubModel, error) {
+// quantized files. Each quantization is graded against every host given.
+func (h *Hub) Detail(ctx context.Context, id string, hosts []*Hardware, contextTokens int) (*HubModel, error) {
 	// blobs=true is what puts a size on every file. It is the number that
 	// decides whether a download is worth starting, and the only place the Hub
 	// offers it — the fit estimate next to it is a prediction from the
@@ -698,7 +716,7 @@ func (h *Hub) Detail(ctx context.Context, id string, hw *Hardware, contextTokens
 		return nil, err
 	}
 
-	m := raw.model(hw, contextTokens)
+	m := raw.model(hosts, contextTokens)
 	sizes := make(map[string]int64, len(raw.Siblings))
 	for _, s := range raw.Siblings {
 		sizes[s.Filename] = s.Size

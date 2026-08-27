@@ -1,0 +1,19 @@
+-- Which fleet node a backend runs on, for backends declared through the UI.
+--
+-- The server reaches an inference server over HTTP and learns nothing from the
+-- address about which machine is behind it. That did not matter while the only
+-- question was whether the backend answered, but it decides every fit verdict:
+-- graded against this host, a model is judged by the hardware of the machine
+-- serving the API, which on a small server is never the machine running the
+-- weights.
+--
+-- Declared rather than inferred, and deliberately so. Matching base_url's host
+-- against a node's hostname or address would put DNS and NAT in the path of a
+-- question whose wrong answer is silent — the verdict would simply describe
+-- another machine, with nothing on screen to say it had.
+--
+-- Empty means the backend runs on this host, which is the answer for every row
+-- that existed before this column did, and why the default is '' rather than
+-- NULL. There is no foreign key: nodes live in the metrics database, and a
+-- backend may be declared for a node whose agent has not reported yet.
+ALTER TABLE backend_config ADD COLUMN node TEXT NOT NULL DEFAULT '';

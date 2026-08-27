@@ -1,11 +1,19 @@
 # Hardware reporting from remote inference hosts
 
-**Status: planned, not built.** This is the design for restoring real VRAM fit
-estimates once `wintermuted` runs somewhere other than the machine with the
-GPUs. Nothing here exists yet; the behaviour described under
-[What happens today](#what-happens-today) does.
+**Status: built, by a different route than this document proposed.** Real VRAM
+fit estimates across the network work today. What follows is kept as the design
+record — its reasoning is still the reasoning, and
+[The invariant](#the-invariant) still holds — but read
+[What was built](#what-was-built) first, because the mechanism differs.
 
+The short version: this document proposed the server *pull* hardware from a
+`/api/v1/system` endpoint on each inference host, addressed by a `node_url` in
+`backends.json`. What exists instead reuses the fleet agent, which already
+pushes exactly this data, and the link is a **node name** rather than a URL.
+
+- [Installing the agent](#installing-the-agent)
 - [Why this is needed](#why-this-is-needed)
+- [What was built](#what-was-built)
 - [What happens today](#what-happens-today)
 - [The shape](#the-shape)
 - [Design decisions](#design-decisions)
@@ -15,6 +23,119 @@ GPUs. Nothing here exists yet; the behaviour described under
 - [Open decisions](#open-decisions)
 
 ---
+
+## Installing the agent
+
+One command on the new host. The server builds the agent and serves it, so
+nothing is copied by hand and no Go toolchain is needed on the node:
+
+```bash
+# on the server: name the machine, and keep the token it prints
+wintermuted -add-client tycho -kind node
+
+# on the node, with that token
+curl -fsSL -H "Authorization: Bearer $TOKEN" \
+  https://wintermute.lan:8088/api/v1/node-agent/install.sh \
+  | sudo sh -s -- --token "$TOKEN"
+```
+
+The name given to `-add-client` is how the machine is identified everywhere
+after this: in the Fleet view, in model assignments, and in the `node` field of
+a backend declaration. It is never taken from the hostname the agent reports,
+because a node that could name itself could write telemetry attributed to
+another one.
+
+The installer creates the service user, writes `/etc/wintermute/node.env` with
+the token, installs the unit, and starts it. Two options are worth passing on a
+host that will also hold weights:
+
+```bash
+  ... | sudo sh -s -- --token "$TOKEN" --store /srv/models --runtime llamacpp
+```
+
+`--store` also writes a systemd drop-in granting write access to that path,
+which is otherwise the first thing to go wrong: `ProtectSystem=strict` hides a
+store outside the state directory, and the symptom is permission denied on a
+directory that is plainly writable from a shell.
+
+**Re-run the same command to update.** It replaces the binary and restarts the
+service, and on an update the token can be omitted — it is read from the env
+file already on the host. Three things are deliberately left alone:
+
+- `node.env`, which holds the token and the choices made about this machine.
+- A unit file that differs from the shipped one, since a local edit is usually
+  the reason it differs. The new one is written beside it as `.service.new` and
+  the installer says so.
+- Anything in the model store.
+
+### What this is not
+
+It is not an update channel. The agent never fetches its own executable, and
+nothing in the install path is reachable from its reporting loop — an operator
+runs the script, the same way they would run any installer.
+
+That is the same line [Design decisions](#design-decisions) draws around the
+agent generally. The server can already make a node download a *model file* it
+had permission to download; a server that could replace the binary running as a
+service on every node would be a categorically different thing, and it would be
+root on the whole fleet the moment the server was compromised. Updating a fleet
+is therefore a loop over hosts, which is a small price for not having built that
+channel.
+
+The endpoints themselves are authenticated like everything else, serve a fixed
+list of four files by exact name, and refuse to write an installer at all for a
+`Host` header that would not survive being pasted into a shell script.
+
+### On the server
+
+`scripts/setup.sh` and `update.sh` cross-compile the agent for `linux/amd64` and
+`linux/arm64` on the same pass that builds the server, into
+`WINTERMUTE_NODE_AGENT_DIR`. A node therefore installs an agent built from the
+commit the server is running, which is the only version pairing worth having.
+No cgo anywhere in the tree, so both architectures are a pair of environment
+variables — the same property that makes the Windows client a single build.
+
+Unset the variable and the install endpoints report themselves as not
+configured, naming the setting, rather than returning a 404 that reads like a
+wrong URL.
+
+## What was built
+
+`cmd/wintermute-node` was already reporting each host's cards, their memory and
+its RAM, on an interval, for the Fleet screen. That is everything the fit
+calculator needs, so no second probe and no second endpoint were built: a
+backend names the machine it runs on, and `models.HardwareFromNode` turns that
+host's own reports into the same `Hardware` a local probe produces.
+
+```json
+{ "name": "tycho", "kind": "llamacpp",
+  "base_url": "http://192.168.1.40:8080/v1", "node": "tycho" }
+```
+
+Four differences from the design below, each of which turned out to matter:
+
+- **The host pushes; the server never pulls.** No `node_url`, no per-backend
+  fetch, no TTL, and nothing to time out — which removes the failure mode
+  [The invariant](#the-invariant) was written to guard, since there is no probe
+  to fall back from. Staleness replaces unreachability: past five minutes
+  without a report a node reads `unknown`, and the invariant holds in the same
+  words.
+- **The link is a name, not an address.** `node` matches the client the agent
+  authenticates as. An address would have invited inferring the link from
+  `base_url`, which is exactly the DNS-in-the-path guess this codebase refuses
+  to make.
+- **No new authentication.** The agent already holds a node token. The design's
+  shared-token endpoint would have been a second credential guarding the same
+  data.
+- **Every host is graded, not one per backend.** A model is estimated against
+  each declared machine and the best verdict wins, carrying the name of the
+  machine that earned it — `fits · tycho`.
+
+Free VRAM crosses the wire as a total across a host's cards, because that is
+what a fleet chart plots. With one card that is exact. With several, the split
+is not on the wire, and `nodeGPUs` charges all reported use to the largest card
+rather than inventing a distribution — under-promising, which is the safe
+direction.
 
 ## Why this is needed
 
@@ -52,8 +173,11 @@ deliberately distinct from `VerdictNo`: *it will not run* and *nobody looked*
 lead to opposite decisions, and collapsing them is how a perfectly usable model
 gets ruled out.
 
-So today's answer is not wrong, it is absent. This document is about making it
-present again.
+So the answer is not wrong, it is absent — and it stays absent exactly as
+described above when nothing has been declared as a machine that runs models.
+Declare `node` on the backend serving them and the answer comes back, computed
+from that machine's own reports. This section describes the floor, not the
+ceiling.
 
 ## The shape
 
@@ -139,6 +263,10 @@ a verdict computed from local hardware.
 
 ## Build order
 
+**Superseded.** Steps 1-4 were delivered by the fleet agent and the declared
+`node` link described above; step 5's telemetry was built first, as the Fleet
+screen, and is what made the rest cheap. Kept for the record.
+
 Each step is independently deployable and verifiable.
 
 | Step | What | Done when |
@@ -180,15 +308,16 @@ trigger anything, which limits the damage, but it still needs care:
 
 ## Open decisions
 
-**How `recommend_model` ranks across hosts.** Either rank across every node and
-name the winning host, or take a `backend` argument and answer for one. The
-former is the better default — the question is usually "what should I run" and
-not "what should I run *there*" — but it makes the summary paragraph harder to
-write, since it currently assumes a single GPU.
+**How `recommend_model` ranks across hosts.** *Decided: rank across every
+machine.* A plan recommends one model to run, so it is graded against one
+host — `Catalog.PrimaryHost`, the best-equipped declared machine — which keeps
+the summary paragraph's single-GPU assumption intact. The fit surfaces, which
+have no such constraint, grade against all of them and name the winner.
 
-**Whether `Fit` gaining a host field breaks the browser.** The Models list
-renders fit verdicts; adding a field is additive, but it is worth checking
-`app.js` rather than assuming.
+**Whether `Fit` gaining a host field breaks the browser.** *Decided: it does
+not, and `app.js` was checked rather than assumed.* Every verdict now renders
+through one `fitBadge` helper, which appends the host name only when there is
+one — so a single-machine server's badges read exactly as they did.
 
 **Whether a node should report what is loaded.** It would be cheap to include,
 but the catalog already gets this from the inference server itself — `/props` on

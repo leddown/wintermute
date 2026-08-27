@@ -28,6 +28,7 @@ import (
 	"wintermute/internal/models"
 	"wintermute/internal/node"
 	"wintermute/internal/recall"
+	"wintermute/internal/scratch"
 	"wintermute/internal/store"
 	"wintermute/internal/todo"
 	"wintermute/internal/tool"
@@ -121,6 +122,7 @@ func backendSet(ctx context.Context, cfg *config.Config, st *store.Store) ([]mod
 			BaseURL: r.BaseURL,
 			Model:   r.Model,
 			Cloud:   !kind.Local(),
+			Node:    r.Node,
 		}
 		// The key is read from the environment at every reload, never stored.
 		if r.APIKeyEnv != "" {
@@ -208,6 +210,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		Accounting: accounting.NewService(accounting.NewSQLiteRepository(st.DB())),
 		Todo:       todoService,
 		Fintech:    fintechService,
+		Scratch:    scratch.NewService(st.DB()),
 	}
 
 	// The task tools go on the same registry the media and model tools use, so
@@ -330,6 +333,11 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		}
 		log.Info("fleet telemetry enabled",
 			"database", cfg.MetricsDatabasePath, "raw_retention", cfg.NodeRawRetention)
+		// What the nodes report is also what says whether a model fits. The
+		// catalog reads their hardware for any backend declared to run on one,
+		// so a verdict describes the machine that would load the weights
+		// rather than the machine serving this API.
+		catalog.SetFleet(nodeStore)
 	}
 
 	// Housekeeping: backups, diagnostics, maintenance and pruning. It is given
@@ -356,6 +364,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 		WithModelRepo(repo).
 		WithMemory(recallStore, indexer).
 		WithNodes(nodeStore, cfg.NodeRawRetention).
+		WithNodeAgentDir(cfg.NodeAgentDir).
 		WithBackendAdmin(func(ctx context.Context) error {
 			return reloadBackends(ctx, cfg, st, router, catalog, log)
 		})

@@ -62,6 +62,10 @@ type Server struct {
 	// rawWindow is how long full-resolution samples survive, which is what
 	// decides whether a requested span can be answered from them.
 	rawWindow time.Duration
+	// nodeAgentDir holds the built agent binaries a new node installs from.
+	// Empty leaves the install endpoints answering "not configured", which is
+	// the honest answer for a server whose build never produced them.
+	nodeAgentDir string
 	// memoryIndexer rebuilds the index on request. Nil for the same reason.
 	memoryIndexer *recall.Indexer
 	// reloadBackends re-resolves the backend set and swaps it into the router
@@ -109,6 +113,18 @@ func (s *Server) WithTwire(svc *twire.Service) *Server {
 // not configured.
 func (s *Server) WithModelRepo(repo *modelrepo.Repo) *Server {
 	s.modelRepo = repo
+	return s
+}
+
+// WithNodeAgentDir attaches the directory holding the built fleet agent, so a
+// new host can install it from this server instead of having a binary copied
+// to it by hand.
+//
+// The routes are registered either way: a server that cannot serve the agent
+// should say so when asked, rather than returning a 404 that reads like a
+// wrong URL.
+func (s *Server) WithNodeAgentDir(dir string) *Server {
+	s.nodeAgentDir = dir
 	return s
 }
 
@@ -182,6 +198,7 @@ func (s *Server) Handler() http.Handler {
 
 	// Remote hosts reporting what they are doing — see nodes.go.
 	s.registerNodeRoutes(authed)
+	s.registerNodeAgentRoutes(authed)
 
 	authed("POST /mcp", s.handleMCP)
 

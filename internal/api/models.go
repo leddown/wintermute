@@ -47,6 +47,9 @@ type backendInput struct {
 	BaseURL   string `json:"base_url"`
 	Model     string `json:"model"`
 	APIKeyEnv string `json:"api_key_env"`
+	// Node names the fleet host this backend runs on, so that host's reported
+	// hardware is what a model is judged against rather than this server's.
+	Node string `json:"node"`
 }
 
 // backendNamePattern keeps a name usable as a path segment and recognisable in
@@ -63,6 +66,7 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 	req.BaseURL = strings.TrimSpace(req.BaseURL)
 	req.Model = strings.TrimSpace(req.Model)
 	req.APIKeyEnv = strings.TrimSpace(req.APIKeyEnv)
+	req.Node = strings.TrimSpace(req.Node)
 
 	if !backendNamePattern.MatchString(req.Name) {
 		writeError(w, http.StatusBadRequest,
@@ -101,6 +105,14 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// The same contradiction config.resolve rejects in the file: a cloud
+	// backend runs on hardware nobody here can see, so naming a node for it
+	// would attach a fit verdict to a machine that is not running the model.
+	if req.Node != "" && !kind.Local() {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf(
+			"kind %q is a cloud backend, so it cannot run on a fleet node", kind))
+		return
+	}
 
 	// A name from backends.json is not ours to redefine: the file wins at
 	// resolve time, so accepting the write would store a row that never takes
@@ -113,7 +125,7 @@ func (s *Server) handleSaveBackend(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.SaveBackendConfig(r.Context(), store.BackendConfig{
 		Name: req.Name, Kind: string(kind), BaseURL: req.BaseURL,
-		Model: req.Model, APIKeyEnv: req.APIKeyEnv,
+		Model: req.Model, APIKeyEnv: req.APIKeyEnv, Node: req.Node,
 	}); err != nil {
 		s.fail(w, "save backend", err)
 		return
@@ -181,13 +193,16 @@ type backendView struct {
 	store.BackendRow
 	Memory      string `json:"memory,omitempty"`
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+	// Node is the fleet host this backend was declared to run on, so the
+	// Backends screen can say which machine each one is actually on.
+	Node string `json:"node,omitempty"`
 }
 
-// withMemory attaches each backend's declared size to its health row. A
-// backend the configuration does not mention — one declared in the database
-// through the admin UI — simply has no memory, which readers must treat as
-// unknown rather than as zero.
-func withMemory(rows []store.BackendRow, configured []models.Backend) []backendView {
+// withDeclared attaches what the configuration says about each backend to its
+// health row: the declared size, and the fleet node it runs on. A backend the
+// configuration does not mention has neither, which readers must treat as
+// unknown rather than as zero and as "runs here".
+func withDeclared(rows []store.BackendRow, configured []models.Backend) []backendView {
 	declared := make(map[string]models.Backend, len(configured))
 	for _, b := range configured {
 		declared[b.Name] = b
@@ -197,6 +212,7 @@ func withMemory(rows []store.BackendRow, configured []models.Backend) []backendV
 		view := backendView{BackendRow: row}
 		if b, ok := declared[row.Name]; ok {
 			view.Memory, view.MemoryBytes = b.Memory, b.MemoryBytes
+			view.Node = b.Node
 		}
 		out = append(out, view)
 	}
@@ -222,7 +238,7 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 		names = append(names, d.Name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"backends": withMemory(health, s.catalog.Backends()),
+		"backends": withDeclared(health, s.catalog.Backends()),
 		"default":  s.agent.Router().Default(),
 		"fallback": s.agent.Router().Fallback(),
 		"declared": names,
@@ -505,10 +521,11 @@ func (s *Server) handleModelSearch(w http.ResponseWriter, r *http.Request) {
 		Limit:    queryInt(r, "limit", 20),
 		GGUFOnly: r.URL.Query().Get("gguf") != "false",
 		Sort:     r.URL.Query().Get("sort"),
-		// Graded against this machine on the way past. The search now carries
-		// the GGUF header for every result, so the verdict costs nothing extra
-		// and answers the only question that matters before opening one.
-		Hardware:      s.catalog.Hardware(r.Context()),
+		// Graded against every machine that could run it on the way past. The
+		// search now carries the GGUF header for every result, so the verdict
+		// costs nothing extra and answers the only question that matters
+		// before opening one.
+		Hosts:         s.catalog.Hosts(r.Context()),
 		ContextTokens: queryInt(r, "context", defaultPlanContext),
 	})
 	if err != nil {
@@ -537,7 +554,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	detail, err := s.catalog.Hub().Detail(r.Context(), id,
-		s.catalog.Hardware(r.Context()), queryInt(r, "context", defaultPlanContext))
+		s.catalog.Hosts(r.Context()), queryInt(r, "context", defaultPlanContext))
 	if err != nil {
 		s.log.Warn("hub detail failed", "model", id, "error", err)
 		writeError(w, http.StatusBadGateway, "could not fetch model: "+err.Error())
@@ -574,6 +591,14 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, plan)
 }
 
+// fitResponse is one verdict with the grading it was picked from. The best fit
+// is embedded rather than nested so the response is still a Fit to anything
+// reading it as one.
+type fitResponse struct {
+	models.Fit
+	Hosts []models.Fit `json:"hosts,omitempty"`
+}
+
 type fitRequest struct {
 	ParamsB       float64 `json:"params_b"`
 	Quant         string  `json:"quant"`
@@ -592,14 +617,18 @@ func (s *Server) handleFit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fit := models.EstimateFit(models.FitInput{
+	graded := models.EstimateFleetFit(models.FitInput{
 		ParamsB:       req.ParamsB,
 		Quant:         req.Quant,
 		ContextTokens: req.ContextTokens,
 		KVCacheType:   req.KVCacheType,
 		ActiveParamsB: req.ActiveParamsB,
-	}, s.catalog.Hardware(r.Context()))
-	writeJSON(w, http.StatusOK, fit)
+	}, s.catalog.Hosts(r.Context()))
+	// The best verdict is spread at the top level, so a reader that predates
+	// the fleet finds the same fields where it left them. hosts carries what
+	// each machine said, which is the question that follows immediately.
+	best := models.BestFit(graded)
+	writeJSON(w, http.StatusOK, fitResponse{Fit: best, Hosts: graded})
 }
 
 // handleTasks lists the planner's task classes so the UI does not hardcode

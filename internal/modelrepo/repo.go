@@ -366,11 +366,12 @@ func (r *Repo) Status(ctx context.Context) Status {
 
 // List walks the repository and merges what is on disk with what is recorded.
 //
-// hw is optional; when given, each entry is graded for fit against it. The walk
-// is the authority on existence and size — a file the index has never heard of
-// is listed all the same, because the operator putting a GGUF on the drive by
-// hand is a perfectly ordinary way to add one.
-func (r *Repo) List(ctx context.Context, hw *models.Hardware) ([]Entry, error) {
+// hosts is optional; when given, each entry is graded for fit against every
+// machine that could run it and keeps the best verdict. The walk is the
+// authority on existence and size — a file the index has never heard of is
+// listed all the same, because the operator putting a GGUF on the drive by hand
+// is a perfectly ordinary way to add one.
+func (r *Repo) List(ctx context.Context, hosts []*models.Hardware) ([]Entry, error) {
 	root, err := r.resolve()
 	if err != nil {
 		return nil, err
@@ -410,7 +411,7 @@ func (r *Repo) List(ctx context.Context, hw *models.Hardware) ([]Entry, error) {
 		if statErr == nil {
 			size = info.Size()
 		}
-		out = append(out, r.entry(key, d.Name(), size, recorded[key], tags[key], hw))
+		out = append(out, r.entry(key, d.Name(), size, recorded[key], tags[key], hosts))
 		return nil
 	})
 	if walkErr != nil {
@@ -435,7 +436,7 @@ func (r *Repo) List(ctx context.Context, hw *models.Hardware) ([]Entry, error) {
 
 // entry assembles one listing row from the disk, the index and the tags.
 func (r *Repo) entry(key, name string, size int64, rec store.RepoFile, tags []string,
-	hw *models.Hardware) Entry {
+	hosts []*models.Hardware) Entry {
 
 	e := Entry{
 		RelPath:   key,
@@ -463,11 +464,11 @@ func (r *Repo) entry(key, name string, size int64, rec store.RepoFile, tags []st
 			e.Quant, e.Estimated = quant, true
 		}
 	}
-	if hw != nil && e.ParamsB > 0 {
-		fit := models.EstimateFit(models.FitInput{
+	if len(hosts) > 0 && e.ParamsB > 0 {
+		fit := models.FleetFit(models.FitInput{
 			ParamsB: e.ParamsB,
 			Quant:   e.Quant,
-		}, hw)
+		}, hosts)
 		e.Fit = &fit
 	}
 	return e

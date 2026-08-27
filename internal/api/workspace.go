@@ -11,6 +11,7 @@ import (
 	"wintermute/internal/company"
 	"wintermute/internal/crm"
 	"wintermute/internal/fintech"
+	"wintermute/internal/scratch"
 	"wintermute/internal/tabular"
 	"wintermute/internal/todo"
 )
@@ -35,6 +36,8 @@ type Workspace struct {
 	// position review. Nil leaves its routes unregistered, the same way an
 	// absent CRM does.
 	Fintech *fintech.Service
+	// Scratch is the free-text pad. Nil leaves its routes unregistered.
+	Scratch *scratch.Service
 }
 
 func (s *Server) registerWorkspaceRoutes(authed func(string, http.HandlerFunc)) {
@@ -97,6 +100,7 @@ func (s *Server) registerWorkspaceRoutes(authed func(string, http.HandlerFunc)) 
 	}
 	s.registerAccountingRoutes(authed)
 	s.registerFintechRoutes(authed)
+	s.registerScratchRoutes(authed)
 }
 
 // ---- company ----

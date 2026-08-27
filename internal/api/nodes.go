@@ -1,10 +1,12 @@
 package api
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 
+	"wintermute/internal/models"
 	"wintermute/internal/node"
 	"wintermute/internal/store"
 )
@@ -180,7 +182,67 @@ func (s *Server) handleAssignModel(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, "assign model", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"node": name, "assigned": store.RepoKey(req.RelPath)})
+	resp := map[string]any{"node": name, "assigned": store.RepoKey(req.RelPath)}
+	// Advisory, never a veto. This is the one screen that knows both which
+	// weights and which machine, so it is the one place a fit verdict answers
+	// the question exactly rather than approximately — but a node may be given
+	// weights it is only meant to hold, and refusing the assignment would be
+	// the server deciding that for an operator who named the machine.
+	if fit := s.nodeFit(r.Context(), name, req.RelPath); fit != nil {
+		resp["fit"] = fit
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// nodeFit grades one repository file against one node's reported hardware.
+//
+// Unlike the fleet-wide verdicts this does not require a backend to have been
+// declared on the node: the operator named this machine, which settles the
+// question of whether it is the machine being asked about. It returns nil
+// rather than an unknown verdict when there is nothing to say — no telemetry,
+// no node, or a file whose parameter count was never recorded — because a
+// silent field reads better here than a verdict that carries no information.
+func (s *Server) nodeFit(ctx context.Context, nodeName, relPath string) *models.Fit {
+	if s.nodes == nil || nodeName == "" {
+		return nil
+	}
+	recorded, err := s.store.RepoFiles(ctx)
+	if err != nil {
+		return nil
+	}
+	file, ok := recorded[store.RepoKey(relPath)]
+	if !ok {
+		return nil
+	}
+	params, quant := file.ParamsB, file.Quant
+	// A file copied in by hand has no record beyond its name, which is still
+	// enough to guess from — and Describe marks the guess as one.
+	if params == 0 || quant == "" {
+		p, q := models.Describe(relPath)
+		if params == 0 {
+			params = p
+		}
+		if quant == "" {
+			quant = q
+		}
+	}
+	if params <= 0 {
+		return nil
+	}
+	all, err := s.nodes.Nodes(ctx)
+	if err != nil {
+		return nil
+	}
+	for _, n := range all {
+		if n.Name != nodeName {
+			continue
+		}
+		fit := models.EstimateFit(models.FitInput{
+			ParamsB: params, Quant: quant, ContextTokens: defaultPlanContext,
+		}, models.HardwareFromNode(n))
+		return &fit
+	}
+	return nil
 }
 
 func (s *Server) handleUnassignModel(w http.ResponseWriter, r *http.Request) {

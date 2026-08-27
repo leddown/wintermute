@@ -142,7 +142,8 @@ function start(me) {
 // not cost four extra round trips for panes nobody looked at.
 const loaded = new Set();
 const loaders = {
-  tasks: () => Promise.all([loadLists(), renderTasks()]),
+  tasks: () => renderTasks(),
+  scratch: () => loadPads(),
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
   utilities: () => loadUtilities(),
@@ -171,6 +172,9 @@ function switchView(name) {
   // view stops it rather than leaving it asking about jobs behind a hidden
   // section. Its own guard only knows which tab is selected, not which view.
   if (name !== 'huginn') stopRepoPolling();
+  // The pad saves on a timer, and switching view is quicker than the timer.
+  // Leaving it holding unwritten keystrokes is how a scratch pad loses work.
+  if (name !== 'scratch') flushPad();
   if (!loaded.has(name) && loaders[name]) {
     loaded.add(name);
     loaders[name]().catch((err) => { loaded.delete(name); showError(err); });
@@ -889,8 +893,20 @@ function appendMessage(m) {
   }
   if (!text) return;
 
+  // Every message gets a way out of the transcript. The transcript is a log —
+  // it is replayed to the model verbatim and nothing here may edit it — so
+  // working over a reply means taking a copy somewhere else, and the pad next
+  // door is that somewhere. See sendToPad().
+  const label = el('div', { class: 'role' },
+    el('span', { text: m.role }),
+    el('button', {
+      class: 'to-pad', type: 'button', text: '→ pad',
+      title: 'Copy this message into the scratch pad',
+      onclick: () => sendToPad(text),
+    }));
+
   box.append(el('div', { class: `msg ${m.role}${m.is_error ? ' error' : ''}` },
-    el('div', { class: 'role', text: m.role }),
+    label,
     el('div', { class: 'bubble', text })));
   box.scrollTop = box.scrollHeight;
 }
@@ -1390,7 +1406,7 @@ async function loadLists() {
   }
 }
 
-$('show-archived').addEventListener('change', () => loadLists().catch(showError));
+$('show-archived').addEventListener('change', () => renderTasks().catch(showError));
 $('show-done').addEventListener('change', () => renderTasks().catch(showError));
 
 $('new-list').addEventListener('click', () => {
@@ -1399,7 +1415,6 @@ $('new-list').addEventListener('click', () => {
     { name: 'description', label: 'Description', type: 'textarea' },
   ], async (v) => {
     await api('/api/v1/todo/lists', { method: 'POST', body: JSON.stringify(v) });
-    await loadLists();
     await renderTasks();
     toast('List created.');
   });
@@ -1414,7 +1429,6 @@ $('edit-list').addEventListener('click', () => {
     { name: 'archived', label: 'Archived', type: 'checkbox', value: list.archived },
   ], async (v) => {
     await api(`/api/v1/todo/lists/${list.id}`, { method: 'PUT', body: JSON.stringify(v) });
-    await loadLists();
     await renderTasks();
     toast('List saved.');
   });
@@ -1440,7 +1454,6 @@ function deleteList(list) {
       tasks.scope = 'agenda';
       tasks.listId = 0;
     }
-    await loadLists();
     await renderTasks();
   });
 }
@@ -1465,7 +1478,6 @@ $('quick-add').addEventListener('submit', async (e) => {
     });
     $('quick-title').value = '';
     $('quick-due').value = '';
-    await loadLists();
     await renderTasks();
   } catch (err) {
     showError(err);
@@ -1479,12 +1491,20 @@ async function renderTasks() {
   $('edit-list').hidden = tasks.scope !== 'list';
   $('delete-list').hidden = tasks.scope !== 'list';
 
+  // The lists are refreshed here, at the top, rather than at the end of each
+  // branch. The pane header names the list being looked at and reads that name
+  // out of tasks.lists, so loading them afterwards renders the header from the
+  // previous load: rename a list and the sidebar row changes while the heading
+  // above the tasks still says the old name. Reloading first also removes the
+  // race the lazy loader had, which ran loadLists() and renderTasks() together
+  // and let whichever request answered first decide what the header said.
+  await loadLists();
+
   // Notes and the calendar build their own controls into the pane rather than
   // borrowing the task quick-add: a note takes a date but no priority, and the
   // calendar takes a month.
   if (tasks.scope === 'notes' || tasks.scope === 'calendar') {
     await (tasks.scope === 'notes' ? renderNotes(body) : renderCalendar(body));
-    await loadLists();
     return;
   }
 
@@ -1506,7 +1526,6 @@ async function renderTasks() {
       for (const t of items) body.append(taskRow(t, agenda.today));
     }
     if (!any) body.append(el('div', { class: 'empty muted', text: 'Nothing outstanding.' }));
-    await loadLists();
     return;
   }
 
@@ -1524,7 +1543,6 @@ async function renderTasks() {
     return;
   }
   for (const t of items) body.append(taskRow(t, today, tasks.scope !== 'list'));
-  await loadLists();
 }
 
 function taskRow(t, today, showList = false) {
@@ -1896,6 +1914,310 @@ function showImportResult(box, result, message) {
   if (result.errors && result.errors.length) {
     box.append(el('ul', { class: 'import-errors' },
       result.errors.map((e) => el('li', { text: `Row ${e.row}: ${e.message}` }))));
+  }
+}
+
+/* ================= SCRATCH ================= */
+//
+// A pad is a title and a body and nothing else — no format, no rendering, no
+// structure to keep valid. What makes it worth having is next door in the
+// chat: a reply lands in the transcript, which is a log and is not editable,
+// and the pad is where it goes to be worked over.
+//
+// Saving runs on a timer rather than on a button. A scratch pad someone has to
+// remember to save is one that loses work, and it loses it silently — the tab
+// closes and the text was never anywhere. The button stays in the header all
+// the same, for the moment after a long paste when a timer is not reassuring.
+
+const pad = {
+  docs: [],
+  // The open document. 0 means none, which is where the pane starts and where
+  // it returns to when the open one is deleted.
+  id: 0,
+  // The text as the server last accepted it. Compared against the boxes to
+  // decide whether a save is owed, so an idle pad does not write a row every
+  // second for the rest of the session.
+  savedTitle: '',
+  savedBody: '',
+  timer: null,
+  saving: false,
+  maxBody: 1 << 20,
+};
+
+const PAD_SAVE_DELAY = 800;
+
+async function loadPads() {
+  const data = await api('/api/v1/scratch');
+  pad.docs = data.docs || [];
+  if (data.max_body) pad.maxBody = data.max_body;
+  renderPads();
+  // Arriving at an empty pane is a dead end — the first thing anyone would do
+  // is click the top row, so do it for them. Only when nothing is open yet:
+  // reloading the list must never move off the document being edited.
+  if (!pad.id && pad.docs.length) await openPad(pad.docs[0].id);
+  else if (!pad.docs.length) showPad(null);
+}
+
+function renderPads() {
+  const box = $('pads');
+  box.innerHTML = '';
+  for (const d of pad.docs) {
+    box.append(el('li', {
+      class: d.id === pad.id ? 'active' : '',
+      title: d.updated_at ? `Changed ${new Date(d.updated_at).toLocaleString()}` : '',
+      onclick: () => { openPad(d.id).catch(showError); },
+    },
+    el('span', { class: 'pad-name', text: d.title }),
+    el('span', { class: 'muted list-count', text: compactCount(d.chars || 0) }),
+    el('button', {
+      class: 'session-del', text: '×', type: 'button',
+      title: `Delete "${d.title}"`,
+      'aria-label': `Delete pad ${d.title}`,
+      onclick: (e) => { e.stopPropagation(); deletePad(d); },
+    }),
+    d.preview ? el('span', { class: 'pad-peek', text: d.preview }) : null));
+  }
+  if (!pad.docs.length) box.append(el('li', { class: 'muted', text: 'No pads yet.' }));
+}
+
+// showPad puts a document on screen, or clears the pane when given null. It
+// also declares the document clean, so it must not be handed text the server
+// has not accepted — that would mark unsaved edits as saved.
+function showPad(doc) {
+  const title = $('pad-title');
+  const text = $('pad-text');
+  pad.id = doc ? doc.id : 0;
+  pad.savedTitle = doc ? doc.title : '';
+  pad.savedBody = doc ? doc.body || '' : '';
+  title.value = pad.savedTitle;
+  text.value = pad.savedBody;
+  title.disabled = !doc;
+  text.disabled = !doc;
+  for (const id of ['pad-copy', 'pad-save', 'pad-download', 'pad-delete']) $(id).hidden = !doc;
+  padCount();
+  padState(doc ? padSavedLabel(doc.updated_at) : '');
+  renderPads();
+}
+
+function padSavedLabel(iso) {
+  if (!iso) return 'Saved';
+  return `Saved ${new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+}
+
+function padState(msg) { $('pad-state').textContent = msg; }
+
+function padCount() {
+  const text = $('pad-text').value;
+  const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+  $('pad-count').textContent = pad.id
+    ? `${words} word${words === 1 ? '' : 's'} · ${text.length} character${text.length === 1 ? '' : 's'}`
+    : '';
+}
+
+async function openPad(id) {
+  // The pad being left may have keystrokes the timer has not written yet.
+  // Flushing before the fetch rather than after it is what stops the new
+  // document's text being saved over the old one's row.
+  await flushPad();
+  showPad(await api(`/api/v1/scratch/${id}`));
+}
+
+function padDirty() {
+  return pad.id !== 0
+    && ($('pad-title').value !== pad.savedTitle || $('pad-text').value !== pad.savedBody);
+}
+
+function schedulePadSave() {
+  padCount();
+  if (!padDirty()) return;
+  padState('Unsaved…');
+  clearTimeout(pad.timer);
+  pad.timer = setTimeout(() => { savePad().catch(showError); }, PAD_SAVE_DELAY);
+}
+
+// savePad writes the open document. It is safe to call when nothing has
+// changed, and a second call while one is in flight does nothing rather than
+// racing the first onto the same row.
+async function savePad() {
+  clearTimeout(pad.timer);
+  pad.timer = null;
+  if (!pad.id || pad.saving || !padDirty()) return;
+
+  const id = pad.id;
+  const title = $('pad-title').value;
+  const body = $('pad-text').value;
+  if (body.length > pad.maxBody) {
+    padState('Too long to save');
+    showError(new Error(`A pad holds ${compactCount(pad.maxBody)} characters; this one has ${compactCount(body.length)}.`));
+    return;
+  }
+  pad.saving = true;
+  padState('Saving…');
+  try {
+    const doc = await api(`/api/v1/scratch/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ title, body }),
+    });
+    // Only mark it clean if the pane is still showing the same document —
+    // switching away mid-request must not declare the new one saved.
+    if (pad.id === id) {
+      pad.savedTitle = doc.title;
+      pad.savedBody = doc.body || '';
+      // The server names a pad saved with a blank title, so say what it chose
+      // rather than leaving the box empty and the sidebar reading "Untitled".
+      if ($('pad-title').value.trim() === '') {
+        $('pad-title').value = doc.title;
+        pad.savedTitle = doc.title;
+      }
+      padState(padSavedLabel(doc.updated_at));
+    }
+    await refreshPadList();
+  } catch (err) {
+    padState('Not saved');
+    throw err;
+  } finally {
+    pad.saving = false;
+  }
+}
+
+// flushPad writes anything outstanding and waits for it: the way out of the
+// view, and the way into another document.
+async function flushPad() {
+  clearTimeout(pad.timer);
+  pad.timer = null;
+  if (!padDirty()) return;
+  try {
+    await savePad();
+  } catch (err) {
+    showError(err);
+  }
+}
+
+// The sidebar carries titles, previews and sizes, so it is refetched after a
+// save — but showPad() must not run, or the caret jumps to the end of the box
+// somebody is still typing in.
+async function refreshPadList() {
+  const data = await api('/api/v1/scratch');
+  pad.docs = data.docs || [];
+  renderPads();
+}
+
+async function newPad(title = '', body = '') {
+  await flushPad();
+  const doc = await api('/api/v1/scratch', {
+    method: 'POST',
+    body: JSON.stringify({ title, body }),
+  });
+  await refreshPadList();
+  showPad(doc);
+  return doc;
+}
+
+function deletePad(doc) {
+  confirmDelete(`the pad "${doc.title}"`, async () => {
+    await api(`/api/v1/scratch/${doc.id}`, { method: 'DELETE' });
+    if (pad.id === doc.id) {
+      // Nothing is owed on a row that no longer exists, and writing the timer
+      // out after the delete would resurrect it.
+      clearTimeout(pad.timer);
+      pad.timer = null;
+      pad.id = 0;
+    }
+    await refreshPadList();
+    if (!pad.id) {
+      if (pad.docs.length) await openPad(pad.docs[0].id);
+      else showPad(null);
+    }
+  });
+}
+
+$('new-pad').addEventListener('click', () => {
+  newPad().then(() => $('pad-text').focus()).catch(showError);
+});
+$('pad-title').addEventListener('input', schedulePadSave);
+$('pad-text').addEventListener('input', schedulePadSave);
+// Leaving a box is a stronger signal than the timer: write it now rather than
+// in another second.
+$('pad-title').addEventListener('blur', () => { savePad().catch(showError); });
+$('pad-text').addEventListener('blur', () => { savePad().catch(showError); });
+$('pad-save').addEventListener('click', () => { savePad().catch(showError); });
+$('pad-delete').addEventListener('click', () => {
+  const doc = pad.docs.find((d) => d.id === pad.id);
+  if (doc) deletePad(doc);
+});
+
+$('pad-copy').addEventListener('click', async () => {
+  try {
+    await navigator.clipboard.writeText($('pad-text').value);
+    toast('Copied.');
+  } catch {
+    // The clipboard API is refused outright on a page served over plain http,
+    // which is how this server is usually reached. Selecting the text leaves
+    // the browser's own copy one keystroke away instead of nothing at all.
+    $('pad-text').select();
+    toast('Selected — press Ctrl+C to copy.');
+  }
+});
+
+$('pad-download').addEventListener('click', () => {
+  const name = ($('pad-title').value.trim() || 'pad').replace(/[^\w.\- ]+/g, '_');
+  const url = URL.createObjectURL(new Blob([$('pad-text').value], { type: 'text/plain' }));
+  const a = el('a', { href: url, download: `${name}.txt` });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+});
+
+// Ctrl/Cmd-S is what everyone presses in a text box, and the browser's own
+// answer to it — save this page to disk — is never what was meant.
+document.addEventListener('keydown', (e) => {
+  if (state.view !== 'scratch') return;
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    savePad().catch(showError);
+  }
+});
+
+// A tab closing is the one exit that cannot be awaited. keepalive lets the
+// request outlive the page. It is best effort, which is why the timer is short
+// and every other way out of the pad flushes properly.
+window.addEventListener('beforeunload', () => {
+  if (!padDirty()) return;
+  fetch(`/api/v1/scratch/${pad.id}`, {
+    method: 'PUT',
+    keepalive: true,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.token}` },
+    body: JSON.stringify({ title: $('pad-title').value, body: $('pad-text').value }),
+  }).catch(() => {});
+});
+
+// sendToPad backs the button on a message in the transcript. It appends to
+// whatever is open, because the shape this is for is a conversation being
+// collected into one document; with nothing open it starts a pad and names it
+// from the first line of what was sent.
+async function sendToPad(text) {
+  try {
+    await flushPad();
+    if (!pad.id) {
+      const first = text.split('\n').find((l) => l.trim()) || 'Untitled';
+      const made = await newPad(first.trim().slice(0, 60), `${text}\n`);
+      toast(`Started the pad "${made.title}".`);
+      return;
+    }
+    // Reread rather than trusting the box: the pad may not have been opened
+    // this session, and appending to a stale copy would drop whatever was
+    // written into it from somewhere else.
+    const doc = await api(`/api/v1/scratch/${pad.id}`);
+    showPad(doc);
+    const box = $('pad-text');
+    box.value = doc.body.trimEnd() ? `${doc.body.trimEnd()}\n\n${text}\n` : `${text}\n`;
+    await savePad();
+    padCount();
+    box.scrollTop = box.scrollHeight;
+    toast(`Added to the pad "${doc.title}".`);
+  } catch (err) {
+    showError(err);
   }
 }
 
@@ -3634,9 +3956,7 @@ function repoResultCard(m) {
   return el('div', { class: 'repo-result' }, [
     el('div', { class: 'repo-result-head' }, [
       el('span', { class: 'repo-result-id', text: m.id }),
-      m.fit && m.fit.verdict
-        ? el('span', { class: `repo-fit ${m.fit.verdict}`, text: m.fit.verdict })
-        : null,
+      fitBadge(m.fit, m.host_fits),
       // A gated repository needs a token and accepted terms. Finding that out
       // when the download fails is finding it out too late.
       m.gated ? el('span', { class: 'repo-gated', text: 'gated' }) : null,
@@ -3655,6 +3975,35 @@ function repoResultCard(m) {
       : null,
     detailHost,
   ]);
+}
+
+/* ---- the fit badge ----
+   A verdict is a statement about one machine, and until this server had a
+   fleet there was only ever one it could be about. Now there are several, and
+   "fits" without a name is an answer to a question nobody asked: what is being
+   decided is which box to put the weights on.
+
+   The name is omitted when the server has no fleet, where it would be noise —
+   the badge then reads exactly as it always did. */
+function fitBadge(fit, hostFits) {
+  if (!fit || !fit.verdict) return null;
+  const host = fit.host || '';
+  const lines = [];
+  if (host) lines.push(`Best of ${(hostFits || []).length || 1} machine(s): ${host}.`);
+  // Every other machine's answer, so a red badge does not hide a green one on
+  // a box further down the list.
+  for (const f of hostFits || []) {
+    if (f.host === fit.host) continue;
+    lines.push(`${f.host || 'this server'}: ${f.verdict}`);
+  }
+  // The notes are where the reason lives — which is the part worth reading
+  // when the verdict is not the one that was hoped for.
+  for (const note of fit.notes || []) lines.push(note);
+  return el('span', {
+    class: `repo-fit ${fit.verdict}`,
+    title: lines.join('\n'),
+    text: host ? `${fit.verdict} · ${host}` : fit.verdict,
+  });
 }
 
 // Counts on this page run from tens to tens of millions, and a column of full
@@ -3701,7 +4050,7 @@ function repoQuantRow(detail, q, opts = {}) {
     // not say which row is which. The file name does, and it is also what
     // ends up on the drive.
     el('span', { class: 'repo-quant-file', text: (q.filename || '').split('/').pop() }),
-    fit ? el('span', { class: `repo-fit ${fit.verdict || ''}`, text: fit.verdict || '' }) : null,
+    fitBadge(fit),
     // The download size and the memory it will occupy are different numbers
     // and both matter: one decides whether it fits on the drive, the other
     // whether it fits in the card.
@@ -3804,9 +4153,7 @@ function repoFileCard(f, vocab) {
       !f.missing && f.verified
         ? el('span', { class: 'repo-badge verified', title: `sha256 ${f.sha256}`, text: 'verified' })
         : null,
-      f.fit && f.fit.verdict
-        ? el('span', { class: `repo-fit ${f.fit.verdict}`, text: f.fit.verdict })
-        : null,
+      fitBadge(f.fit),
     ]),
     el('div', { class: 'muted repo-file-facts', text: facts }),
     f.hub_id ? el('div', { class: 'muted repo-file-src', text: f.hub_id }) : null,
@@ -3923,6 +4270,8 @@ const hubView = {
   // are deliberately different mechanisms — see hubTagPicker and hubMemStops.
   tags: [], maxGB: 0,
   results: null, next: '', vocab: null, rate: null, hasToken: false,
+  // The machines fit verdicts on this screen are about — see paintHubRate.
+  fitHosts: [],
   open: null, repoReady: false, repoNote: '',
 };
 
@@ -3946,6 +4295,7 @@ async function renderAdminHub(body) {
   if (vocab) hubView.vocab = vocab.tags || {};
   if (status.rate_limit) hubView.rate = status.rate_limit;
   hubView.hasToken = Boolean(status.has_token);
+  hubView.fitHosts = status.fit_hosts || [];
 
   const st = (repo && repo.status) || {};
   hubView.repoReady = Boolean(st.available && st.initialised);
@@ -3974,6 +4324,23 @@ async function renderAdminHub(body) {
 function paintHubRate(host) {
   host.innerHTML = '';
   const rl = hubView.rate;
+  const hosts = hubView.fitHosts || [];
+  // Which machines the badges below are about. A fleet server grades against
+  // its nodes and not against itself, and with nothing declared it grades
+  // against nothing at all — which is worth saying out loud, because the
+  // symptom is a page of "unknown" that looks like a fault in the estimator.
+  const graded = hosts.length
+    ? el('span', { class: 'muted', title:
+        'Fit verdicts describe these machines. A model is graded against each '
+        + 'and the badge names the one that runs it best.',
+      text: `fit graded on ${hosts.join(', ')}` })
+    : el('span', { class: 'muted', title:
+        'No machine is declared as one that runs models, so nothing can be '
+        + 'graded and every verdict reads "unknown". Set "node" on the backend '
+        + 'that serves your models — the name it was registered under with '
+        + '-add-client — or run a backend on this host.',
+      text: 'no machine declared — fit unknown' });
+
   const token = hubView.hasToken
     ? el('span', { class: 'hub-token ok', title:
         'Requests are attributed to the configured account, which has its own '
@@ -3986,7 +4353,7 @@ function paintHubRate(host) {
       text: 'anonymous' });
 
   if (!rl || !rl.quota) {
-    host.append(el('div', { class: 'hub-rate-head' }, [token]));
+    host.append(el('div', { class: 'hub-rate-head' }, [token, graded]));
     return;
   }
   const used = Math.max(0, rl.quota - rl.remaining);
@@ -3996,6 +4363,7 @@ function paintHubRate(host) {
       token,
       el('span', { class: 'muted', text:
         `${rl.remaining} of ${rl.quota} Hub requests left, resetting in ${rl.reset_seconds}s` }),
+      graded,
     ]),
     el('div', { class: 'repo-bar' }, [
       el('div', { class: `repo-bar-fill ${pct > 85 ? 'tight' : ''}`, style: `width:${pct}%` }),
@@ -4436,9 +4804,7 @@ function hubResultCard(m) {
   const card = el('div', { class: 'repo-result' }, [
     el('div', { class: 'repo-result-head' }, [
       el('span', { class: 'repo-result-id', text: m.id }),
-      m.fit && m.fit.verdict
-        ? el('span', { class: `repo-fit ${m.fit.verdict}`, text: m.fit.verdict })
-        : null,
+      fitBadge(m.fit, m.host_fits),
       m.gated ? el('span', { class: 'repo-gated', title:
         'This repository needs a token and its terms accepted before it can be fetched.',
       text: 'gated' }) : null,
@@ -5063,12 +5429,15 @@ async function renderAdminBackends(body) {
   const declared = new Set(d.declared || []);
   const rows = (d.backends || []).map((b) => [
     b.name, b.kind, b.model || '—', b.status, probedAge(b.probed_at),
+    // Which machine serves it, and so whose hardware decides every fit verdict
+    // for the models it runs. Blank in the data means this server.
+    b.node || (b.kind === 'anthropic' ? '—' : 'this server'),
     b.status_note || '', b.name === d.default ? 'default' : (b.name === d.fallback ? 'fallback' : ''),
     declared.has(b.name) ? 'UI' : 'backends.json',
     d.editable && declared.has(b.name) ? removeBackendButton(b.name) : '',
   ]);
   body.append(table(
-    ['Name', 'Kind', 'Model', 'Status', 'Probed', 'Note', 'Role', 'Source', ''], rows));
+    ['Name', 'Kind', 'Model', 'Status', 'Probed', 'Runs on', 'Note', 'Role', 'Source', ''], rows));
 
   if (d.editable) body.append(addBackendForm(d));
 
@@ -5121,6 +5490,11 @@ function addBackendForm(d) {
   const baseURL = el('input', { type: 'text', placeholder: 'http://127.0.0.1:11434/v1' });
   const model = el('input', { type: 'text', placeholder: 'model (blank = backend default)' });
   const keyEnv = el('input', { type: 'text', placeholder: 'API key env var' });
+  // Which machine this backend runs on. Nothing infers it from the URL: a
+  // hostname says nothing reliable about which box answers, and the cost of
+  // guessing wrong is a fit verdict computed against the wrong hardware, which
+  // looks exactly as confident as a right one.
+  const nodeName = el('input', { type: 'text', placeholder: 'runs on node (blank = this server)' });
 
   // Anthropic needs no URL and does need a key variable; every local kind is
   // the other way round. Following the kind keeps the form from asking for
@@ -5130,12 +5504,20 @@ function addBackendForm(d) {
     baseURL.disabled = anthropic;
     baseURL.placeholder = anthropic ? 'not needed for anthropic' : 'http://127.0.0.1:11434/v1';
     if (anthropic && !keyEnv.value) keyEnv.value = 'ANTHROPIC_API_KEY';
+    // A cloud backend runs on hardware nobody here can see, so there is no
+    // node to name. The server refuses it too; disabling the field says so
+    // before the form is submitted rather than after.
+    nodeName.disabled = anthropic;
+    nodeName.placeholder = anthropic
+      ? 'not applicable — runs on Anthropic’s hardware'
+      : 'runs on node (blank = this server)';
+    if (anthropic) nodeName.value = '';
   };
   kind.addEventListener('change', follow);
   follow();
 
   const form = el('form', { class: 'row-form' },
-    name, kind, baseURL, model, keyEnv,
+    name, kind, baseURL, model, keyEnv, nodeName,
     el('button', { type: 'submit', text: 'Add backend' }));
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -5148,6 +5530,7 @@ function addBackendForm(d) {
           base_url: kind.value === 'anthropic' ? '' : baseURL.value.trim(),
           model: model.value.trim(),
           api_key_env: keyEnv.value.trim(),
+          node: kind.value === 'anthropic' ? '' : nodeName.value.trim(),
         }),
       });
       toast(`Backend "${name.value.trim()}" added`);

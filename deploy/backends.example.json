@@ -20,6 +20,15 @@
       "memory": "20GB"
     },
     {
+      "name": "tycho",
+      "kind": "llamacpp",
+      "base_url": "http://192.168.1.40:8080/v1",
+      "api_key_env": "LLAMA_API_KEY",
+      "model": "qwen2.5:32b",
+      "memory": "20GB",
+      "node": "tycho"
+    },
+    {
       "name": "claude",
       "kind": "anthropic",
       "api_key_env": "ANTHROPIC_API_KEY",

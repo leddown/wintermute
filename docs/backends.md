@@ -216,7 +216,10 @@ So the catalog marks the profile: **if no non-cloud backend has a loopback
 `base_url`, `runs_inference` is false**, and everything downstream reports
 unknown rather than guessing —
 
-| Surface | With a local backend | Without one |
+The table below is about *this* host. A backend declared on a fleet node is
+graded against that node instead — see below.
+
+| Surface | With a local backend | Without one, and no node declared |
 |---|---|---|
 | `GET /api/v1/system` | the host's GPUs, VRAM, RAM | same figures, `runs_inference: false`, plus a warning naming what they are not |
 | `estimate_model_fit` | a verdict | `unknown`, with the memory footprint still filled in — that is a property of the model and holds anywhere |
@@ -231,9 +234,51 @@ serving its own models through its external name therefore reads as remote, and
 the symptom is fit estimates going *unknown* rather than *wrong*. Point that
 backend at `localhost` to get them back.
 
-Restoring real estimates across the network needs the inference host to report
-its own hardware. That is not built; the design is in
-[hardware-nodes.md](hardware-nodes.md).
+### Getting real estimates back, across the network
+
+The loopback rule above decides whether *this* host is evidence. It does not
+have to be the only host. A machine running `wintermute-node` already reports
+its GPUs, their memory and its RAM, and that is everything the fit calculator
+needs — so a backend can name the machine it runs on:
+
+```json
+{
+  "name": "tycho",
+  "kind": "llamacpp",
+  "base_url": "http://192.168.1.40:8080/v1",
+  "node": "tycho"
+}
+```
+
+`node` is the name the host was registered under with
+`wintermuted -add-client <name> -kind node`. Getting the agent onto that host is
+one command — see
+[Installing the agent](hardware-nodes.md#installing-the-agent). With it declared, every verdict on
+the Hub, the Repository and the Models list is computed against *that* machine's
+reported hardware, and the badge names it — `fits · tycho`. A model is graded
+against every declared machine and the best answer wins, which is the question
+actually being asked: not "does this run here", but "does anything I own run
+this, and which".
+
+It is **declared, never inferred**. Nothing matches `base_url`'s host against a
+node's hostname or address. That would put DNS and NAT in the path of a question
+whose wrong answer is silent — the verdict would simply describe another
+machine, and look exactly as confident doing it. Declaring a `node` on a cloud
+backend is refused outright, since that hardware is nobody's to report.
+
+Two things keep the verdict honest once the link exists:
+
+- **A stale node is not graded.** Past five minutes without a report its free
+  VRAM stops being evidence about the present, and it reads `unknown` — a box
+  switched off last night still has a plausible-looking profile in the database.
+- **Free VRAM arrives as a total across cards.** On a multi-GPU node the split
+  is not on the wire, so all reported use is charged to the largest card. That
+  under-promises rather than over-promises: a model reported as fitting and then
+  failing to load is the failure worth avoiding.
+
+With no backend declared on a node and none on loopback, nothing is graded and
+every verdict reads `unknown` — the Hub screen says so in as many words, because
+the alternative is a page of grey badges that looks like a broken estimator.
 
 ## Gotchas that will cost you performance
 

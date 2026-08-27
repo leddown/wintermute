@@ -64,7 +64,7 @@ func (s *Server) handleHubSearch(w http.ResponseWriter, r *http.Request) {
 		InferenceProvider: q.Get("inference_provider"),
 		Filters:           q["filter"],
 		Cursor:            q.Get("cursor"),
-		Hardware:          s.catalog.Hardware(r.Context()),
+		Hosts:             s.catalog.Hosts(r.Context()),
 		ContextTokens:     queryInt(r, "context", defaultPlanContext),
 	}
 	// A search with no terms at all is a browse of the whole Hub by whatever
@@ -92,7 +92,7 @@ func (s *Server) handleHubSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHubDetail(w http.ResponseWriter, r *http.Request) {
 	detail, err := s.catalog.Hub().Detail(r.Context(), r.PathValue("id"),
-		s.catalog.Hardware(r.Context()), queryInt(r, "context", defaultPlanContext))
+		s.catalog.Hosts(r.Context()), queryInt(r, "context", defaultPlanContext))
 	if err != nil {
 		s.failHub(w, "hub detail", err)
 		return
@@ -176,7 +176,22 @@ func (s *Server) handleHubTags(w http.ResponseWriter, r *http.Request) {
 // unreachable or the window is spent — which is exactly when it is worth
 // asking.
 func (s *Server) handleHubStatus(w http.ResponseWriter, r *http.Request) {
-	s.writeHub(w, map[string]any{"has_token": s.catalog.Hub().HasToken()})
+	// Which machines the verdicts on this screen are about. Without it a page
+	// of "unknown" badges looks like a broken estimator rather than what it
+	// is: nothing has been declared as the machine that runs the models.
+	hosts := s.catalog.Hosts(r.Context())
+	names := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		if h.Host == "" {
+			names = append(names, "this server")
+			continue
+		}
+		names = append(names, h.Host)
+	}
+	s.writeHub(w, map[string]any{
+		"has_token": s.catalog.Hub().HasToken(),
+		"fit_hosts": names,
+	})
 }
 
 // handleHubWhoAmI reports who the configured token belongs to and what it may

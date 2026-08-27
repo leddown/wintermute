@@ -19,6 +19,10 @@ STATE_DIR="${WINTERMUTE_STATE_DIR:-/var/lib/wintermute}"
 BIN_DIR="${WINTERMUTE_BIN_DIR:-/usr/local/bin}"
 SERVER_BIN="$BIN_DIR/wintermuted"
 CLIENT_BIN="$BIN_DIR/wintermute"
+# Where the built fleet agent is left for new hosts to install from, over HTTP,
+# with the token they were issued. Under the state directory because it is
+# build output the server serves, not configuration anyone edits.
+AGENT_DIR="${WINTERMUTE_NODE_AGENT_DIR:-$STATE_DIR/node-agent}"
 # Not the binary's own default of :8080 — that is llama-server's port, and on a
 # host serving its own models the two collide.
 LISTEN_ADDR="${WINTERMUTE_ADDR:-:8088}"
@@ -140,6 +144,19 @@ LLAMA_API_KEY=
 ANTHROPIC_API_KEY=
 
 HUGGINGFACE_TOKEN=
+
+# Fleet telemetry, in its own database file. Remote hosts report here, and it is
+# what lets a model be judged against the machine that would actually run it
+# rather than against this one.
+WINTERMUTE_METRICS_DB=$STATE_DIR/metrics.db
+
+# The built agent a new host installs from, over HTTP with its own token:
+#
+#   curl -fsSL -H "Authorization: Bearer \$TOKEN" SERVER/api/v1/node-agent/install.sh | sudo sh -s -- --token "\$TOKEN"
+#
+# Filled by this script and by update.sh. Unset it to turn the install endpoints
+# off entirely.
+WINTERMUTE_NODE_AGENT_DIR=$AGENT_DIR
 EOF_ENV
   echo "    wrote $ENV_FILE"
 else
@@ -185,6 +202,21 @@ trap 'rm -rf "$BUILD_DIR"' EXIT
 sudo install -m 0755 "$BUILD_DIR/wintermuted" "$SERVER_BIN"
 sudo install -m 0755 "$BUILD_DIR/wintermute" "$CLIENT_BIN"
 echo "    installed $SERVER_BIN and $CLIENT_BIN"
+
+# The fleet agent, for both architectures a home fleet is likely to hold. No
+# cgo anywhere in this tree, so cross-compiling is just a pair of env vars —
+# the same property that makes the Windows client a single build.
+echo "==> Building the fleet agent for remote hosts"
+(cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 go build -o "$BUILD_DIR/wintermute-node.amd64" ./cmd/wintermute-node)
+(cd "$REPO_ROOT" && GOOS=linux GOARCH=arm64 go build -o "$BUILD_DIR/wintermute-node.arm64" ./cmd/wintermute-node)
+sudo mkdir -p "$AGENT_DIR"
+sudo install -m 0644 "$BUILD_DIR/wintermute-node.amd64" "$AGENT_DIR/wintermute-node.amd64"
+sudo install -m 0644 "$BUILD_DIR/wintermute-node.arm64" "$AGENT_DIR/wintermute-node.arm64"
+sudo install -m 0644 "$REPO_ROOT/deploy/wintermute-node.service" "$AGENT_DIR/wintermute-node.service"
+sudo install -m 0644 "$REPO_ROOT/deploy/wintermute-node.env.example" "$AGENT_DIR/node.env.example"
+(cd "$AGENT_DIR" && sudo sh -c 'sha256sum wintermute-node.amd64 wintermute-node.arm64 wintermute-node.service node.env.example > SHA256SUMS')
+sudo chmod 0644 "$AGENT_DIR/SHA256SUMS"
+echo "    built linux/amd64 and linux/arm64 into $AGENT_DIR"
 
 echo "==> Applying database migrations"
 # As the service user, so the database and its -wal/-shm files end up owned by

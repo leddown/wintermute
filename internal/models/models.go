@@ -93,6 +93,18 @@ type Backend struct {
 	// annotate.
 	Memory      string `json:"memory,omitempty"`
 	MemoryBytes int64  `json:"memory_bytes,omitempty"`
+
+	// Node names the fleet host this backend runs on, when it is not this
+	// machine. It is declared for the same reason Memory is: the server talks
+	// to an inference server over HTTP, and an address tells it nothing about
+	// which machine is behind it.
+	//
+	// Nothing is inferred from BaseURL. Matching a hostname or an IP against
+	// the fleet would put DNS in the path of a question whose wrong answer is
+	// silent — the fit calculator would grade a model against the wrong
+	// machine and look just as confident doing it. An operator who wants a
+	// node's hardware consulted says so here.
+	Node string `json:"node,omitempty"`
 }
 
 // Model is one model as reported by a backend, enriched with whatever the

@@ -89,6 +89,15 @@ type BackendedEntry struct {
 	// HTTP, which does not report what the weights cost, and may not even be
 	// on this machine — so the number is declared here or not known at all.
 	Memory string `json:"memory,omitempty"`
+	// Node names the fleet node this backend runs on — the name it was
+	// registered under with -add-client. Declaring it is what lets that host's
+	// reported GPU and memory be used to judge whether a model fits, instead
+	// of this server's.
+	//
+	// Optional, and omitting it means the backend is assumed to run here. A
+	// name that matches no node is not an error at load time: nodes appear
+	// when their agent first reports, which may be after this file is read.
+	Node string `json:"node,omitempty"`
 }
 
 // defaultBackendsJSON is written by -init and used when no file exists: a
@@ -209,6 +218,14 @@ func (f *BackendsFile) resolve() ([]models.Backend, error) {
 			Model:   e.Model,
 			Cloud:   !kind.Local(),
 			Memory:  strings.TrimSpace(e.Memory),
+			Node:    strings.TrimSpace(e.Node),
+		}
+		// A cloud backend runs on somebody else's hardware by definition, so
+		// pointing one at a node is a contradiction rather than a preference.
+		// Saying so here beats silently ignoring it and leaving an operator to
+		// wonder why the node never appears as a candidate.
+		if b.Node != "" && b.Cloud {
+			return nil, fmt.Errorf("backend %q is a cloud backend, so it cannot run on node %q", e.Name, b.Node)
 		}
 		if b.Memory != "" {
 			bytes, err := ParseMemory(b.Memory)

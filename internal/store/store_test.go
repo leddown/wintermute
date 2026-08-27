@@ -965,3 +965,58 @@ func TestTagsNormaliseAndDeduplicate(t *testing.T) {
 		t.Error("a tag with no subject must be refused")
 	}
 }
+
+// The node a backend runs on is configuration, not telemetry: it has to come
+// back out of the database the way it went in, because every fit verdict for
+// the models that backend serves is computed from that machine's hardware.
+func TestBackendConfigKeepsItsNode(t *testing.T) {
+	s := newTestStore(t)
+	ctx := context.Background()
+
+	if err := s.SaveBackendConfig(ctx, BackendConfig{
+		Name: "big", Kind: "llamacpp", BaseURL: "http://192.168.1.40:8080/v1", Node: "tycho",
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	// A backend with no node declared runs on this server, and the column has
+	// to say so as an empty string rather than a NULL nothing can scan.
+	if err := s.SaveBackendConfig(ctx, BackendConfig{
+		Name: "here", Kind: "llamacpp", BaseURL: "http://127.0.0.1:8080/v1",
+	}); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	got, err := s.BackendConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	by := map[string]BackendConfig{}
+	for _, b := range got {
+		by[b.Name] = b
+	}
+	if by["big"].Node != "tycho" {
+		t.Errorf("node = %q, want %q", by["big"].Node, "tycho")
+	}
+	if by["here"].Node != "" {
+		t.Errorf("node = %q for a local backend, want empty", by["here"].Node)
+	}
+
+	// Moving a backend to another machine is an update, not a second row.
+	if err := s.SaveBackendConfig(ctx, BackendConfig{
+		Name: "big", Kind: "llamacpp", BaseURL: "http://192.168.1.41:8080/v1", Node: "erebus",
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	after, err := s.BackendConfigs(ctx)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(after) != 2 {
+		t.Fatalf("%d backends after an update, want 2", len(after))
+	}
+	for _, b := range after {
+		if b.Name == "big" && b.Node != "erebus" {
+			t.Errorf("node = %q after moving it, want %q", b.Node, "erebus")
+		}
+	}
+}

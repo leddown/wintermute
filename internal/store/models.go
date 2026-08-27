@@ -150,11 +150,15 @@ func (s *Store) Catalog(ctx context.Context) ([]CatalogRow, error) {
 // See 0011_backend_config.sql for why that is not a limitation to be worked
 // around later.
 type BackendConfig struct {
-	Name      string    `json:"name"`
-	Kind      string    `json:"kind"`
-	BaseURL   string    `json:"base_url,omitempty"`
-	Model     string    `json:"model,omitempty"`
-	APIKeyEnv string    `json:"api_key_env,omitempty"`
+	Name      string `json:"name"`
+	Kind      string `json:"kind"`
+	BaseURL   string `json:"base_url,omitempty"`
+	Model     string `json:"model,omitempty"`
+	APIKeyEnv string `json:"api_key_env,omitempty"`
+	// Node names the fleet host this backend runs on. Empty means this one.
+	// See 0020_backend_node.sql for why it is declared and not inferred from
+	// BaseURL.
+	Node      string    `json:"node,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -162,7 +166,7 @@ type BackendConfig struct {
 // BackendConfigs lists the declared backends, by name.
 func (s *Store) BackendConfigs(ctx context.Context) ([]BackendConfig, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT name, kind, base_url, model, api_key_env, created_at, updated_at
+		`SELECT name, kind, base_url, model, api_key_env, node, created_at, updated_at
 		 FROM backend_config ORDER BY name`)
 	if err != nil {
 		return nil, fmt.Errorf("list backend config: %w", err)
@@ -173,7 +177,7 @@ func (s *Store) BackendConfigs(ctx context.Context) ([]BackendConfig, error) {
 	for rows.Next() {
 		var b BackendConfig
 		if err := rows.Scan(&b.Name, &b.Kind, &b.BaseURL, &b.Model, &b.APIKeyEnv,
-			&b.CreatedAt, &b.UpdatedAt); err != nil {
+			&b.Node, &b.CreatedAt, &b.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan backend config: %w", err)
 		}
 		out = append(out, b)
@@ -186,15 +190,16 @@ func (s *Store) BackendConfigs(ctx context.Context) ([]BackendConfig, error) {
 func (s *Store) SaveBackendConfig(ctx context.Context, b BackendConfig) error {
 	now := time.Now().UTC()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO backend_config (name, kind, base_url, model, api_key_env, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO backend_config (name, kind, base_url, model, api_key_env, node, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(name) DO UPDATE SET
 		   kind = excluded.kind,
 		   base_url = excluded.base_url,
 		   model = excluded.model,
 		   api_key_env = excluded.api_key_env,
+		   node = excluded.node,
 		   updated_at = excluded.updated_at`,
-		b.Name, b.Kind, b.BaseURL, b.Model, b.APIKeyEnv, now, now)
+		b.Name, b.Kind, b.BaseURL, b.Model, b.APIKeyEnv, b.Node, now, now)
 	if err != nil {
 		return fmt.Errorf("save backend config: %w", err)
 	}

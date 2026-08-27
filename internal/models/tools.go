@@ -23,7 +23,7 @@ func Register(reg *tool.Registry, cat *Catalog) error {
 		{
 			def: tool.Definition{
 				Name:        "system_capabilities",
-				Description: "Report the host's inference hardware: GPU model, total and free VRAM, compute capability, driver version, memory bandwidth, system RAM, and any neural accelerators. Call this before advising on which models can run, rather than assuming a typical machine.",
+				Description: "Report the inference hardware of every machine that could run a model — this host and each fleet node a backend is declared to run on: GPU model, total and free VRAM, compute capability, driver version, memory bandwidth, system RAM, and any neural accelerators. Call this before advising on which models can run, rather than assuming a typical machine. On a small server that serves no models itself, the machines that matter are the nodes, not this one.",
 				Risk:        tool.RiskRead,
 			},
 			handler: systemCapabilities(cat),
@@ -151,7 +151,20 @@ const searchSchema = `{
 
 func systemCapabilities(cat *Catalog) tool.Handler {
 	return func(ctx context.Context, _ json.RawMessage) (string, error) {
-		return encode(cat.Hardware(ctx))
+		// The local profile stays at the top level, where it has always been
+		// and where it is still the answer for a single-machine server. hosts
+		// is every machine a model could actually be run on, which on a fleet
+		// is a different set — and advising from this box's hardware there is
+		// how a perfectly runnable model gets ruled out.
+		local := cat.Hardware(ctx)
+		hosts := cat.Hosts(ctx)
+		out := map[string]any{"hardware": local, "hosts": hosts}
+		if len(hosts) == 0 {
+			out["note"] = "No machine is declared as one that runs models: this server " +
+				"serves none itself, and no backend names a fleet node. Nothing can be " +
+				"graded for fit until one does."
+		}
+		return encode(out)
 	}
 }
 
@@ -185,9 +198,16 @@ func estimateFit(cat *Catalog) tool.Handler {
 		if in.ParamsB <= 0 {
 			return "params_b must be greater than zero.", nil
 		}
-		hw := cat.Hardware(ctx)
-		fit := EstimateFit(in, hw)
-		return encode(map[string]any{"input": in, "fit": fit, "hardware": hw})
+		// Every machine, not this one: the model asking whether something fits
+		// wants to know if it can be run at all, and the answer "no" from the
+		// API server is not the answer when a node with a real GPU is standing
+		// by. The per-host grading goes back too, so it can say where.
+		hosts := cat.Hosts(ctx)
+		graded := EstimateFleetFit(in, hosts)
+		return encode(map[string]any{
+			"input": in, "fit": BestFit(graded), "hosts": graded,
+			"hardware": cat.PrimaryHost(ctx),
+		})
 	}
 }
 
