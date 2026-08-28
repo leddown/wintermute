@@ -79,13 +79,17 @@ type Server struct {
 	// errors keeps the detail behind the generic 5xx bodies this server
 	// returns, so an operator can read it in the browser rather than over SSH.
 	errors *errorLog
+	// touches throttles the last_seen_at write in the auth middleware, which
+	// is otherwise a disk flush on every authenticated request.
+	touches *touchTracker
 }
 
 // New builds a Server. A zero Workspace disables those routes rather than
 // registering handlers that would nil-panic on the first request.
 func New(a *agent.Agent, s *store.Store, serverTools *tool.Registry, cat *models.Catalog, ws Workspace, info ServerInfo, log *slog.Logger) *Server {
 	return &Server{agent: a, store: s, serverTools: serverTools, catalog: cat,
-		workspace: ws, info: info, log: log, errors: newErrorLog()}
+		workspace: ws, info: info, log: log, errors: newErrorLog(),
+		touches: newTouchTracker()}
 }
 
 // WithKnowledge attaches agent profiles and their libraries. Without it the

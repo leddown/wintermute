@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"wintermute/internal/store"
@@ -22,6 +23,50 @@ func clientFrom(ctx context.Context) *store.Client {
 		panic("api: no authenticated client in context")
 	}
 	return c
+}
+
+// touchInterval is how often a client's last_seen_at is actually rewritten.
+//
+// It used to be written on every authenticated request, which turned each one
+// into a disk flush: SQLite defaults to synchronous=FULL, so the UPDATE waits
+// on an fsync. Measured against the live server that was the whole difference
+// between a request with a valid token and one with a bad token — 55.8ms
+// against 2.3ms, for a 47-byte response — and an idle browser tab makes about
+// 26 authenticated requests a minute, so it was costing roughly a second and a
+// half of flush-blocked server time per minute, per open tab.
+//
+// A minute is chosen because of what the field is for: telling whether a
+// client is still around. Nothing reads it at a finer grain than that, and the
+// clients list shows a relative time.
+const touchInterval = time.Minute
+
+// touchTracker remembers when each client's last_seen_at was last written.
+//
+// Keyed by client id, which is bounded by the number of registered clients —
+// there is no eviction because there is nothing to evict: a client has to be
+// created deliberately, and a handful of rows cannot grow into a leak. An
+// empty tracker after a restart simply means the first request from each
+// client writes, which is correct.
+type touchTracker struct {
+	mu   sync.Mutex
+	seen map[int64]time.Time
+}
+
+func newTouchTracker() *touchTracker {
+	return &touchTracker{seen: make(map[int64]time.Time)}
+}
+
+// due reports whether this client's last_seen_at is stale enough to be worth
+// rewriting, and claims the slot if so. Claiming inside the lock is what keeps
+// concurrent requests from all deciding they are the one to write.
+func (t *touchTracker) due(id int64, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if last, ok := t.seen[id]; ok && now.Sub(last) < touchInterval {
+		return false
+	}
+	t.seen[id] = now
+	return true
 }
 
 // authenticate resolves a bearer token to a registered client. Tokens are
@@ -45,9 +90,12 @@ func (s *Server) authenticate(next http.HandlerFunc) http.Handler {
 			return
 		}
 
-		// Best-effort; a failed touch must not block the request.
-		if err := s.store.TouchClient(r.Context(), client.ID); err != nil {
-			s.log.Warn("touch client failed", "client", client.Name, "error", err)
+		// Best-effort, and at most once a minute per client — see touchInterval.
+		// A failed touch must not block the request.
+		if s.touches.due(client.ID, time.Now()) {
+			if err := s.store.TouchClient(r.Context(), client.ID); err != nil {
+				s.log.Warn("touch client failed", "client", client.Name, "error", err)
+			}
 		}
 
 		ctx := context.WithValue(r.Context(), clientContextKey, client)
