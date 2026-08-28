@@ -61,7 +61,7 @@ func newTestAgent(t *testing.T, p llm.Provider, reg *tool.Registry) (*Agent, *st
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(context.Background(), client.ID, "test", "", "", "")
+	sess, err := st.CreateSession(context.Background(), client.ID, "test", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,5 +266,81 @@ func TestTitleTruncates(t *testing.T) {
 	}
 	if got := Title("  rename my\nshow files  "); got != "rename my show files" {
 		t.Errorf("Title = %q", got)
+	}
+}
+
+// A toolless session is the Core chat: a model and nothing else in the room.
+//
+// The two halves are checked together because either alone is a trap. An empty
+// tool list with the tool-using system prompt still produces a model that
+// narrates calls it cannot make, and the right prompt with the tools still
+// attached is not a plain conversation at all.
+func TestToollessSessionOffersNoToolsAndIsFramedAsSuch(t *testing.T) {
+	reg := tool.NewRegistry()
+	err := reg.Register(
+		tool.Definition{Name: "probe_thing", Description: "lookup", Risk: tool.RiskRead},
+		func(context.Context, json.RawMessage) (string, error) { return "{}", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := &scriptedProvider{responses: []llm.Response{reply("Just talking.")}}
+	a, st, _ := newTestAgent(t, p, reg)
+
+	client, _, err := st.CreateClient(context.Background(), "core-client", store.KindHarness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(context.Background(), client.ID, "core", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Tools {
+		t.Fatal("session created with tools:false came back with tools enabled")
+	}
+
+	// The client offers one of its own too; a toolless session must drop it
+	// rather than pass it through to the model.
+	_, err = a.Advance(context.Background(), sess,
+		[]tool.Definition{clientTool("rename_file", tool.RiskWrite)},
+		llm.UserMessage("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(p.requests) != 1 {
+		t.Fatalf("got %d requests, want 1", len(p.requests))
+	}
+	if n := len(p.requests[0].Tools); n != 0 {
+		t.Errorf("toolless session offered %d tools, want 0: %+v", n, p.requests[0].Tools)
+	}
+	if p.requests[0].System != PlainPrompt {
+		t.Errorf("toolless session got the tool-using system prompt:\n%s", p.requests[0].System)
+	}
+}
+
+// The ordinary session is the control: the same agent, the same registry, and
+// the tools are there. Without this the test above passes on an agent that has
+// simply stopped offering tools to anybody.
+func TestToolUsingSessionStillGetsItsTools(t *testing.T) {
+	reg := tool.NewRegistry()
+	err := reg.Register(
+		tool.Definition{Name: "probe_thing", Description: "lookup", Risk: tool.RiskRead},
+		func(context.Context, json.RawMessage) (string, error) { return "{}", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := &scriptedProvider{responses: []llm.Response{reply("ok")}}
+	a, _, sess := newTestAgent(t, p, reg)
+
+	if _, err := a.Advance(context.Background(), sess, nil, llm.UserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.requests[0].Tools) == 0 {
+		t.Error("ordinary session was offered no tools")
+	}
+	if p.requests[0].System == PlainPrompt {
+		t.Error("ordinary session got the toolless prompt")
 	}
 }

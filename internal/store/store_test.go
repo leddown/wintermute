@@ -117,7 +117,7 @@ func TestSessionsAreScopedToTheirClient(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sess, err := st.CreateSession(ctx, owner.ID, "mine", "", "", "")
+	sess, err := st.CreateSession(ctx, owner.ID, "mine", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestDeleteSessionIsScopedAndCascades(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, owner.ID, "doomed", "", "", "")
+	sess, err := st.CreateSession(ctx, owner.ID, "doomed", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,7 +206,7 @@ func TestTranscriptRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, client.ID, "", "", "", "")
+	sess, err := st.CreateSession(ctx, client.ID, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestAuditTrail(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, client.ID, "", "", "", "")
+	sess, err := st.CreateSession(ctx, client.ID, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestAuditOutcomeIsTruncated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, client.ID, "", "", "", "")
+	sess, err := st.CreateSession(ctx, client.ID, "", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -604,7 +604,7 @@ func newTestSession(t *testing.T, st *Store) *Session {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, client.ID, "test", "", "", "")
+	sess, err := st.CreateSession(ctx, client.ID, "test", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -42,6 +42,15 @@ type Session struct {
 	// false and inferred by whatever is reading it.
 	Record bool `json:"record"`
 	Recall bool `json:"recall"`
+	// Tools decides whether this conversation has any tools at all — server
+	// tools, client actions and the agent's own knowledge tools alike. False
+	// is a plain exchange with the model, which is what the Core chat is for:
+	// judging a model rather than the harness around it.
+	//
+	// Not omitempty, for the same reason Record and Recall are not. A session
+	// that quietly lost its tools would look like a model that had stopped
+	// being able to do anything, which is a long way to debug from.
+	Tools bool `json:"tools"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -49,12 +58,12 @@ type Session struct {
 
 // sessionColumns is the shared SELECT list, so the scan order below cannot
 // drift from the query.
-const sessionColumns = `id, client_id, title, backend, model, agent_id, record, recall, created_at, updated_at`
+const sessionColumns = `id, client_id, title, backend, model, agent_id, record, recall, tools, created_at, updated_at`
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	err := row.Scan(&sess.ID, &sess.ClientID, &sess.Title, &sess.Backend, &sess.Model,
-		&sess.AgentID, &sess.Record, &sess.Recall, &sess.CreatedAt, &sess.UpdatedAt)
+		&sess.AgentID, &sess.Record, &sess.Recall, &sess.Tools, &sess.CreatedAt, &sess.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -63,16 +72,17 @@ func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 
 // CreateSession starts a new conversation for a client. backend, model and
 // agentID may be empty, meaning the server default and the unscoped assistant.
-func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backend, model, agentID string) (*Session, error) {
+// tools is false for a plain conversation with the model and nothing else.
+func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backend, model, agentID string, tools bool) (*Session, error) {
 	id, err := newID()
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now().UTC()
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO sessions (id, client_id, title, backend, model, agent_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, clientID, title, backend, model, agentID, now, now)
+		`INSERT INTO sessions (id, client_id, title, backend, model, agent_id, tools, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, clientID, title, backend, model, agentID, tools, now, now)
 	if err != nil {
 		return nil, fmt.Errorf("insert session: %w", err)
 	}
@@ -81,7 +91,7 @@ func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backen
 	return &Session{
 		ID: id, ClientID: clientID, Title: title,
 		Backend: backend, Model: model, AgentID: agentID,
-		Record: true, Recall: true, CreatedAt: now, UpdatedAt: now,
+		Record: true, Recall: true, Tools: tools, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 

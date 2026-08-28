@@ -1,0 +1,12 @@
+--- Whether a conversation may use tools at all.
+---
+--- A Core chat is a conversation with a chosen model and nothing else in the
+--- room: no server tools, no client actions, no agent library. That is not the
+--- same as a session whose agent happens to grant nothing — it is the absence
+--- of the whole apparatus, which is what makes it a way to judge a model
+--- rather than the harness around it.
+---
+--- The default is 1 because every row that existed before this column did was
+--- a full assistant session, and because a session arriving with tools missing
+--- by accident would be a silent downgrade rather than a visible failure.
+ALTER TABLE sessions ADD COLUMN tools INTEGER NOT NULL DEFAULT 1;

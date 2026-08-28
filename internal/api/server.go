@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"wintermute/internal/agent"
@@ -259,6 +260,12 @@ type createSessionRequest struct {
 	// Agent names an agent profile, which decides the documents and external
 	// sources this conversation may reach. Empty is the unscoped assistant.
 	Agent string `json:"agent"`
+	// Tools asks for a conversation with no tools at all — the Core chat, which
+	// is a model and nothing else. A pointer because absent has to mean "the
+	// usual assistant" rather than false: every client that predates this
+	// field omits it, and reading that as a request for a crippled session
+	// would silently take the tools away from all of them.
+	Tools *bool `json:"tools"`
 }
 
 func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
@@ -270,13 +277,27 @@ func (s *Server) handleCreateSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	tools := req.Tools == nil || *req.Tools
+	// An agent is a library of documents reached through tools. Asking for one
+	// with no tools is asking for a conversation that cannot see it, which is
+	// a contradiction worth refusing rather than half-honouring.
+	//
+	// Checked against what was asked for rather than what it resolved to: on a
+	// server with no knowledge base an agent name resolves to nothing at all,
+	// and silently accepting the request would hand back a session that is not
+	// what was asked for and says nothing about it.
+	if !tools && strings.TrimSpace(req.Agent) != "" {
+		writeError(w, http.StatusBadRequest,
+			"a session with no tools cannot be scoped to an agent: its documents are only reachable through them")
+		return
+	}
 	agentID, backend, model, err := s.resolveAgent(r.Context(), req.Agent, req.Backend, req.Model)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	c := clientFrom(r.Context())
-	sess, err := s.store.CreateSession(r.Context(), c.ID, req.Title, backend, model, agentID)
+	sess, err := s.store.CreateSession(r.Context(), c.ID, req.Title, backend, model, agentID, tools)
 	if err != nil {
 		s.fail(w, "create session", err)
 		return

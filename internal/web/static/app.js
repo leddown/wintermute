@@ -9,9 +9,11 @@
 
 const $ = (id) => document.getElementById(id);
 const state = {
-  // The Workspace is where the app lands, on its Assistant pane, which
-  // index.html marks active so the first paint needs no JS.
-  token: null, sessionId: null, sending: false, view: 'workspace',
+  // Core is where the app lands, which index.html marks active so the first
+  // paint needs no JS. It is the front door because it asks the least of the
+  // person arriving: a question and a model to put it to, with none of the
+  // apparatus that makes the Assistant what it is.
+  token: null, sessionId: null, sending: false, view: 'core',
   // The agent a new chat is opened against, and the one being edited in the
   // Agents view. Null means the unscoped assistant, which is what every
   // session was before agents existed.
@@ -21,6 +23,12 @@ const state = {
   // has to invent a name for it. `backends` is the catalogue with health, so
   // the picker can say which ones are actually answering.
   chatBackend: null, backends: [], defaultBackend: '',
+  // The model *within* that backend, which only the Core chat lets you choose.
+  // Null means the backend's own configured default, the same "empty is
+  // default" the session row uses. `backendModels` caches /api/v1/models per
+  // backend, because the picker is reopened far more often than the answer
+  // changes.
+  chatModel: null, backendModels: {},
   // Whether the open conversation is being written down, and whether it draws
   // on prior ones. Two independent switches, mirroring the session row: a chat
   // that reads the full history but leaves no trace of itself is a valid and
@@ -116,7 +124,14 @@ function start(me) {
   $('app').hidden = false;
   $('model').textContent = me.default_backend ? `${me.default_backend}` : '';
   SystemGauges.start();
-  loadSessions().catch(showError);
+  loadSessions()
+    // Arriving at boot is arriving at a surface, and goes through the same
+    // door: open what that surface last had — here, what it has at all — or
+    // apply its defaults and show its empty state. Without this the landing
+    // view is the one place in the app where a conversation list sits beside a
+    // composer that is not showing any of it.
+    .then(() => enterSurface(chatSurface.current))
+    .catch(showError);
   // The agent list is fetched at boot rather than on first view, because the
   // chat needs it to say which agent a session is talking to — a question gets
   // a different answer depending on which library is behind it.
@@ -133,6 +148,7 @@ function start(me) {
   api('/api/v1/backends').then((data) => {
     state.backends = data.backends || [];
     renderChatControls();
+    renderCorePicker();
   }).catch(() => { /* the chat still works on the server default */ });
 }
 
@@ -142,6 +158,7 @@ function start(me) {
 // not cost four extra round trips for panes nobody looked at.
 const loaded = new Set();
 const loaders = {
+  core: () => openCore(),
   workspace: () => openWorkspace(),
   company: () => loadCompany(),
   portfolio: () => loadPortfolio(),
@@ -159,10 +176,10 @@ function switchView(name) {
     section.classList.toggle('active', section.dataset.view === name);
   }
   closeSidebar();
-  // Arriving where the conversation lives is a request to see it full size, so
+  // Arriving where a conversation lives is a request to see it full size, so
   // the dock hands it back rather than leaving the pane showing a stand-in.
-  if (name === 'workspace' && ws.pane === 'assistant' && dock.open) closeDock();
-  $('chat-away').hidden = !(dock.open && name === 'workspace' && ws.pane === 'assistant');
+  if (wantedSurface() && dock.open) closeDock();
+  else placeChat();
   // The activity gauges poll on a timer. Leaving the view has to stop it, or
   // the server keeps being asked for /proc readings nobody is looking at.
   if (name !== 'utilities') stopActivityPolling();
@@ -213,7 +230,7 @@ function closeSidebar() {
 // the transcript rather than a toast, but only when the user can see it — and
 // in the dock it is visible over every view, not just the Workspace.
 function chatVisible() {
-  return dock.open || (state.view === 'workspace' && ws.pane === 'assistant');
+  return dock.open || wantedSurface() !== null;
 }
 
 /* ---------- chat dock ---------- */
@@ -222,34 +239,243 @@ function chatVisible() {
 // question can be asked without navigating away from the thing that prompted
 // it.
 //
-// The transcript is not duplicated. #chat is *moved* into the dock and moved
-// back on close, which is what keeps one composer, one submit handler, one
-// scroll position and one set of listeners — a second copy would mean either
-// duplicate ids or rewriting every $('messages') in the file. Listeners are
-// bound to the elements themselves, so they survive the move untouched.
+// The transcript is not duplicated. #chat is *moved* between slots, which is
+// what keeps one composer, one submit handler, one scroll position and one set
+// of listeners — a second copy would mean either duplicate ids or rewriting
+// every $('messages') in the file. Listeners are bound to the elements
+// themselves, so they survive the move untouched.
 //
-// Because the element can only be in one place, the dock and the Assistant
-// pane are mutually exclusive: while the dock has it, that pane shows
-// #chat-away in its place.
-const dock = { open: false, home: null, next: null };
+// There are three slots and the element can only be in one of them, so they
+// are mutually exclusive by construction: whichever slot does not have it
+// shows its own stand-in instead.
+const dock = { open: false };
+
+// Where #chat should be right now, and which conversation belongs there.
+//
+// Two surfaces hold conversations — the Assistant and Core — and they are
+// different conversations, not two views of one. So arriving at a surface
+// swaps the loaded session as well as moving the element, and each surface
+// remembers the last one it had. The dock is a third *place* but not a third
+// surface: it shows whatever was current when it was opened, which is why it
+// takes precedence here and neither pane fights it for the element.
+const chatSurface = { current: 'core', session: { assistant: null, core: null } };
+
+function chatSlotFor(surface) {
+  return $(surface === 'core' ? 'core-chat-slot' : 'assistant-chat-slot');
+}
+
+// Which surface the current view is asking for, or null for a view that has no
+// chat in it — in which case #chat is left wherever it is, hidden along with
+// the section it is sitting in.
+function wantedSurface() {
+  if (state.view === 'core') return 'core';
+  if (state.view === 'workspace' && ws.pane === 'assistant') return 'assistant';
+  return null;
+}
+
+// Move the element, show the right stand-ins, and swap conversations when the
+// surface itself changed. Called from every route that can change any of the
+// three inputs: the view, the workspace tab, and the dock.
+function placeChat() {
+  const chat = $('chat');
+  const wanted = wantedSurface();
+
+  if (wanted && wanted !== chatSurface.current) {
+    // Park the conversation that is leaving before loading the one arriving,
+    // or the session pointer follows the element and both surfaces end up
+    // pointing at the same chat.
+    chatSurface.session[chatSurface.current] = state.sessionId;
+    chatSurface.current = wanted;
+    enterSurface(wanted).catch(showError);
+  }
+
+  if (dock.open) {
+    if (chat.parentElement !== $('dock-slot')) $('dock-slot').append(chat);
+    chat.hidden = false;
+  } else {
+    const slot = chatSlotFor(chatSurface.current);
+    if (chat.parentElement !== slot) slot.append(chat);
+    chat.hidden = false;
+  }
+
+  // A slot shows its stand-in exactly when it is the surface on screen and
+  // something else is holding the transcript.
+  for (const surface of ['assistant', 'core']) {
+    const away = chatSlotFor(surface).querySelector('.chat-away');
+    if (away) away.hidden = !(dock.open && surface === chatSurface.current);
+  }
+}
+
+// Load the conversation this surface last had, or offer a fresh one.
+async function enterSurface(surface) {
+  const want = chatSurface.session[surface];
+  if (want && sessionIndex.some((x) => x.id === want)) {
+    await openSession(want);
+    return;
+  }
+  // Nothing remembered, or it has since been deleted. Fall back to the newest
+  // conversation this surface owns rather than opening an empty composer that
+  // hides the history sitting in the list beside it.
+  const mine = sessionIndex.filter((x) => isCoreSession(x) === (surface === 'core'));
+  if (mine.length) {
+    await openSession(mine[0].id);
+    return;
+  }
+  state.sessionId = null;
+  chatSurface.session[surface] = null;
+  applySurfaceDefaults(surface);
+  renderChatControls();
+  $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
+}
+
+// The memory defaults a surface's *next* conversation is created with. Core
+// tries a model out; that is not something the assistant should later recall
+// as though it had been told it.
+function applySurfaceDefaults(surface) {
+  state.record = surface !== 'core';
+  state.recall = surface !== 'core';
+  if (surface === 'core') state.chatAgent = null;
+}
+
+// A Core conversation is one with no tools. The flag is the discriminator
+// rather than a second marker, because it is already exactly the difference.
+function isCoreSession(s) {
+  return s.tools === false;
+}
+
+/* ---------- the Core picker ----------
+   Two linked selects in the Core sidebar: which backend answers, and which of
+   the models it serves. The session row has carried both fields all along —
+   this is the first screen that lets a person set the second one.
+
+   They are here rather than on the composer strip because the strip travels
+   with #chat into the dock and the Assistant's pane, where a model picker
+   would be offering a choice that pane does not have.
+
+   Changing either repoints the open conversation rather than starting a new
+   one. Switching a model mid-transcript is deliberate and supported — it is
+   the whole point of a screen for comparing models, where the interesting
+   question is what a different one makes of the same exchange. */
+
+function renderCorePicker() {
+  const host = $('core-picker');
+  if (!host) return;
+  if (!state.backends.length) {
+    host.replaceChildren(el('p', { class: 'hint muted', text: 'No backends are configured.' }));
+    return;
+  }
+
+  const backend = el('select', {
+    class: 'core-select',
+    title: 'Which backend answers a Core chat',
+    onchange: (e) => setCoreModel(e.target.value || null, null).catch(showError),
+  }, [
+    el('option', {
+      value: '',
+      text: state.defaultBackend ? `Server default (${state.defaultBackend})` : 'Server default',
+      selected: !state.chatBackend,
+    }),
+    ...state.backends.map((b) => el('option', {
+      value: b.name,
+      text: b.status === 'ok' ? b.name : `${b.name} (${b.status})`,
+      selected: b.name === state.chatBackend,
+    })),
+  ]);
+
+  const model = el('select', {
+    class: 'core-select',
+    title: 'Which model within that backend',
+    onchange: (e) => setCoreModel(state.chatBackend, e.target.value || null).catch(showError),
+  });
+  host.replaceChildren(backend, model);
+  paintCoreModels(model);
+}
+
+// The model list is fetched per backend and cached. A backend that has not
+// been asked about yet shows its default until the answer arrives, rather than
+// an empty select that looks like a backend serving nothing.
+async function paintCoreModels(select) {
+  const name = state.chatBackend;
+  const fill = (list) => {
+    select.replaceChildren(
+      el('option', { value: '', text: 'Backend default', selected: !state.chatModel }),
+      ...list.map((m) => el('option', {
+        value: m.id,
+        // Loaded is worth saying: on a swapping backend an unloaded model
+        // answers eventually, and the wait is long enough to look like a hang.
+        text: m.loaded ? `${m.id} · loaded` : m.id,
+        selected: m.id === state.chatModel,
+      })),
+    );
+  };
+
+  if (!name) {
+    // With no backend chosen the server picks, so there is no list to offer
+    // within it. Saying so beats an empty control.
+    select.replaceChildren(el('option', { value: '', text: 'Chosen by the server' }));
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+
+  if (state.backendModels[name]) {
+    fill(state.backendModels[name]);
+    return;
+  }
+  fill([]);
+  try {
+    const { models } = await api('/api/v1/models');
+    // Cached whole, split per backend: one request answers for all of them,
+    // and switching backends then costs nothing.
+    const byBackend = {};
+    for (const m of models || []) (byBackend[m.backend] ||= []).push(m);
+    state.backendModels = byBackend;
+    fill(byBackend[name] || []);
+  } catch {
+    // A catalogue that cannot be read is not a reason to lose the backend
+    // choice; the conversation still runs on the backend's own default.
+    fill([]);
+  }
+}
+
+// Repoint the open conversation. Backend and model travel together because a
+// model names something *within* a backend: carrying the old one across
+// would ask the new backend for something it has never heard of.
+async function setCoreModel(backend, model) {
+  state.chatBackend = backend || null;
+  state.chatModel = model || null;
+  renderCorePicker();
+  if (!state.sessionId) return;
+  await api(`/api/v1/sessions/${state.sessionId}/model`, {
+    method: 'PATCH',
+    body: JSON.stringify({ backend: backend || '', model: model || '' }),
+  });
+  const found = sessionIndex.find((x) => x.id === state.sessionId);
+  if (found) { found.backend = backend || ''; found.model = model || ''; }
+  await loadSessions();
+  toast(model ? `This chat now runs on ${model}`
+    : (backend ? `This chat now runs on ${backend}` : 'This chat now runs on the server default'));
+}
+
+$('core-new').addEventListener('click', () => newSession('core').catch(showError));
+
+// The view's own loader. The picker needs the backend catalogue, which is
+// fetched at boot but may not have landed by the time somebody clicks Core;
+// painting again here costs nothing and closes that window.
+function openCore() {
+  renderCorePicker();
+  return Promise.resolve();
+}
 
 function openDock() {
   if (dock.open) return;
-  const chat = $('chat');
-  // Remember exactly where it came from, so closing puts it back in order
-  // rather than appending it after the agents pane.
-  dock.home = chat.parentElement;
-  dock.next = chat.nextElementSibling;
   dock.open = true;
-
-  chat.hidden = false;
-  $('dock-slot').append(chat);
+  placeChat();
   $('dock').hidden = false;
   // One frame between unhiding and the class, or the panel is already at its
   // final position when the transition is applied and nothing slides.
   requestAnimationFrame(() => $('dock').classList.add('open'));
   $('dock-toggle').setAttribute('aria-expanded', 'true');
-  $('chat-away').hidden = !(state.view === 'workspace' && ws.pane === 'assistant');
   // The composer strip travels with #chat, so it needs no re-render; the dock
   // head says which agent is answering, which the strip alone would not make
   // obvious once it is floating over an unrelated view.
@@ -261,13 +487,9 @@ function openDock() {
 function closeDock() {
   if (!dock.open) return;
   dock.open = false;
-  const chat = $('chat');
-  dock.home.insertBefore(chat, dock.next);
-  // Back in the pane group, where visibility is the tab's business again.
-  chat.hidden = ws.pane !== 'assistant';
+  placeChat();
   $('dock').classList.remove('open');
   $('dock-toggle').setAttribute('aria-expanded', 'false');
-  $('chat-away').hidden = true;
   // Hidden only after the slide finishes, or it vanishes instead of leaving.
   setTimeout(() => { if (!dock.open) $('dock').hidden = true; }, 200);
 }
@@ -279,7 +501,9 @@ function toggleDock() {
 
 $('dock-toggle').addEventListener('click', toggleDock);
 $('dock-close').addEventListener('click', closeDock);
-$('chat-return').addEventListener('click', closeDock);
+for (const btn of document.querySelectorAll('.chat-return')) {
+  btn.addEventListener('click', closeDock);
+}
 document.addEventListener('keydown', (e) => {
   // Esc closes the dock, but not while a dialog is doing its own Esc handling.
   if (e.key === 'Escape' && dock.open && !document.querySelector('dialog[open]')) closeDock();
@@ -662,13 +886,34 @@ function backendOfSession(id) {
   return found ? (found.backend || null) : null;
 }
 
+// One request, two lists. The surfaces hold different conversations and each
+// shows only its own, split on the flag that already tells them apart rather
+// than on a second one kept in step by hand.
 async function loadSessions() {
   const { sessions } = await api('/api/v1/sessions');
   sessionIndex = sessions || [];
-  const list = $('sessions');
+  paintSessionList($('sessions'), sessionIndex.filter((s) => !isCoreSession(s)),
+    'No conversations yet');
+  paintSessionList($('core-sessions'), sessionIndex.filter(isCoreSession),
+    'Nothing kept. A Core chat is off the record unless you say otherwise.');
+}
+
+function paintSessionList(list, sessions, emptyText) {
+  if (!list) return;
   list.innerHTML = '';
+  if (!sessions.length) {
+    list.append(el('li', { class: 'muted', text: emptyText }));
+    return;
+  }
   for (const s of sessions) {
-    const label = s.agent_id ? `${s.title || 'Untitled'} · ${s.agent_id}` : (s.title || 'Untitled');
+    const parts = [s.title || 'Untitled'];
+    if (s.agent_id) parts.push(s.agent_id);
+    // Which model answered is the whole point of a Core chat, so the row says
+    // it. On the Assistant it would be noise: the strip under the composer
+    // already names it and it is the same one every time.
+    if (isCoreSession(s) && s.model) parts.push(s.model);
+    else if (isCoreSession(s) && s.backend) parts.push(s.backend);
+    const label = parts.join(' · ');
     // The row opens the session; the × deletes it. stopPropagation is what
     // keeps the delete from also opening the conversation it just removed.
     const del = el('button', {
@@ -707,20 +952,29 @@ function deleteSession(s) {
   });
 }
 
-async function newSession() {
+// surface decides what kind of conversation this is. Core asks for a session
+// with no tools; the server is what actually withholds them, and it refuses an
+// agent in the same breath — see handleCreateSession.
+async function newSession(surface = chatSurface.current) {
+  const core = surface === 'core';
+  if (core) applySurfaceDefaults('core');
   const sess = await api('/api/v1/sessions', {
     method: 'POST',
     body: JSON.stringify({
       title: '',
-      agent: state.chatAgent || '',
+      agent: core ? '' : (state.chatAgent || ''),
       backend: state.chatBackend || '',
+      model: core ? (state.chatModel || '') : '',
+      tools: !core,
     }),
   });
   state.sessionId = sess.id;
+  chatSurface.session[surface] = sess.id;
   state.chatAgent = sess.agent_id || null;
   // An agent can pin its own backend, so the session comes back naming what it
   // actually got, which is not always what was asked for. Follow the answer.
   state.chatBackend = sess.backend || null;
+  state.chatModel = sess.model || null;
   // A new session is always created on the record. If the operator asked for
   // something else before there was a session to ask it of, apply it now —
   // otherwise the choice they made would silently not take effect on the very
@@ -739,6 +993,7 @@ async function newSession() {
     state.recall = updated.recall !== false;
   }
   renderChatControls();
+  renderCorePicker();
   $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
   await loadSessions();
   return sess.id;
@@ -748,6 +1003,12 @@ async function newSession() {
 // question gets a different answer depending on which library is behind it,
 // and a reader who cannot see which one is reading tea leaves.
 function emptyChatHint() {
+  if (chatSurface.current === 'core') {
+    const where = state.chatModel || state.chatBackend;
+    return where
+      ? `Talking to ${where}, and nothing else — no tools, no documents.`
+      : 'Pick a model on the left, then ask it anything. No tools, no documents.';
+  }
   const agent = state.agents.find((a) => a.id === state.chatAgent);
   if (agent) return `Talking to ${agent.name}. It can read the documents and sources given to it.`;
   return 'Ask about your models, your tasks, or anything else.';
@@ -755,15 +1016,30 @@ function emptyChatHint() {
 
 async function openSession(id) {
   state.sessionId = id;
+  const opened = sessionIndex.find((x) => x.id === id);
+  // A conversation belongs to the surface its flag says it does, whichever
+  // list it was clicked in. Opening a Core chat from the dock's history should
+  // not leave the Assistant thinking it owns it.
+  if (opened) {
+    chatSurface.current = isCoreSession(opened) ? 'core' : 'assistant';
+    chatSurface.session[chatSurface.current] = id;
+  }
   const known = (state.agents || []).find((a) => a.id === agentOfSession(id));
   state.chatAgent = known ? known.id : agentOfSession(id);
   state.chatBackend = backendOfSession(id);
-  const opened = sessionIndex.find((x) => x.id === id);
+  state.chatModel = opened ? (opened.model || null) : null;
   state.record = !opened || opened.record !== false;
   state.recall = !opened || opened.recall !== false;
   renderChatControls();
+  renderCorePicker();
   const { messages } = await api(`/api/v1/sessions/${id}/messages`);
   $('messages').innerHTML = '';
+  // A conversation with nothing in it yet — a new one, or one kept off the
+  // record — is a blank pane otherwise, which reads as a transcript that
+  // failed to load rather than one that has not started.
+  if (!(messages || []).length) {
+    $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
+  }
   for (const m of messages || []) appendMessage(m);
   await loadSessions();
   closeSidebar();
@@ -894,10 +1170,20 @@ function renderChatControls() {
   const holder = $('chat-agent');
   if (!holder) return;
   const parts = [];
-  if (state.agents.length) {
+  // A Core chat has no agent to be scoped to — the server refuses the
+  // combination outright — and its backend and model are chosen in the
+  // sidebar beside it, where a model picker belongs. What is left is the one
+  // control that still means something here: whether this is being kept.
+  const core = chatSurface.current === 'core';
+  if (core) {
+    parts.push(el('span', { class: 'muted', title:
+      'No tools, no documents, no client actions. What you are talking to is the model.',
+    text: state.chatModel || state.chatBackend || 'server default' }));
+  }
+  if (!core && state.agents.length) {
     parts.push(el('span', { class: 'muted', text: 'New chat as' }), chatAgentSelect());
   }
-  if (state.backends.length) {
+  if (!core && state.backends.length) {
     parts.push(el('span', { class: 'muted', text: 'Backend' }), chatBackendSelect());
   }
   parts.push(memoryControls());
@@ -1572,10 +1858,10 @@ function showWorkspacePane(name) {
   // Arriving at the assistant's tab while the dock holds the transcript is a
   // request to look at the conversation, and the pane it belongs in is now on
   // screen — so the dock hands it back rather than leaving the tab showing a
-  // stand-in. #chat-away carries no data-pane precisely because its visibility
-  // depends on the dock as well as the tab, so the loop above cannot drive it.
+  // stand-in. The slots carry the stand-ins, which is why the loop above
+  // cannot drive them: their visibility depends on the dock as well as the tab.
   if (name === 'assistant' && dock.open) closeDock();
-  $('chat-away').hidden = !(name === 'assistant' && dock.open);
+  else placeChat();
   return loadWorkspacePane(name);
 }
 

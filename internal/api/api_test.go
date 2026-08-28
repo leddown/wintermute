@@ -131,7 +131,7 @@ func TestSessionsAreNotVisibleAcrossClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(ctx, owner.ID, "private", "", "", "")
+	sess, err := st.CreateSession(ctx, owner.ID, "private", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +271,7 @@ func TestSetSessionMemoryRequiresBothSwitches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(t.Context(), client.ID, "chat", "", "", "")
+	sess, err := st.CreateSession(t.Context(), client.ID, "chat", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,7 +320,7 @@ func TestSessionJSONAlwaysStatesItsMemoryState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(t.Context(), client.ID, "chat", "", "", "")
+	sess, err := st.CreateSession(t.Context(), client.ID, "chat", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +351,7 @@ func TestForgetEverythingRequiresConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := st.CreateSession(t.Context(), client.ID, "test data", "", "", "")
+	sess, err := st.CreateSession(t.Context(), client.ID, "test data", "", "", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,5 +568,81 @@ func TestReportRejectsAnUnknownFormatVersion(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "upgrade the agent") {
 		t.Errorf("the error should say what to do, got: %s", rec.Body.String())
+	}
+}
+
+// The tools flag on session creation.
+//
+// The pointer in createSessionRequest is the whole point of the first case: a
+// client that predates the field omits it, and reading that omission as false
+// would take the tools away from every existing harness at once.
+func TestCreateSessionToolsFlag(t *testing.T) {
+	srv, st := newTestServer(t)
+	client, token, err := st.CreateClient(t.Context(), "browser", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := srv.Handler()
+
+	create := func(body string) (int, store.Session) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		var sess store.Session
+		_ = json.Unmarshal(rec.Body.Bytes(), &sess)
+		return rec.Code, sess
+	}
+
+	tests := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"omitted means the ordinary assistant", `{"title":"a"}`, true},
+		{"explicit true", `{"title":"b","tools":true}`, true},
+		{"explicit false is the Core chat", `{"title":"c","tools":false}`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			code, sess := create(tc.body)
+			if code != http.StatusCreated {
+				t.Fatalf("status = %d, want 201", code)
+			}
+			if sess.Tools != tc.want {
+				t.Errorf("tools = %v, want %v", sess.Tools, tc.want)
+			}
+			// Whatever was created has to survive the round trip to SQLite,
+			// not merely be echoed back out of the request.
+			stored, err := st.Session(t.Context(), sess.ID, client.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.Tools != tc.want {
+				t.Errorf("stored tools = %v, want %v", stored.Tools, tc.want)
+			}
+		})
+	}
+}
+
+// An agent is a library reached through tools, so asking for both is a
+// contradiction rather than a combination.
+func TestCreateSessionRefusesAgentWithoutTools(t *testing.T) {
+	srv, st := newTestServer(t)
+	_, token, err := st.CreateClient(t.Context(), "browser2", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/sessions",
+		strings.NewReader(`{"title":"x","tools":false,"agent":"ledger"}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
 }

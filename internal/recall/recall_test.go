@@ -109,7 +109,7 @@ func newFixture(t *testing.T) *fixture {
 func (f *fixture) say(t *testing.T, sessionID, backend, model, agentID string, msgs ...llm.Message) *store.Session {
 	t.Helper()
 	ctx := context.Background()
-	sess, err := f.store.CreateSession(ctx, f.clientID, sessionID, backend, model, agentID)
+	sess, err := f.store.CreateSession(ctx, f.clientID, sessionID, backend, model, agentID, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +146,7 @@ func TestFactStatedToModelAIsRecalledByModelB(t *testing.T) {
 	)
 
 	// Conversation two, a fresh session against a different model entirely.
-	sessB, err := f.store.CreateSession(ctx, f.clientID, "with-model-b", "claude", "claude-opus-5", "")
+	sessB, err := f.store.CreateSession(ctx, f.clientID, "with-model-b", "claude", "claude-opus-5", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestMessagesSurviveAnEmbedderOutage(t *testing.T) {
 
 	f.embedder.fail = llm.ErrEmbedderUnavailable
 
-	sess, err := f.store.CreateSession(ctx, f.clientID, "during-outage", "local", "qwen3:8b", "")
+	sess, err := f.store.CreateSession(ctx, f.clientID, "during-outage", "local", "qwen3:8b", "", true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -46,7 +46,8 @@
         <span id="model" class="muted"></span>
       </div>
       <nav id="views" class="views">
-        <button class="view-btn active" data-view="workspace">Workspace</button>
+        <button class="view-btn active" data-view="core">Core</button>
+        <button class="view-btn" data-view="workspace">Workspace</button>
         <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="utilities">Utilities</button>
@@ -57,13 +58,81 @@
     </header>
 
     <div class="body">
+      <!-- Core: a plain conversation with a model of your choosing.
+           Deliberately not the assistant. It has no tools, no agent library and
+           nothing acting on the network or the filesystem, so what it shows is
+           the model rather than the harness around it — which is what makes it
+           worth anything when deciding whether a model is any good. The server
+           enforces that; see the tools column on sessions.
+
+           Its conversations are its own, kept apart from the Assistant's by
+           that same flag, and created off the record so trying a model out does
+           not become the memory the assistant draws on. The recording badge on
+           the composer strip still keeps any one of them. -->
+      <section class="view active" data-view="core">
+        <aside class="sidebar">
+          <div class="sidebar-head"><span class="muted">Core</span></div>
+
+          <div class="sidebar-head" style="margin-top:16px;">
+            <span class="muted">Model</span>
+          </div>
+          <div id="core-picker" class="core-picker"></div>
+
+          <div class="sidebar-head" style="margin-top:16px;">
+            <span class="muted">Chats</span>
+            <button id="core-new" class="link-btn">New</button>
+          </div>
+          <ul id="core-sessions"></ul>
+          <p class="hint muted">No tools, no documents, no memory of these
+            conversations unless you switch recording on. Just the model.</p>
+        </aside>
+
+        <!-- #chat is moved into whichever slot is asking for it — this one,
+             the Assistant's, or the dock's — and each slot shows its own
+             stand-in while somebody else has it.
+
+             Moving the transcript rather than building a second one is what
+             keeps one composer, one handler and one scroll position; see
+             placeChat() in app.js. It starts here because this is where the
+             app lands. -->
+        <div id="core-chat-slot" class="chat-slot">
+          <div class="chat-away pane" hidden>
+            <div class="pane-body">
+              <div class="empty muted">
+                <p>This conversation is open elsewhere.</p>
+                <button class="ghost-btn chat-return">Bring it back here</button>
+              </div>
+            </div>
+          </div>
+
+          <main id="chat" class="chat">
+            <div id="messages" class="messages">
+              <div class="empty muted">Pick a model on the left, then ask it anything.
+                No tools, no documents — just the model.</div>
+            </div>
+            <!-- Precise phrasings for a small backend. Hidden unless the active
+                 model is under the size where wording starts to matter; see
+                 renderWordCloud() in app.js. -->
+            <div id="word-cloud" class="word-cloud" hidden></div>
+            <form id="composer" class="composer">
+              <textarea id="input" rows="1" placeholder="Ask anything…" autocomplete="off"></textarea>
+              <button id="send" type="submit" aria-label="Send">↑</button>
+            </form>
+            <div id="chat-agent" class="chat-agent"></div>
+            <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
+          </main>
+        </div>
+      </section>
+
       <!-- Workspace: everything that is worked on, and the assistant it is
            worked on with. Each group's sidebar travels with its pane, because
            a list of sessions means nothing beside an agenda and a list of task
            lists means nothing beside a pad.
 
-           The assistant is first because it is where the app lands. -->
-      <section class="view active" data-view="workspace">
+           The assistant is first because it is the one you talk to; the Core
+           chat next door is for judging a model, this one for working with
+           the material below it. -->
+      <section class="view" data-view="workspace">
         <aside class="sidebar">
           <div class="sidebar-head"><span class="muted">Workspace</span></div>
           <ul id="workspace-nav" class="pane-tabs">
@@ -120,39 +189,20 @@
           </div>
         </aside>
 
-        <!-- This element is moved bodily into the chat dock when the dock is
-             opened, and put back when it closes. Moving it rather than
-             building a second transcript is what keeps one composer, one
-             handler and one scroll position — see openDock() in app.js. -->
-        <main id="chat" class="chat ws-pane" data-pane="assistant">
-          <div id="messages" class="messages">
-            <div class="empty muted">Ask a question. Anything — this conversation is not
-              scoped to an agent's documents, so it is the place for the general one.</div>
-          </div>
-          <!-- Precise phrasings for a small backend. Hidden unless the active
-               model is under the size where wording starts to matter; see
-               renderWordCloud() in app.js. -->
-          <div id="word-cloud" class="word-cloud" hidden></div>
-          <form id="composer" class="composer">
-            <textarea id="input" rows="1" placeholder="Ask anything…" autocomplete="off"></textarea>
-            <button id="send" type="submit" aria-label="Send">↑</button>
-          </form>
-          <div id="chat-agent" class="chat-agent"></div>
-          <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
-        </main>
-
-        <!-- Stands in for the chat while the dock has it. Deliberately carries
-             no data-pane: showWorkspacePane() drives the rest of the group by
-             that attribute, and this one depends on the dock as well as the
-             tab. -->
-        <main id="chat-away" class="pane" hidden>
-          <div class="pane-body">
-            <div class="empty muted">
-              <p>This conversation is open in the side panel.</p>
-              <button id="chat-return" class="ghost-btn">Bring it back here</button>
+        <!-- The Assistant's slot. Empty markup: the transcript lives in
+             Core's slot until somebody comes here for it. -->
+        <!-- The Assistant's slot. Empty markup: the transcript lives in
+             Core's slot until somebody comes here for it. -->
+        <div id="assistant-chat-slot" class="chat-slot ws-pane" data-pane="assistant">
+          <div class="chat-away pane" hidden>
+            <div class="pane-body">
+              <div class="empty muted">
+                <p>This conversation is open elsewhere.</p>
+                <button class="ghost-btn chat-return">Bring it back here</button>
+              </div>
             </div>
           </div>
-        </main>
+        </div>
 
         <main class="pane ws-pane" data-pane="tasks" hidden>
           <div class="pane-head">

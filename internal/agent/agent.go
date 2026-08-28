@@ -193,7 +193,12 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 	}
 	defs := registry.Definitions()
 
+	// A toolless conversation is framed as one. See PlainPrompt: handing it the
+	// tool-using prompt makes the model narrate calls it cannot make.
 	system := a.system
+	if !sess.Tools {
+		system = PlainPrompt
+	}
 	if extraPrompt != "" {
 		system += "\n\n" + extraPrompt
 	}
@@ -337,6 +342,15 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 // bound to the session's agent, so the library a model can search is decided by
 // the session rather than named in a tool argument it could change.
 func (a *Agent) registryFor(ctx context.Context, sess *store.Session, clientTools []tool.Definition) (*tool.Registry, string, error) {
+	// A session with no tools gets an empty registry, and the client's declared
+	// tools are dropped on the floor rather than registered. The refusal is
+	// here rather than at the API because this is the only place that can see
+	// every source at once — the server's own, the agent's, and whatever the
+	// harness on the other end has offered.
+	if !sess.Tools {
+		return tool.NewRegistry(), "", nil
+	}
+
 	registry := a.serverTools.Clone()
 
 	var extraPrompt string
