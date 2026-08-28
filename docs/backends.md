@@ -254,7 +254,7 @@ needs — so a backend can name the machine it runs on:
 and getting the agent onto it is one command on this server —
 `sudo scripts/add-node.sh tycho`, which prints the line to run over there; see
 [Installing the agent](hardware-nodes.md#installing-the-agent). With it declared, every verdict on
-the Hub, the Repository and the Models list is computed against *that* machine's
+the Repository and the Models list is computed against *that* machine's
 reported hardware, and the badge names it — `fits · tycho`. A model is graded
 against every declared machine and the best answer wins, which is the question
 actually being asked: not "does this run here", but "does anything I own run
@@ -277,7 +277,7 @@ Two things keep the verdict honest once the link exists:
   failing to load is the failure worth avoiding.
 
 With no backend declared on a node and none on loopback, nothing is graded and
-every verdict reads `unknown` — the Hub screen says so in as many words, because
+every verdict reads `unknown` — the Repository screen says so in as many words, because
 the alternative is a page of grey badges that looks like a broken estimator.
 
 ## Gotchas that will cost you performance

@@ -3194,15 +3194,13 @@ $('huginn-refresh').addEventListener('click', () => renderHuginn().catch(showErr
 async function renderHuginn() {
   const body = $('huginn-body');
   const titles = {
-    backends: 'Backends', repo: 'Repository', models: 'Models',
-    hub: 'Hub', fleet: 'Fleet',
+    backends: 'Backends', repo: 'Repository', models: 'Models', fleet: 'Fleet',
   };
   $('huginn-title').textContent = titles[huginn.tab];
   body.innerHTML = '';
 
   if (huginn.tab === 'repo') return renderAdminRepo(body);
   if (huginn.tab === 'models') return renderAdminModels(body);
-  if (huginn.tab === 'hub') return renderAdminHub(body);
   if (huginn.tab === 'fleet') return renderAdminFleet(body);
   return renderAdminBackends(body);
 }
@@ -3826,54 +3824,129 @@ async function setChampion(task, modelID) {
 
 /* ---------- the model repository ----------
    Weights the operator keeps on a disk this server owns, as opposed to
-   whatever a backend happens to be serving. The two are deliberately separate
-   screens: the Models tab answers "what can I run right now", this one answers
-   "what do I have, and what is it costing me in disk".
+   whatever a backend happens to be serving. Still separate from the Models
+   tab, which answers "what can I run right now" where this one answers "what
+   do I have, and what is it costing me in disk".
 
-   The page holds three things that must not be thrown away by a refresh — the
-   search box, its results, and the expanded repository detail — so the poll
-   that follows a running download updates the jobs panel alone and leaves the
-   rest of the DOM standing. Re-rendering everything every second would clear
-   the search field under the operator's fingers. */
+   The Hub used to be a tab of its own beside this one, on the reasoning that
+   "what do I have" and "what is out there" are different questions. They are,
+   but they were not different *screens*: both fetched /api/v1/repo, both drew
+   the same downloads panel from it, both gated a download on the same repo
+   status, and each carried its own Hugging Face search — this one's a weaker
+   copy of the Hub's, with no filters, no tag vocabulary and no second page.
+   Two tabs meant a download started under one reported its progress under
+   both, and the repository status had to be explained twice over, once as a
+   status line and once as a note saying to go and look at the other tab.
 
-const repoView = { query: '', results: null, detail: null, timer: null, busy: false };
+   So it is one screen with two halves and a single head. The head — where the
+   weights go, what the Hub allowance is, and what is downloading — belongs to
+   both halves and is drawn once. Below it, `repoView.pane` chooses between the
+   files on the disk and the Hub browser.
+
+   Both halves stay in the DOM and are toggled with `hidden` rather than
+   re-rendered. The search box, its results and an opened repository must all
+   survive a switch, and it is what lets refreshRepoFiles() find the file list
+   to update when a download finishes while the Hub half is showing. */
+
+const repoView = { pane: 'disk', timer: null, busy: false };
 
 async function renderAdminRepo(body) {
   stopRepoPolling();
-  const data = await api('/api/v1/repo');
-  const status = data.status || {};
 
   const statusEl = el('div', { class: 'repo-status' });
+  const rateEl = el('div', { class: 'hub-rate' });
   const jobsEl = el('div', { class: 'repo-jobs' });
-  const searchEl = el('div', { class: 'repo-search' });
+  const switchEl = el('div', { class: 'repo-panes' });
   const filesEl = el('div', { class: 'repo-files' });
+  const hubFilterEl = el('div', { class: 'hub-filters' });
+  const hubResultsEl = el('div', { class: 'hub-results' });
+  const hubEl = el('div', { class: 'repo-pane-hub' }, [hubFilterEl, hubResultsEl]);
 
-  body.append(statusEl, jobsEl, searchEl, filesEl);
-  paintRepoStatus(statusEl, status);
+  body.append(statusEl, rateEl, jobsEl, switchEl, filesEl, hubEl);
 
-  if (!status.configured) {
-    statusEl.append(el('p', { class: 'muted', text:
-      'Set WINTERMUTE_MODEL_REPO to an absolute path — the mount point of the drive you '
-      + 'want to keep weights on — and restart the server.' }));
-    return;
+  // The repository state decides whether a download can be offered at all; the
+  // Hub state decides what the search will be allowed to ask. Neither is fatal
+  // to the other — the Hub is perfectly browsable with nowhere to put what it
+  // holds, and the disk is perfectly readable with the Hub unreachable — so
+  // both are fetched together and each failure is absorbed where it lands.
+  const [data, hubStatus, vocab] = await Promise.all([
+    // Caught rather than allowed to throw. A drive that disappeared mid-scan
+    // used to take the Repository tab down and leave the Hub tab standing;
+    // now they are one screen, and letting it throw would take the Hub with
+    // it — for a failure that has nothing to do with whether the Hub can be
+    // searched.
+    api('/api/v1/repo').catch((err) => ({ failed: err.message })),
+    api('/api/v1/hub/status').catch(() => ({})),
+    hubView.vocab ? Promise.resolve(null) : api('/api/v1/hub/tags').catch(() => ({ tags: {} })),
+  ]);
+  const status = data.status || {};
+
+  if (vocab) hubView.vocab = vocab.tags || {};
+  if (hubStatus.rate_limit) hubView.rate = hubStatus.rate_limit;
+  hubView.hasToken = Boolean(hubStatus.has_token);
+  hubView.fitHosts = hubStatus.fit_hosts || [];
+  hubView.repoReady = Boolean(!data.failed && status.available && status.initialised);
+  // These read as one page now, so they say what is wrong here rather than
+  // sending the operator to a tab that no longer exists.
+  hubView.repoNote = data.failed
+    ? `The model repository could not be read: ${data.failed}`
+    : (!status.configured
+      ? 'No model repository is configured on this server, so there is nowhere to download to.'
+      : (!status.available ? 'The model repository is not available right now — see the status above.'
+        : (!status.initialised ? 'The model repository has not been initialised — see the button above.'
+          : '')));
+
+  // An unusable repository does not hide the Hub. Browsing is how an operator
+  // works out whether a drive is worth mounting in the first place, and the
+  // download buttons already refuse themselves with the reason above.
+  if (data.failed) {
+    statusEl.append(el('p', { class: 'error', text: hubView.repoNote }));
+  } else {
+    paintRepoStatus(statusEl, status);
+    if (!status.configured) {
+      statusEl.append(el('p', { class: 'muted', text:
+        'Set WINTERMUTE_MODEL_REPO to an absolute path — the mount point of the drive you '
+        + 'want to keep weights on — and restart the server.' }));
+    } else if (status.available && !status.initialised) {
+      // The marker is what tells a mounted drive from an empty mount point, so
+      // it is created by a deliberate press rather than on first use. Getting
+      // this wrong fills the server's own root filesystem with model weights.
+      statusEl.append(el('button', {
+        class: 'ghost-btn', type: 'button', text: 'Initialise this directory',
+        onclick: () => initRepo().catch(showError),
+      }));
+    }
   }
-  if (!status.available) return;
-
-  if (!status.initialised) {
-    // The marker is what tells a mounted drive from an empty mount point, so
-    // it is created by a deliberate press rather than on first use. Getting
-    // this wrong fills the server's own root filesystem with model weights.
-    statusEl.append(el('button', {
-      class: 'ghost-btn', type: 'button', text: 'Initialise this directory',
-      onclick: () => initRepo().catch(showError),
-    }));
-    return;
-  }
+  paintHubRate(rateEl);
 
   paintRepoJobs(jobsEl, data.jobs || []);
-  paintRepoSearch(searchEl);
-  paintRepoFiles(filesEl, data.files || [], data.tags || []);
+  paintRepoPanes(switchEl, filesEl, hubEl);
+  // The disk half is only worth showing once there is a disk to read.
+  if (hubView.repoReady) paintRepoFiles(filesEl, data.files || [], data.tags || []);
+  else filesEl.append(el('p', { class: 'muted', text: hubView.repoNote }));
+  paintHubFilters(hubFilterEl, hubResultsEl);
+  if (hubView.results) paintHubResults(hubResultsEl);
+
   if ((data.jobs || []).some((j) => j.state === 'running')) startRepoPolling();
+}
+
+// The switch between the two halves. Both stay built; only their visibility
+// moves, so nothing typed into either is lost by crossing over.
+function paintRepoPanes(host, filesEl, hubEl) {
+  host.innerHTML = '';
+  const panes = [['disk', 'On this disk'], ['hub', 'Hugging Face']];
+  const apply = () => {
+    filesEl.hidden = repoView.pane !== 'disk';
+    hubEl.hidden = repoView.pane !== 'hub';
+    for (const b of host.querySelectorAll('.hub-tab')) {
+      b.classList.toggle('active', b.dataset.pane === repoView.pane);
+    }
+  };
+  host.append(el('div', { class: 'hub-tabs' }, panes.map(([id, label]) => el('button', {
+    class: 'hub-tab', type: 'button', text: label, 'data-pane': id,
+    onclick: () => { repoView.pane = id; apply(); },
+  }))));
+  apply();
 }
 
 function paintRepoStatus(host, status) {
@@ -3984,9 +4057,7 @@ async function cancelRepoJob(id) {
 function startRepoPolling() {
   if (repoView.timer) return;
   repoView.timer = setInterval(async () => {
-    // Downloads can be started from either screen, and the panel that reports
-    // them is the same one, so the poll follows it rather than one tab.
-    if (huginn.tab !== 'repo' && huginn.tab !== 'hub') return stopRepoPolling();
+    if (huginn.tab !== 'repo') return stopRepoPolling();
     if (document.hidden || repoView.busy) return;
     const host = document.querySelector('.repo-jobs');
     if (!host) return stopRepoPolling();
@@ -4027,107 +4098,6 @@ async function refreshRepoFiles() {
   paintRepoFiles(filesHost, data.files || [], data.tags || []);
 }
 
-/* ---- finding something to download ---- */
-
-function paintRepoSearch(host) {
-  host.innerHTML = '';
-  const input = el('input', {
-    class: 'repo-query', type: 'search', placeholder: 'Search Hugging Face for GGUF models…',
-    value: repoView.query, autocomplete: 'off', spellcheck: 'false',
-  });
-  const results = el('div', { class: 'repo-results' });
-
-  const run = async () => {
-    repoView.query = input.value.trim();
-    if (!repoView.query) return;
-    results.innerHTML = '';
-    results.append(el('p', { class: 'muted', text: 'Searching…' }));
-    try {
-      const { results: found } = await api(
-        `/api/v1/models/search?q=${encodeURIComponent(repoView.query)}&gguf=true&limit=15`);
-      repoView.results = found || [];
-      paintRepoResults(results, repoView.results);
-    } catch (err) {
-      results.innerHTML = '';
-      results.append(el('p', { class: 'error', text: err.message }));
-    }
-  };
-
-  const form = el('form', { class: 'row-form repo-search-form', onsubmit: (e) => { e.preventDefault(); run(); } }, [
-    input,
-    el('button', { class: 'ghost-btn', type: 'submit', text: 'Search' }),
-  ]);
-
-  host.append(el('h3', { class: 'repo-h', text: 'Add a model' }), form, results);
-  if (repoView.results) paintRepoResults(results, repoView.results);
-}
-
-function paintRepoResults(host, found) {
-  host.innerHTML = '';
-  if (!found.length) {
-    host.append(el('p', { class: 'muted', text: 'Nothing matched. Hugging Face is searched for '
-      + 'repositories carrying GGUF files, which is what these backends can load.' }));
-    return;
-  }
-  for (const m of found) host.append(repoResultCard(m));
-}
-
-// A search result carries everything the Hub knows in one request, so the card
-// answers the two questions that decide a download — what is this, and will it
-// run here — without opening anything.
-function repoResultCard(m) {
-  const caps = m.capabilities || [];
-  const params = m.params_b
-    ? `${Number(m.params_b).toFixed(m.params_b < 10 ? 1 : 0)}B` : null;
-  // What it is.
-  const what = [
-    params,
-    m.architecture || null,
-    m.ctx_len ? `${compactCount(m.ctx_len)} ctx` : null,
-    caps.includes('tools') ? 'tools' : null,
-    caps.includes('vision') ? 'vision' : null,
-  ].filter(Boolean).join(' · ');
-  // Where it came from and what people make of it.
-  const who = [
-    m.license || null,
-    m.downloads ? `${compactCount(m.downloads)} downloads / 30d` : null,
-    m.downloads_all_time ? `${compactCount(m.downloads_all_time)} all time` : null,
-    m.likes ? `${compactCount(m.likes)} likes` : null,
-    m.updated_at ? `updated ${relativeTime(new Date(m.updated_at))}` : null,
-  ].filter(Boolean).join(' · ');
-
-  const detailHost = el('div', { class: 'repo-quants' });
-  // The download used to be behind a quiet "Files" link, which is why nobody
-  // found it. It is the reason this page exists, so it looks like it.
-  const toggle = el('button', {
-    class: 'ghost-btn repo-download-btn', type: 'button', text: 'Download…',
-    onclick: () => toggleRepoDetail(m.id, detailHost, toggle).catch(showError),
-  });
-
-  return el('div', { class: 'repo-result' }, [
-    el('div', { class: 'repo-result-head' }, [
-      el('span', { class: 'repo-result-id', text: m.id }),
-      fitBadge(m.fit, m.host_fits),
-      // A gated repository needs a token and accepted terms. Finding that out
-      // when the download fails is finding it out too late.
-      m.gated ? el('span', { class: 'repo-gated', text: 'gated' }) : null,
-      el('span', { class: 'repo-result-spacer' }),
-      m.quant_count
-        ? el('span', { class: 'muted', text: `${m.quant_count} quantisation${m.quant_count === 1 ? '' : 's'}` })
-        : null,
-      toggle,
-    ]),
-    what ? el('div', { class: 'muted', text: what }) : null,
-    who ? el('div', { class: 'muted', text: who }) : null,
-    // Which upstream model this was quantised from — the quickest way to tell
-    // a dozen repackagings of the same weights apart.
-    m.base_model && m.base_model !== m.id
-      ? el('div', { class: 'muted repo-result-base', text: `quantised from ${m.base_model}` })
-      : null,
-    detailHost,
-  ]);
-}
-
 /* ---- the fit badge ----
    A verdict is a statement about one machine, and until this server had a
    fleet there was only ever one it could be about. Now there are several, and
@@ -4166,28 +4136,6 @@ function compactCount(n) {
   return `${(v / 1000000).toFixed(v < 10000000 ? 1 : 0)}M`;
 }
 
-// The quantisations are fetched per repository rather than up front: it is one
-// Hub request each, and a search returning fifteen results would otherwise make
-// fifteen of them for a list the operator will mostly scroll past.
-async function toggleRepoDetail(hubID, host, button) {
-  if (host.childElementCount) {
-    host.innerHTML = '';
-    if (button) button.textContent = 'Download…';
-    return;
-  }
-  host.append(el('p', { class: 'muted', text: 'Loading files…' }));
-  if (button) button.textContent = 'Hide files';
-
-  const detail = await api(`/api/v1/models/detail/${hubID}`);
-  host.innerHTML = '';
-  const quants = detail.quants || [];
-  if (!quants.length) {
-    host.append(el('p', { class: 'muted', text:
-      'No GGUF files in this repository — it may only carry the original weights.' }));
-    return;
-  }
-  for (const q of quants) host.append(repoQuantRow(detail, q));
-}
 
 function repoQuantRow(detail, q, opts = {}) {
   // The fit verdict is the whole reason this is worth showing in a list: it
@@ -4265,14 +4213,14 @@ async function startRepoDownload(detail, q, button, revision) {
 
 /* ---- what is on the drive ---- */
 
+// No heading of its own: the switch above names this half, and a second title
+// under it saying the same thing reads as a section inside a section.
 function paintRepoFiles(host, files, vocab) {
   host.innerHTML = '';
-  host.append(el('h3', { class: 'repo-h', text: 'On the drive' }));
-
   if (!files.length) {
     host.append(el('p', { class: 'muted', text:
-      'Nothing here yet. Search above, or copy GGUF files onto the drive by hand — '
-      + 'the listing walks the directory, so anything you put there shows up.' }));
+      'Nothing here yet. Look on Hugging Face, or copy GGUF files onto the drive by '
+      + 'hand — the listing walks the directory, so anything you put there shows up.' }));
     return;
   }
   for (const f of files) host.append(repoFileCard(f, vocab));
@@ -4402,9 +4350,11 @@ async function deleteRepoFile(f) {
 
 
 /* ---------- browsing the Hugging Face Hub ----------
-   The Repository tab answers "what do I have"; this one answers "what is out
-   there". They are separate screens because they are separate questions, and
-   the same split already exists between Models and Repository.
+   The Hugging Face half of the Repository screen: what is out there, beside
+   what is already on the disk. It has no renderer of its own — renderAdminRepo
+   draws the head both halves share and hands this one its two elements — but
+   its state and its painters stay together here, because they are a browser
+   for somebody else's index and not a view of anything this server owns.
 
    Every request goes through the server. The browser has no Hub token, it
    would be metered against its own address, and it cannot grade a model
@@ -4425,46 +4375,6 @@ const hubView = {
   fitHosts: [],
   open: null, repoReady: false, repoNote: '',
 };
-
-async function renderAdminHub(body) {
-  stopRepoPolling();
-
-  const rateEl = el('div', { class: 'hub-rate' });
-  const filterEl = el('div', { class: 'hub-filters' });
-  const jobsEl = el('div', { class: 'repo-jobs' });
-  const resultsEl = el('div', { class: 'hub-results' });
-  body.append(rateEl, filterEl, jobsEl, resultsEl);
-
-  // The repository state decides whether a download can be offered at all.
-  // Its absence is not an error here — the Hub is perfectly browsable without
-  // anywhere to put what it holds.
-  const [status, repo, vocab] = await Promise.all([
-    api('/api/v1/hub/status').catch(() => ({})),
-    api('/api/v1/repo').catch(() => null),
-    hubView.vocab ? Promise.resolve(null) : api('/api/v1/hub/tags').catch(() => ({ tags: {} })),
-  ]);
-  if (vocab) hubView.vocab = vocab.tags || {};
-  if (status.rate_limit) hubView.rate = status.rate_limit;
-  hubView.hasToken = Boolean(status.has_token);
-  hubView.fitHosts = status.fit_hosts || [];
-
-  const st = (repo && repo.status) || {};
-  hubView.repoReady = Boolean(st.available && st.initialised);
-  hubView.repoNote = !repo
-    ? 'No model repository is configured on this server, so there is nowhere to download to.'
-    : (!st.configured ? 'No model repository is configured — see Huginn → Repository.'
-      : (!st.available ? 'The model repository is not available right now — see Huginn → Repository.'
-        : (!st.initialised ? 'The model repository has not been initialised — see Huginn → Repository.'
-          : '')));
-
-  paintHubRate(rateEl);
-  paintHubFilters(filterEl, resultsEl);
-  if (repo && repo.jobs) {
-    paintRepoJobs(jobsEl, repo.jobs);
-    if (repo.jobs.some((j) => j.state === 'running')) startRepoPolling();
-  }
-  if (hubView.results) paintHubResults(resultsEl);
-}
 
 /* ---- what is left of the allowance ---- */
 
