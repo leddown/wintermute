@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"wintermute/internal/llm"
 	"wintermute/internal/store"
@@ -199,6 +200,7 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 	if !sess.Tools {
 		system = PlainPrompt
 	}
+	system += "\n\n" + todayLine()
 	if extraPrompt != "" {
 		system += "\n\n" + extraPrompt
 	}
@@ -333,6 +335,30 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		return nil, fmt.Errorf("%w; the last tool error was %s", ErrTooManyIterations, lastFailure)
 	}
 	return nil, ErrTooManyIterations
+}
+
+// todayLine tells the model what day it is.
+//
+// Without it a model asked for "next Friday" has nothing to count from and
+// answers out of its training data: on a live server this put a task created
+// in August 2026 due on 2023-10-13, which is a Friday — just the wrong one, in
+// the wrong year. Nothing else was going to catch that. The date tools take
+// YYYY-MM-DD and 2023-10-13 is perfectly well formed, so it was stored, shown
+// and never questioned.
+//
+// The date is not in the constant prompts because it is not constant. It is
+// appended here, where every turn is assembled, so a server left running
+// across midnight starts saying the new date without a restart.
+//
+// It does put a daily-changing line in the cached prefix, which is the thing
+// the system prompt is otherwise kept free of. That is a cache miss a day per
+// session — the rule exists to keep out things that change every *turn*, and
+// paying once a day to stop the assistant inventing dates is not a close call.
+func todayLine() string {
+	now := time.Now()
+	return fmt.Sprintf("Today is %s. Work out any relative date — \"tomorrow\", "+
+		"\"next Friday\", \"in three weeks\" — from that, and send tools an "+
+		"absolute YYYY-MM-DD.", now.Format("Monday, 2 January 2006"))
 }
 
 // registryFor layers a client's declared tools over the server's own, then

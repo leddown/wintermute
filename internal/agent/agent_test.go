@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"wintermute/internal/llm"
 	"wintermute/internal/store"
@@ -314,7 +316,9 @@ func TestToollessSessionOffersNoToolsAndIsFramedAsSuch(t *testing.T) {
 	if n := len(p.requests[0].Tools); n != 0 {
 		t.Errorf("toolless session offered %d tools, want 0: %+v", n, p.requests[0].Tools)
 	}
-	if p.requests[0].System != PlainPrompt {
+	// Prefix rather than equality: the date is appended to whichever prompt is
+	// chosen, and a Core chat needs it as much as any other.
+	if !strings.HasPrefix(p.requests[0].System, PlainPrompt) {
 		t.Errorf("toolless session got the tool-using system prompt:\n%s", p.requests[0].System)
 	}
 }
@@ -340,7 +344,48 @@ func TestToolUsingSessionStillGetsItsTools(t *testing.T) {
 	if len(p.requests[0].Tools) == 0 {
 		t.Error("ordinary session was offered no tools")
 	}
-	if p.requests[0].System == PlainPrompt {
+	if strings.HasPrefix(p.requests[0].System, PlainPrompt) {
 		t.Error("ordinary session got the toolless prompt")
+	}
+}
+
+// The model has to be told what day it is.
+//
+// Without it, "next Friday" is answered from training data: on the live server
+// a task created in August 2026 came back due 2023-10-13 — a Friday, but the
+// wrong one, in the wrong year. Nothing downstream could catch that, because
+// 2023-10-13 is a perfectly well-formed date.
+func TestSystemPromptCarriesTodaysDate(t *testing.T) {
+	p := &scriptedProvider{responses: []llm.Response{reply("ok")}}
+	a, st, sess := newTestAgent(t, p, tool.NewRegistry())
+
+	if _, err := a.Advance(context.Background(), sess, nil, llm.UserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	today := time.Now().Format("Monday, 2 January 2006")
+	if !strings.Contains(p.requests[0].System, today) {
+		t.Errorf("system prompt does not say today is %q:\n%s", today, p.requests[0].System)
+	}
+
+	// A toolless Core session needs it just as much: it is asked the date
+	// questions a person asks, and has no agenda tool to learn it from.
+	client, _, err := st.CreateClient(context.Background(), "core", store.KindHarness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := st.CreateSession(context.Background(), client.ID, "core", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.responses = append(p.responses, reply("ok"))
+	if _, err := a.Advance(context.Background(), plain, nil, llm.UserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	last := p.requests[len(p.requests)-1].System
+	if !strings.Contains(last, today) {
+		t.Errorf("toolless session was not told the date:\n%s", last)
+	}
+	if !strings.Contains(last, "no tools in this conversation") {
+		t.Errorf("toolless session lost its plain framing:\n%s", last)
 	}
 }
