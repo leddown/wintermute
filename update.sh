@@ -8,6 +8,35 @@
 # file, backends.json and systemd unit all exist.
 set -euo pipefail
 
+# The test gate. It runs before anything is built or installed, because the
+# point is to not replace a working server with a broken one.
+#
+# --skip-tests exists for the case the gate would otherwise make worse: the
+# service is already down and this deploy is the fix. It is a deliberate word
+# to type, not a default, and the script says loudly when it is used.
+RUN_TESTS=1
+for arg in "$@"; do
+  case "$arg" in
+    --skip-tests) RUN_TESTS=0 ;;
+    -h|--help)
+      echo "usage: ./update.sh [--skip-tests]"
+      echo
+      echo "  Rebuilds and reinstalls wintermute, then restarts the service."
+      echo "  First it checks the tree: gofmt, go vet, the test suite, the race"
+      echo "  detector over the concurrent packages, the Windows client build"
+      echo "  and the app.js parse. Around two and a half minutes."
+      echo
+      echo "  --skip-tests omits all of that. It is for restoring a server that"
+      echo "  is already down, not for saving time."
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument '$arg' (try --help)" >&2
+      exit 1
+      ;;
+  esac
+done
+
 SERVICE_NAME="${WINTERMUTE_SERVICE_NAME:-wintermuted}"
 SERVICE_USER="${WINTERMUTE_SERVICE_USER:-wintermute}"
 ENV_FILE="${WINTERMUTE_ENV_FILE:-/etc/wintermute/wintermute.env}"
@@ -58,6 +87,61 @@ else
   echo "    branch '$BRANCH' has no upstream — skipping pull, building what is checked out"
 fi
 echo "    at $(git -C "$REPO_ROOT" rev-parse --short HEAD) $(git -C "$REPO_ROOT" log -1 --pretty=%s)"
+
+if [ "$RUN_TESTS" -eq 1 ]; then
+  echo "==> Checking the tree before it replaces a running server"
+  # gofmt first: it is instant, and a tree that is not formatted is a tree
+  # somebody has not finished with.
+  if ! unformatted="$(cd "$REPO_ROOT" && gofmt -l .)"; then
+    echo "error: gofmt could not be run over $REPO_ROOT" >&2
+    exit 1
+  fi
+  if [ -n "$unformatted" ]; then
+    echo "error: these files are not gofmt'd, refusing to deploy:" >&2
+    printf '%s\n' "$unformatted" | sed 's/^/    /' >&2
+    echo "    run: gofmt -w ." >&2
+    exit 1
+  fi
+  echo "    gofmt clean"
+
+  (cd "$REPO_ROOT" && go vet ./...)
+  echo "    go vet clean"
+
+  (cd "$REPO_ROOT" && go test ./...)
+  echo "    tests pass"
+
+  # The race detector, on the packages that actually run things concurrently.
+  #
+  # Not on everything, and the reason is the clock rather than principle: the
+  # whole tree under -race takes about five minutes against thirty-five seconds
+  # plain, and a gate slow enough to be resented is a gate that gets skipped.
+  # These five cost about a hundred seconds and are where concurrency lives —
+  # the store is written from every goroutine at once, the agent runs the turn
+  # loop, the api serves them in parallel, the node package ingests reports
+  # while the rollup ticker folds them, and recall indexes in the background.
+  # A race in any of those corrupts a transcript rather than failing a test.
+  (cd "$REPO_ROOT" && go test -race \
+    ./internal/store/ ./internal/agent/ ./internal/api/ ./internal/node/ ./internal/recall/)
+  echo "    no data races in the concurrent packages"
+
+  # The client is cross-compiled for machines this one is not. A deploy that
+  # breaks that build is only discovered when somebody tries to build it.
+  (cd "$REPO_ROOT" && GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/wintermute)
+  echo "    windows client cross-compiles"
+
+  # The browser UI is embedded in the server binary, so a syntax error in it
+  # ships as a blank page rather than a build failure.
+  if command -v node >/dev/null 2>&1; then
+    node --check "$REPO_ROOT/internal/web/static/app.js"
+    echo "    app.js parses"
+  else
+    echo "    node not installed — skipping the app.js syntax check"
+  fi
+else
+  echo "==> Skipping checks (--skip-tests)"
+  echo "    Deploying an unverified tree. This is the right call only when the"
+  echo "    service is already down and this deploy is the fix."
+fi
 
 echo "==> Building wintermuted and wintermute"
 BUILD_DIR="$(mktemp -d)"
