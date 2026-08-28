@@ -46,8 +46,7 @@
         <span id="model" class="muted"></span>
       </div>
       <nav id="views" class="views">
-        <button class="view-btn active" data-view="core">Core</button>
-        <button class="view-btn" data-view="workspace">Workspace</button>
+        <button class="view-btn active" data-view="workspace">Workspace</button>
         <button class="view-btn" data-view="portfolio">Portfolio</button>
         <button class="view-btn" data-view="company">Company</button>
         <button class="view-btn" data-view="utilities">Utilities</button>
@@ -58,69 +57,31 @@
     </header>
 
     <div class="body">
-      <!-- Core: the chat and the agents that scope it. Same pane-swap shape as
-           the Company view, except each group's *sidebar* content swaps too —
-           these two have live lists (sessions, agents) rather than fixed tabs. -->
-      <section class="view active" data-view="core">
-        <aside class="sidebar">
-          <div class="sidebar-head"><span class="muted">Core</span></div>
-          <div class="sidebar-head" style="margin-top:16px;">
-            <span class="muted">Sessions</span>
-            <button id="new-session" class="link-btn">New</button>
-          </div>
-          <ul id="sessions"></ul>
-        </aside>
+      <!-- Workspace: everything that is worked on, and the assistant it is
+           worked on with. Each group's sidebar travels with its pane, because
+           a list of sessions means nothing beside an agenda and a list of task
+           lists means nothing beside a pad.
 
-        <!-- This element is moved bodily into the chat dock when the dock is
-             opened, and put back when it closes. Moving it rather than
-             building a second transcript is what keeps one composer, one
-             handler and one scroll position — see openDock() in app.js. -->
-        <main id="chat" class="chat">
-          <div id="messages" class="messages">
-            <div class="empty muted">Ask a question. Anything — this conversation is not
-              scoped to an agent's documents, so it is the place for the general one.</div>
-          </div>
-          <!-- Precise phrasings for a small backend. Hidden unless the active
-               model is under the size where wording starts to matter; see
-               renderWordCloud() in app.js. -->
-          <div id="word-cloud" class="word-cloud" hidden></div>
-          <form id="composer" class="composer">
-            <textarea id="input" rows="1" placeholder="Ask anything…" autocomplete="off"></textarea>
-            <button id="send" type="submit" aria-label="Send">↑</button>
-          </form>
-          <div id="chat-agent" class="chat-agent"></div>
-          <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
-        </main>
-
-        <!-- Stands in for the chat while the dock has it. Deliberately carries
-             no data-pane: showCorePane() drives the rest of the group by that
-             attribute, and this one depends on the dock as well as the tab. -->
-        <main id="chat-away" class="pane" hidden>
-          <div class="pane-body">
-            <div class="empty muted">
-              <p>This conversation is open in the side panel.</p>
-              <button id="chat-return" class="ghost-btn">Bring it back here</button>
-            </div>
-          </div>
-        </main>
-
-      </section>
-
-      <!-- Workspace: what is being kept track of and what is being written
-           down. Tasks and the scratch pad were two tabs in the bar and are one
-           now, on the Core view's pane-swap shape — each group's sidebar
-           travels with its pane, because a list of task lists means nothing
-           beside a pad and neither does the reverse. -->
-      <section class="view" data-view="workspace">
+           The assistant is first because it is where the app lands. -->
+      <section class="view active" data-view="workspace">
         <aside class="sidebar">
           <div class="sidebar-head"><span class="muted">Workspace</span></div>
           <ul id="workspace-nav" class="pane-tabs">
-            <li data-pane="tasks" class="active">Tasks</li>
+            <li data-pane="assistant" class="active">Assistant</li>
+            <li data-pane="tasks">Tasks</li>
             <li data-pane="scratch">Scratch</li>
             <li data-pane="agents">Agents</li>
           </ul>
 
-          <div class="ws-pane" data-pane="tasks">
+          <div class="ws-pane" data-pane="assistant">
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Sessions</span>
+              <button id="new-session" class="link-btn">New</button>
+            </div>
+            <ul id="sessions"></ul>
+          </div>
+
+          <div class="ws-pane" data-pane="tasks" hidden>
             <div class="sidebar-head" style="margin-top:16px;">
               <span class="muted">Lists</span>
               <button id="new-list" class="link-btn">New</button>
@@ -159,7 +120,41 @@
           </div>
         </aside>
 
-        <main class="pane ws-pane" data-pane="tasks">
+        <!-- This element is moved bodily into the chat dock when the dock is
+             opened, and put back when it closes. Moving it rather than
+             building a second transcript is what keeps one composer, one
+             handler and one scroll position — see openDock() in app.js. -->
+        <main id="chat" class="chat ws-pane" data-pane="assistant">
+          <div id="messages" class="messages">
+            <div class="empty muted">Ask a question. Anything — this conversation is not
+              scoped to an agent's documents, so it is the place for the general one.</div>
+          </div>
+          <!-- Precise phrasings for a small backend. Hidden unless the active
+               model is under the size where wording starts to matter; see
+               renderWordCloud() in app.js. -->
+          <div id="word-cloud" class="word-cloud" hidden></div>
+          <form id="composer" class="composer">
+            <textarea id="input" rows="1" placeholder="Ask anything…" autocomplete="off"></textarea>
+            <button id="send" type="submit" aria-label="Send">↑</button>
+          </form>
+          <div id="chat-agent" class="chat-agent"></div>
+          <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
+        </main>
+
+        <!-- Stands in for the chat while the dock has it. Deliberately carries
+             no data-pane: showWorkspacePane() drives the rest of the group by
+             that attribute, and this one depends on the dock as well as the
+             tab. -->
+        <main id="chat-away" class="pane" hidden>
+          <div class="pane-body">
+            <div class="empty muted">
+              <p>This conversation is open in the side panel.</p>
+              <button id="chat-return" class="ghost-btn">Bring it back here</button>
+            </div>
+          </div>
+        </main>
+
+        <main class="pane ws-pane" data-pane="tasks" hidden>
           <div class="pane-head">
             <h2 id="tasks-title">Agenda</h2>
             <div class="pane-actions">
@@ -207,8 +202,8 @@
         <!-- Agents: a named set of documents and sources that a conversation
              can be scoped to. It sits here rather than beside the chat because
              it is a thing that gets curated — like a task list or a pad — and
-             not a thing you talk to. Talking to it happens in Core, which is
-             where "Start a chat" goes. -->
+             not a thing you talk to. Talking to it happens on the Assistant
+             pane, which is where "Start a chat" goes. -->
         <main class="pane ws-pane" data-pane="agents" hidden>
           <div class="pane-head">
             <h2 id="agent-title">Agents</h2>
@@ -414,7 +409,7 @@
       </section>
     </div>
 
-    <!-- Chat dock: Core → Chat, slid out over whatever view is open, so a
+    <!-- Chat dock: the Assistant pane, slid out over whatever view is open, so a
          question can be asked without navigating away from the thing that
          prompted it. The transcript is not duplicated here — the #chat element
          is moved into #dock-slot and back. -->
