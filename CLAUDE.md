@@ -96,6 +96,43 @@ the model sometimes writes a tool call into its visible text instead of
 emitting a tool_use block, which looks like a turn that succeeded while the
 action silently never ran).
 
+## Testing against running servers
+
+Testing against the live server on this network is **explicitly allowed and
+encouraged**. It is the user's own hardware, and a bug in a browser UI or a
+turn loop is often not reachable from `go test` at all — several faults in this
+repository were found only by driving the real thing and would have been
+guessed at wrongly otherwise.
+
+What that permits, without asking again each time:
+
+- **HTTP to the fleet and the server** — `wintermute.l3d.internal` (port 80,
+  nginx in front of wintermuted), the nodes, and any backend on the LAN.
+  Reading state, posting turns, creating throwaway sessions and lists.
+- **Throwaway servers** built from the working tree, on `127.0.0.1`. Use a
+  scratch `WINTERMUTE_DB` and `WINTERMUTE_METRICS_DB`; never point one at
+  `/var/lib/wintermute/wintermute.db`.
+- **A real browser.** `google-chrome --headless=new` against a local server is
+  how the UI actually gets checked; `node --check` only proves it parses.
+  Driving it needs a page on the same origin that can seed
+  `localStorage.wintermute_token`, so a small proxy in the scratchpad that
+  injects a script into `index.html` is the established trick.
+- **Stand-in model endpoints.** Point `ANTHROPIC_BASE_URL` at a local stub that
+  records what it was sent, when the question is what the model was handed
+  rather than what it replied. That is how "does a toolless session really get
+  no tools" was answered.
+
+Credentials: ask. The user will issue a client token
+(`wintermuted -add-client <name>`) for the live server when one is needed.
+Tokens are shown once, belong in the scratchpad rather than the repo, and
+should be treated as spent once they have appeared in a transcript — say so and
+suggest rotating (`sudo scripts/clients.sh revoke <name>`).
+
+Still off limits without asking first: anything that writes to the live
+server's own database or filesystem beyond ordinary API use — deleting
+conversations, `-reindex-memory`, clearing the model repository, restarting the
+service, or `update.sh`. Deploying is the user's call, not a test step.
+
 ## Memory
 
 Every conversation is recorded in `messages` as neutral role/content text and
