@@ -474,3 +474,98 @@ func TestParseBoolCell(t *testing.T) {
 		}
 	}
 }
+
+// ---- the default list ----
+
+// The case that made add_todo_task unusable: a fresh install has no lists, so
+// there is no list_id to send, and refusing left the model nothing to do but
+// claim the task had been added.
+func TestDefaultListCreatesInboxWhenThereAreNone(t *testing.T) {
+	svc := newTestService(t)
+
+	list, err := svc.DefaultList()
+	if err != nil {
+		t.Fatalf("DefaultList on an empty install: %v", err)
+	}
+	if list.Slug != InboxListSlug {
+		t.Errorf("slug = %q, want %q", list.Slug, InboxListSlug)
+	}
+
+	// And a task really lands in it, rather than the list merely existing.
+	task, err := svc.CreateTask(Task{ListID: list.ID, Title: "buy milk"})
+	if err != nil {
+		t.Fatalf("CreateTask: %v", err)
+	}
+	if task.ListID != list.ID {
+		t.Errorf("task filed in list %d, want %d", task.ListID, list.ID)
+	}
+
+	// Asking twice reopens the same list rather than growing a second one.
+	again, err := svc.DefaultList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != list.ID {
+		t.Errorf("second call made list %d, want %d", again.ID, list.ID)
+	}
+}
+
+// One ordinary list is not a choice, so it is not worth refusing over.
+func TestDefaultListUsesTheOnlyList(t *testing.T) {
+	svc := newTestService(t)
+	only, err := svc.CreateList(List{Title: "Home"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := svc.DefaultList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != only.ID {
+		t.Errorf("chose list %d (%s), want %d", got.ID, got.Title, only.ID)
+	}
+	// No inbox was conjured alongside it.
+	lists, err := svc.ListLists(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lists) != 1 {
+		t.Errorf("lists = %d, want 1: %+v", len(lists), lists)
+	}
+}
+
+// The notes inbox is storage the tasks happen to share, not somewhere a task
+// belongs. With only that present the default is still a new task inbox.
+func TestDefaultListIgnoresTheNotesInbox(t *testing.T) {
+	svc := newTestService(t)
+	mustNote(t, svc, "a thought", "")
+
+	got, err := svc.DefaultList()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Slug != InboxListSlug {
+		t.Errorf("chose %q (slug %q), want the task inbox", got.Title, got.Slug)
+	}
+}
+
+// With a real choice to make, guessing files somebody's task where they will
+// not look. The refusal has to say what to send instead — being told "a task
+// needs a list" is what left the model with nowhere to go.
+func TestDefaultListRefusesToGuessBetweenLists(t *testing.T) {
+	svc := newTestService(t)
+	for _, name := range []string{"Home", "Work"} {
+		if _, err := svc.CreateList(List{Title: name}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := svc.DefaultList()
+	if err == nil {
+		t.Fatal("DefaultList chose between two lists, want a refusal")
+	}
+	for _, want := range []string{"list_id", "Home", "Work"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}

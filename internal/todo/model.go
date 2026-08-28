@@ -56,6 +56,20 @@ const (
 	notesListDesc  = "Quick notes. A note with a date shows up on the calendar."
 )
 
+// The default task list, on the same footing as the notes inbox and for the
+// same reason: something has to catch a task nobody said where to put.
+//
+// A fresh install has no lists at all, so "add a task to buy milk" had nowhere
+// to go — the tool refused, and a model that does not read its own tool
+// results then reports the task as created. Found by slug rather than by
+// title, so a list somebody named "Tasks" is theirs and not quietly annexed,
+// and made on demand so an install that never adds a task never grows it.
+const (
+	InboxListSlug  = "inbox"
+	InboxListTitle = "Tasks"
+	inboxListDesc  = "Tasks added without a list of their own."
+)
+
 // List is a named collection of tasks.
 type List struct {
 	ID          int64  `json:"id"`

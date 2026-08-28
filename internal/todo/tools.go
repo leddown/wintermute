@@ -99,18 +99,19 @@ func Register(reg *tool.Registry, svc *Service) error {
 		{
 			def: tool.Definition{
 				Name: "add_todo_task",
-				Description: "Add one task to an existing list. Use this to extend a list rather than " +
-					"creating a second list with a similar name.",
+				Description: "Add one task. Use this to extend a list rather than creating a " +
+					"second list with a similar name. Omit list_id to file it in the default " +
+					"list, which is the right thing unless the user named a list.",
 				Parameters: json.RawMessage(`{
 					"type": "object",
 					"properties": {
-						"list_id": {"type": "integer", "description": "The list to add to, from list_todo_lists."},
+						"list_id": {"type": "integer", "description": "The list to add to, from list_todo_lists. Omit to use the default list."},
 						"title": {"type": "string"},
 						"notes": {"type": "string"},
 						"priority": {"type": "string", "enum": ["low", "normal", "high"]},
 						"due_date": {"type": "string", "description": "YYYY-MM-DD."}
 					},
-					"required": ["list_id", "title"]
+					"required": ["title"]
 				}`),
 				Risk: tool.RiskWrite,
 			},
@@ -335,7 +336,21 @@ func addTaskHandler(svc *Service) tool.Handler {
 		if err := json.Unmarshal(raw, &in); err != nil {
 			return "", fmt.Errorf("invalid arguments: %w", err)
 		}
-		wanted, err := in.task(in.ListID)
+		// A task with no list named goes to the default one. Refusing instead
+		// is what made this tool unusable on a fresh install: there were no
+		// lists, so there was no list_id to send, and the only thing the model
+		// could do with "a task needs a list" was say it had added the task
+		// anyway. See Service.DefaultList for what "default" means and when it
+		// declines to guess.
+		listID := in.ListID
+		if listID <= 0 {
+			list, err := svc.DefaultList()
+			if err != nil {
+				return "", err
+			}
+			listID = list.ID
+		}
+		wanted, err := in.task(listID)
 		if err != nil {
 			return "", err
 		}
@@ -343,8 +358,15 @@ func addTaskHandler(svc *Service) tool.Handler {
 		if err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("Added task #%d %q to list #%d%s.",
-			task.ID, task.Title, task.ListID, dueSuffix(task.DueDate)), nil
+		// The list is named as well as numbered: when the tool chose it, the
+		// number alone does not tell the model where the task went, and it has
+		// to be able to say so.
+		where := fmt.Sprintf("list #%d", task.ListID)
+		if list, err := svc.GetList(task.ListID); err == nil {
+			where = fmt.Sprintf("%q (list #%d)", list.Title, task.ListID)
+		}
+		return fmt.Sprintf("Added task #%d %q to %s%s.",
+			task.ID, task.Title, where, dueSuffix(task.DueDate)), nil
 	}
 }
 

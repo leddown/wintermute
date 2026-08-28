@@ -191,6 +191,71 @@ func (s *Service) NotesList() (List, error) {
 	return created, nil
 }
 
+// DefaultList is where a task goes when nobody said which list it belongs to.
+//
+// The rule is deliberately narrow, because guessing wrong files somebody's
+// task somewhere they will not look for it:
+//
+//   - exactly one ordinary list: that one. There is no other candidate, and
+//     refusing would be pedantry.
+//   - none at all: the inbox, created here on demand. This is the case that
+//     made the tool unusable on a fresh install.
+//   - several: no answer. The caller is told which ones exist so it can pick,
+//     which is a thing it can act on — unlike being told a task needs a list,
+//     which does not say where to get one.
+//
+// The notes inbox is never a candidate. Notes and tasks share storage but not
+// vocabulary, and a task filed among the notes is a task nobody finds.
+func (s *Service) DefaultList() (List, error) {
+	lists, err := s.repo.ListLists(false)
+	if err != nil {
+		return List{}, err
+	}
+	ordinary := make([]List, 0, len(lists))
+	for _, l := range lists {
+		if l.Slug != NotesListSlug {
+			ordinary = append(ordinary, l)
+		}
+	}
+	switch len(ordinary) {
+	case 1:
+		return ordinary[0], nil
+	case 0:
+		return s.inboxList()
+	}
+	names := make([]string, 0, len(ordinary))
+	for _, l := range ordinary {
+		names = append(names, fmt.Sprintf("%d (%s)", l.ID, l.Title))
+	}
+	return List{}, fmt.Errorf("several lists exist, so say which one: pass list_id as %s",
+		strings.Join(names, ", "))
+}
+
+// inboxList returns the default task list, creating it the first time anything
+// asks. Same shape as NotesList, including the lost-race re-read: the slug is
+// unique, so the loser reads rather than reporting a conflict nobody caused.
+func (s *Service) inboxList() (List, error) {
+	list, err := s.repo.ListBySlug(InboxListSlug)
+	if err == nil {
+		return list, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return List{}, err
+	}
+	created, err := s.createList(List{
+		Title:       InboxListTitle,
+		Description: inboxListDesc,
+		Slug:        InboxListSlug,
+	})
+	if err != nil {
+		if list, lookupErr := s.repo.ListBySlug(InboxListSlug); lookupErr == nil {
+			return list, nil
+		}
+		return List{}, err
+	}
+	return created, nil
+}
+
 // ListNotes returns the notes, newest first.
 //
 // The ordering is the one place a note is read differently from a task: a list
