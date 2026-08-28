@@ -159,11 +159,10 @@ function switchView(name) {
     section.classList.toggle('active', section.dataset.view === name);
   }
   closeSidebar();
-  // Navigating to the chat's own pane is a request to see the conversation
-  // full size, so the dock hands it back — the same rule showCorePane()
-  // applies when the tab is clicked directly.
-  if (name === 'core' && core.pane === 'chat' && dock.open) closeDock();
-  $('chat-away').hidden = !(dock.open && name === 'core' && core.pane === 'chat');
+  // Navigating to Core is a request to see the conversation full size, so the
+  // dock hands it back rather than leaving the view showing a stand-in.
+  if (name === 'core' && dock.open) closeDock();
+  $('chat-away').hidden = !(dock.open && name === 'core');
   // The activity gauges poll on a timer. Leaving the view has to stop it, or
   // the server keeps being asked for /proc readings nobody is looking at.
   if (name !== 'utilities') stopActivityPolling();
@@ -194,40 +193,23 @@ function closeSidebar() {
   for (const bar of document.querySelectorAll('.sidebar')) bar.classList.remove('open');
 }
 
-/* ---------- core view: the chat and the agents that scope it ---------- */
+/* ---------- core view: the conversation ---------- */
 //
-// Two groups over two panes, like the Company view, except the swap covers the
-// sidebar as well: neither group has fixed tabs, they have live lists — the
-// sessions and the agents — so each group's list travels with its pane.
+// One pane and its session list. The agents used to be the second half of this
+// view, on the reasoning that an agent is what scopes a conversation — but an
+// agent is a thing that gets *curated*, a named set of documents and sources,
+// which is what the Workspace is for. Talking to one is still done here; only
+// the making and feeding of it moved.
 //
-// The chat is not lazy: it loads at boot because it is where the app lands.
-// Only the agent list waits for its first open.
-const core = { pane: 'chat', agentsLoaded: false };
-
-function showCorePane(name) {
-  core.pane = name;
-  for (const li of document.querySelectorAll('.core-tabs li')) {
-    li.classList.toggle('active', li.dataset.pane === name);
-  }
-  for (const node of document.querySelectorAll('.view[data-view="core"] .core-pane')) {
-    node.hidden = node.dataset.pane !== name;
-  }
-  // Arriving at the chat tab while the dock holds the transcript is a request
-  // to look at the conversation, and the pane it belongs in is now on screen —
-  // so the dock hands it back rather than leaving the tab showing a stand-in.
-  if (name === 'chat' && dock.open) closeDock();
-  $('chat-away').hidden = !(name === 'chat' && dock.open);
-  if (name === 'agents' && !core.agentsLoaded) {
-    core.agentsLoaded = true;
-    loadAgents().catch((err) => { core.agentsLoaded = false; showError(err); });
-  }
-}
+// So Core is the general question: whatever is asked without first deciding
+// which body of material it is about. The chat is not lazy — it loads at boot,
+// because it is where the app lands.
 
 // Whether the transcript is on screen. showError() writes a failed turn into
 // the transcript rather than a toast, but only when the user can see it — and
 // in the dock it is visible over every view, not just Core.
 function chatVisible() {
-  return dock.open || (state.view === 'core' && core.pane === 'chat');
+  return dock.open || state.view === 'core';
 }
 
 /* ---------- chat dock ---------- */
@@ -263,7 +245,7 @@ function openDock() {
   // final position when the transition is applied and nothing slides.
   requestAnimationFrame(() => $('dock').classList.add('open'));
   $('dock-toggle').setAttribute('aria-expanded', 'true');
-  $('chat-away').hidden = !(state.view === 'core' && core.pane === 'chat');
+  $('chat-away').hidden = state.view !== 'core';
   // The composer strip travels with #chat, so it needs no re-render; the dock
   // head says which agent is answering, which the strip alone would not make
   // obvious once it is floating over an unrelated view.
@@ -277,8 +259,8 @@ function closeDock() {
   dock.open = false;
   const chat = $('chat');
   dock.home.insertBefore(chat, dock.next);
-  // Back in the pane group, visibility is the tab's business again.
-  chat.hidden = core.pane !== 'chat';
+  // Back in Core, where it is the only thing in the pane.
+  chat.hidden = false;
   $('dock').classList.remove('open');
   $('dock-toggle').setAttribute('aria-expanded', 'false');
   $('chat-away').hidden = true;
@@ -298,13 +280,6 @@ document.addEventListener('keydown', (e) => {
   // Esc closes the dock, but not while a dialog is doing its own Esc handling.
   if (e.key === 'Escape' && dock.open && !document.querySelector('dialog[open]')) closeDock();
 });
-
-for (const li of document.querySelectorAll('.core-tabs li')) {
-  li.addEventListener('click', () => {
-    showCorePane(li.dataset.pane);
-    closeSidebar();
-  });
-}
 
 /* ---------- system gauges ---------- */
 //
@@ -1350,26 +1325,34 @@ $('agent-delete').addEventListener('click', async () => {
   await loadAgents();
 });
 
+// The agents are curated in the Workspace and talked to in Core, so this
+// crosses a view rather than a tab. switchView() closes the dock on the way, so
+// the new conversation lands full size where it was asked for.
 $('agent-chat').addEventListener('click', async () => {
   const agent = selectedAgent();
   if (!agent) return;
   state.chatAgent = agent.id;
-  showCorePane('chat');
+  switchView('core');
   await newSession();
   toast(`New chat as ${agent.name}`);
 });
 
 /* ================= WORKSPACE ================= */
 //
-// Two groups under one tab in the bar: the tasks and the scratch pad. Same
-// shape as Core — the sidebar swaps along with the pane, because a list of
-// task lists says nothing beside a pad and a list of pads says nothing beside
-// an agenda.
+// Three groups under one tab in the bar: the tasks, the scratch pad and the
+// agents. The sidebar swaps along with the pane, because a list of task lists
+// says nothing beside a pad, a list of pads says nothing beside an agenda, and
+// neither says anything beside a list of agents.
 //
-// Each half loads on its first open rather than when the view does, so
-// arriving at the tasks does not also fetch every pad.
+// The agents are here rather than beside the chat because what this view holds
+// is the material being kept: things that are made, added to and pruned. An
+// agent is exactly that — a named set of documents and sources — and the chat
+// is what you do with one afterwards.
+//
+// Each pane loads on its first open rather than when the view does, so
+// arriving at the tasks does not also fetch every pad and every agent.
 
-const ws = { pane: 'tasks', tasksLoaded: false, padsLoaded: false };
+const ws = { pane: 'tasks', tasksLoaded: false, scratchLoaded: false, agentsLoaded: false };
 
 // Returns the load, so the caller decides what a failure means: a tab click
 // reports it, and the view loader lets switchView() mark the view unloaded so
@@ -1389,12 +1372,13 @@ function showWorkspacePane(name) {
   return loadWorkspacePane(name);
 }
 
+const wsLoaders = { tasks: renderTasks, scratch: loadPads, agents: loadAgents };
+
 function loadWorkspacePane(name) {
-  const flag = name === 'scratch' ? 'padsLoaded' : 'tasksLoaded';
+  const flag = `${name}Loaded`;
   if (ws[flag]) return Promise.resolve();
   ws[flag] = true;
-  return (name === 'scratch' ? loadPads() : renderTasks())
-    .catch((err) => { ws[flag] = false; throw err; });
+  return wsLoaders[name]().catch((err) => { ws[flag] = false; throw err; });
 }
 
 // The view's own loader. Reaching it means the whole view is stale — either it
@@ -1402,7 +1386,8 @@ function loadWorkspacePane(name) {
 // are marked unloaded and whichever is on screen is fetched now.
 function openWorkspace() {
   ws.tasksLoaded = false;
-  ws.padsLoaded = false;
+  ws.scratchLoaded = false;
+  ws.agentsLoaded = false;
   return showWorkspacePane(ws.pane);
 }
 

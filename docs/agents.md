@@ -43,7 +43,7 @@ another's library by naming it.
 
 ## Making one
 
-In the browser UI, **Agents → New**. Give it a name (the id is derived from it),
+In the browser UI, **Workspace → Agents → New**. Give it a name (the id is derived from it),
 say what it is for, tick its sources, and optionally add instructions and a
 model pin. Then upload documents to it: PDF, text, markdown, HTML, CSV, JSON or
 YAML, up to 25 MiB each.

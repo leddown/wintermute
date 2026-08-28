@@ -64,44 +64,28 @@
       <section class="view active" data-view="core">
         <aside class="sidebar">
           <div class="sidebar-head"><span class="muted">Core</span></div>
-          <ul id="core-nav" class="core-tabs">
-            <li data-pane="chat" class="active">Chat</li>
-            <li data-pane="agents">Agents</li>
-          </ul>
-
-          <div class="core-pane" data-pane="chat">
-            <div class="sidebar-head" style="margin-top:16px;">
-              <span class="muted">Sessions</span>
-              <button id="new-session" class="link-btn">New</button>
-            </div>
-            <ul id="sessions"></ul>
+          <div class="sidebar-head" style="margin-top:16px;">
+            <span class="muted">Sessions</span>
+            <button id="new-session" class="link-btn">New</button>
           </div>
-
-          <div class="core-pane" data-pane="agents" hidden>
-            <div class="sidebar-head" style="margin-top:16px;">
-              <span class="muted">Agents</span>
-              <button id="new-agent" class="link-btn">New</button>
-            </div>
-            <ul id="agent-list"></ul>
-            <p class="hint muted">An agent is a named set of documents and sources.
-              A conversation started against one can read those and nothing else.</p>
-          </div>
+          <ul id="sessions"></ul>
         </aside>
 
         <!-- This element is moved bodily into the chat dock when the dock is
              opened, and put back when it closes. Moving it rather than
              building a second transcript is what keeps one composer, one
              handler and one scroll position — see openDock() in app.js. -->
-        <main id="chat" class="chat core-pane" data-pane="chat">
+        <main id="chat" class="chat">
           <div id="messages" class="messages">
-            <div class="empty muted">Ask about your models, your tasks, or anything else.</div>
+            <div class="empty muted">Ask a question. Anything — this conversation is not
+              scoped to an agent's documents, so it is the place for the general one.</div>
           </div>
           <!-- Precise phrasings for a small backend. Hidden unless the active
                model is under the size where wording starts to matter; see
                renderWordCloud() in app.js. -->
           <div id="word-cloud" class="word-cloud" hidden></div>
           <form id="composer" class="composer">
-            <textarea id="input" rows="1" placeholder="Message Wintermute…" autocomplete="off"></textarea>
+            <textarea id="input" rows="1" placeholder="Ask anything…" autocomplete="off"></textarea>
             <button id="send" type="submit" aria-label="Send">↑</button>
           </form>
           <div id="chat-agent" class="chat-agent"></div>
@@ -120,16 +104,6 @@
           </div>
         </main>
 
-        <main class="pane core-pane" data-pane="agents" hidden>
-          <div class="pane-head">
-            <h2 id="agent-title">Agents</h2>
-            <div class="row-actions">
-              <button id="agent-chat" class="ghost-btn" hidden>Start a chat</button>
-              <button id="agent-delete" class="ghost-btn danger" hidden>Delete</button>
-            </div>
-          </div>
-          <div id="agent-body" class="pane-body"></div>
-        </main>
       </section>
 
       <!-- Workspace: what is being kept track of and what is being written
@@ -143,6 +117,7 @@
           <ul id="workspace-nav" class="pane-tabs">
             <li data-pane="tasks" class="active">Tasks</li>
             <li data-pane="scratch">Scratch</li>
+            <li data-pane="agents">Agents</li>
           </ul>
 
           <div class="ws-pane" data-pane="tasks">
@@ -171,6 +146,16 @@
               <button id="new-pad" class="link-btn">New</button>
             </div>
             <ul id="pads"></ul>
+          </div>
+
+          <div class="ws-pane" data-pane="agents" hidden>
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Agents</span>
+              <button id="new-agent" class="link-btn">New</button>
+            </div>
+            <ul id="agent-list"></ul>
+            <p class="hint muted">An agent is a named set of documents and sources.
+              A conversation started against one can read those and nothing else.</p>
           </div>
         </aside>
 
@@ -217,6 +202,22 @@
                       placeholder="Nothing open. Pick a pad on the left, or make a new one."></textarea>
             <div class="pad-foot"><span id="pad-count" class="muted"></span></div>
           </div>
+        </main>
+
+        <!-- Agents: a named set of documents and sources that a conversation
+             can be scoped to. It sits here rather than beside the chat because
+             it is a thing that gets curated — like a task list or a pad — and
+             not a thing you talk to. Talking to it happens in Core, which is
+             where "Start a chat" goes. -->
+        <main class="pane ws-pane" data-pane="agents" hidden>
+          <div class="pane-head">
+            <h2 id="agent-title">Agents</h2>
+            <div class="row-actions">
+              <button id="agent-chat" class="ghost-btn" hidden>Start a chat</button>
+              <button id="agent-delete" class="ghost-btn danger" hidden>Delete</button>
+            </div>
+          </div>
+          <div id="agent-body" class="pane-body"></div>
         </main>
       </section>
 
