@@ -1041,7 +1041,39 @@ dialog h3 { margin: 0; font-size: 15px; }
   background: var(--surface);
   border-top: 1px solid var(--border);
   border-right: 1px solid var(--border);
-  display: flex; justify-content: space-between; gap: 6px;
+  display: flex; flex-direction: column; gap: 10px;
+  /* However many machines report, the panel never takes more than a bite of
+     the screen — past that it scrolls rather than climbing over the sidebar. */
+  max-height: 45vh; overflow-y: auto;
+}
+
+/* One machine: a name, and its dials. */
+.gauge-machine { display: flex; flex-direction: column; gap: 4px; }
+.gauge-machine.stale { opacity: 0.55; }
+
+.gauge-machine-head {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 10px; line-height: 1;
+}
+.gauge-machine-name {
+  color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.gauge-machine-state { color: var(--error); margin-left: auto; white-space: nowrap; }
+
+/* A grid rather than space-between, so a host with no GPU — two dials instead
+   of three — still lines its CPU dial up with everybody else's. */
+.gauge-dials {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  gap: 6px; justify-items: center;
+}
+
+/* Absent rather than empty, or the panel's own gap leaves a gutter under the
+   server on a machine with no fleet. */
+#node-gauges:empty { display: none; }
+#node-gauges {
+  display: flex; flex-direction: column; gap: 10px;
+  padding-top: 10px; border-top: 1px solid var(--border);
 }
 
 .resource-gauge { display: flex; flex-direction: column; align-items: center; gap: 3px; }
@@ -1088,8 +1120,12 @@ dialog h3 { margin: 0; font-size: 15px; }
   .resource-dial { transition: none; }
 }
 
-/* Room at the foot of every sidebar for the dials to sit over. */
-.sidebar { padding-bottom: 92px; }
+/* Room at the foot of every sidebar for the dials to sit over. The panel is
+   `position: fixed` and now grows with the fleet, so the reservation is
+   measured from it — SystemGauges writes --gauges-height after every paint.
+   The fallback is the height of the server row alone, which is what it was
+   before there were any nodes. */
+.sidebar { padding-bottom: calc(var(--gauges-height, 92px) + 12px); }
 
 /* On a phone the sidebar is off-canvas, so a fixed bottom-left widget would
    float over the content of whatever view is open. It goes away instead. */

@@ -170,6 +170,9 @@ function switchView(name) {
   // view stops it rather than leaving it asking about jobs behind a hidden
   // section. Its own guard only knows which tab is selected, not which view.
   if (name !== 'huginn') stopRepoPolling();
+  // Same reasoning for the fleet cards: leaving the view must drop the
+  // subscription, or it keeps redrawing a body nobody is looking at.
+  if (name !== 'huginn') stopFleetWatch();
   // The pad saves on a timer, and switching view is quicker than the timer.
   // Leaving it holding unwritten keystrokes is how a scratch pad loses work.
   if (name !== 'workspace') flushPad();
@@ -294,6 +297,87 @@ document.addEventListener('keydown', (e) => {
 // sampler behind it is one shared instance averaging over a five-second
 // window, so a second reader costs a few /proc reads and cannot skew what the
 // Activity tab reports.
+
+/* ---------- the node feed ----------
+   One poll of /api/v1/nodes, shared by everything that wants it.
+   
+   Two things want it — the gauge panel at the bottom left, which is on screen
+   over every view, and the Fleet tab — and they wanted it at similar rates. A
+   timer each would have meant two requests for one answer, so there is one
+   timer and a list of subscribers.
+
+   The cadence is a deliberate fraction of how often the answer can change.
+   An agent samples every 15s and pushes every 60s by default, so nothing here
+   makes a number fresher than its last push: polling only decides how long a
+   reading sits on the server before it reaches the screen. Worst case on
+   screen is roughly push + poll, which is why this is well under the push
+   interval rather than equal to it — at 60s a reading could be two minutes old
+   before it was drawn. It is not a fast poll by any useful measure: the
+   response is about 600 bytes per node and costs the server single-digit
+   milliseconds, most of it one SELECT per node for the latest sample.
+
+   A server with no fleet stops the timer for good on the first answer. Nothing
+   will ever arrive, and a panel of dials for machines that do not exist is
+   worse than no panel. */
+const NODE_POLL_MS = 10000;
+
+const NodeFeed = (() => {
+  const subscribers = new Set();
+  let timer = null;
+  let busy = false;
+  let latest = null;
+  let dead = false;
+
+  async function tick() {
+    // A backgrounded tab is not worth polling for, but the timer keeps running
+    // so it resumes the moment the tab comes back.
+    if (document.hidden || busy) return;
+    busy = true;
+    try {
+      const data = await api('/api/v1/nodes');
+      if (!data.configured || !(data.nodes || []).length) {
+        // Configured-but-empty is still worth stopping for: a node that
+        // arrives later brings a page reload with it, because it is a machine
+        // being set up by somebody standing at this screen.
+        if (!data.configured) stop(true);
+      }
+      latest = data;
+      for (const fn of subscribers) {
+        try { fn(data); } catch { /* one bad subscriber must not stop the rest */ }
+      }
+    } catch {
+      // Leave the last readings on screen. These sit over every view and a
+      // failed poll must never reach showError(), which would write it into
+      // the chat.
+    } finally {
+      busy = false;
+    }
+  }
+
+  function start() {
+    if (timer || dead) return;
+    tick();
+    timer = setInterval(tick, NODE_POLL_MS);
+  }
+
+  function stop(permanently = false) {
+    if (permanently) dead = true;
+    if (timer) clearInterval(timer);
+    timer = null;
+  }
+
+  // Returns its own removal, so a caller that comes and goes — the Fleet tab —
+  // does not have to hold a name to unsubscribe by.
+  function subscribe(fn) {
+    subscribers.add(fn);
+    if (latest) fn(latest);
+    start();
+    return () => subscribers.delete(fn);
+  }
+
+  return { subscribe, start, current: () => latest };
+})();
+
 const SystemGauges = (() => {
   // The server averages each rate over a few seconds anyway, so polling faster
   // would show the same number more often rather than a more current one.
@@ -346,14 +430,19 @@ const SystemGauges = (() => {
       },
     };
 
+    const row = $('server-gauges');
     for (const [key, d] of Object.entries(dials)) {
-      const gauge = box.querySelector(`[data-gauge="${key}"]`);
+      // Scoped to the server's own row: the node rows below carry the same
+      // data-gauge names, and an unscoped lookup would paint the first one it
+      // found with the server's numbers.
+      const gauge = row.querySelector(`[data-gauge="${key}"]`);
       if (!gauge) continue;
       gauge.querySelector('.resource-dial').style.setProperty(
         '--fill', `${(Math.min(Math.max(d.fill, 0), 1) * 100).toFixed(1)}%`);
       gauge.querySelector('.resource-value').textContent = d.value;
       gauge.title = s.warming ? 'Measuring…' : d.title;
     }
+    reserveGaugeRoom();
   }
 
   async function tick() {
@@ -369,10 +458,111 @@ const SystemGauges = (() => {
     }
   }
 
+  /* ---- the fleet, under the server ----
+     Same dials, different three numbers. A node exists to run a model, so
+     what is worth a dial is whether its card is busy and whether a model is
+     resident — which are not the same question, and the second stays true
+     while the first sits at zero between turns.
+
+     A host with no GPU gets CPU and memory instead of two permanent zeroes,
+     on the rule the fleet cards already use: an absent card should read as
+     absent, not as a broken gauge. */
+
+  function nodeDials(n) {
+    const sample = n.latest;
+    const hasGPU = Boolean(n.gpus && n.gpus.length);
+    // Every GPU field is omitempty, so an idle card sends none of them; read
+    // through zero rather than off the sample.
+    const util = (sample && sample.gpu_util_percent) || 0;
+    const vramUsed = (sample && sample.gpu_mem_used_bytes) || 0;
+    const vramTotal = (sample && sample.gpu_mem_total_bytes) || 0;
+    const memUsed = (sample && sample.mem_used_bytes) || 0;
+    const memTotal = (sample && sample.mem_total_bytes) || 0;
+    const cpu = (sample && sample.cpu_percent) || 0;
+
+    const dials = [{
+      key: 'cpu',
+      label: 'CPU',
+      fill: cpu / 100,
+      value: `${Math.round(cpu)}%`,
+      title: `${n.name}: CPU ${cpu.toFixed(1)}% across ${n.cores || '?'} cores`,
+    }];
+
+    if (hasGPU) {
+      dials.push({
+        key: 'gpu',
+        label: 'GPU',
+        fill: util / 100,
+        value: `${Math.round(util)}%`,
+        title: `${n.name}: GPU ${util.toFixed(0)}% busy`,
+      }, {
+        key: 'vram',
+        label: 'VRAM',
+        fill: vramTotal ? vramUsed / vramTotal : 0,
+        value: vramTotal ? `${Math.round((vramUsed / vramTotal) * 100)}%` : '–',
+        title: `${n.name}: VRAM ${mb(vramUsed)} MB of ${mb(vramTotal)} MB — `
+          + 'weights resident on the card, which stays true while it is idle',
+      });
+    } else {
+      dials.push({
+        key: 'mem',
+        label: 'Memory',
+        fill: memTotal ? memUsed / memTotal : 0,
+        value: memTotal ? `${Math.round((memUsed / memTotal) * 100)}%` : '–',
+        title: `${n.name}: memory ${mb(memUsed)} MB of ${mb(memTotal)} MB`,
+      });
+    }
+    return dials;
+  }
+
+  function paintNodes(data) {
+    const host = $('node-gauges');
+    if (!host) return;
+    const nodes = (data && data.configured && data.nodes) || [];
+    host.replaceChildren(...nodes.map((n) => {
+      // Same three-missed-reports rule as the Fleet cards, so a machine is not
+      // called absent here and present there.
+      const seen = n.last_seen_at ? new Date(n.last_seen_at) : null;
+      const stale = !seen || Date.now() - seen.getTime() > 3 * 60 * 1000;
+      return el('div', { class: `gauge-machine ${stale ? 'stale' : ''}` }, [
+        el('div', { class: 'gauge-machine-head' }, [
+          el('span', { class: 'gauge-machine-name', text: n.name }),
+          stale ? el('span', { class: 'gauge-machine-state', title:
+            'No report for over three intervals. The readings below are the last ones sent.',
+          text: 'out of contact' }) : null,
+        ]),
+        el('div', { class: 'gauge-dials' }, nodeDials(n).map((d) => el('div', {
+          class: 'resource-gauge', 'data-gauge': d.key, title: d.title,
+        }, [
+          el('div', {
+            class: 'resource-dial',
+            style: `--fill:${(Math.min(Math.max(d.fill, 0), 1) * 100).toFixed(1)}%`,
+          }, el('span', { class: 'resource-value', text: d.value })),
+          el('div', { class: 'resource-label', text: d.label }),
+        ]))),
+      ]);
+    }));
+    // The panel is hidden until something has been measured; a fleet arriving
+    // after the server's first reading must not leave it hidden.
+    if (nodes.length) $('system-gauges').hidden = false;
+    reserveGaugeRoom();
+  }
+
+  // The sidebars reserve room for this panel to sit over, and it is no longer a
+  // fixed height: it grows by a row per machine. Measured rather than counted,
+  // because a stale badge or a wrapped name changes the answer too.
+  function reserveGaugeRoom() {
+    const box = $('system-gauges');
+    if (!box) return;
+    const h = box.hidden ? 0 : box.offsetHeight;
+    document.documentElement.style.setProperty('--gauges-height', `${h}px`);
+  }
+
   function start() {
     if (timer) return;
     tick();
     timer = setInterval(tick, pollInterval);
+    NodeFeed.subscribe(paintNodes);
   }
 
   return { start };
@@ -3182,6 +3372,7 @@ async function renderHuginn() {
     backends: 'Backends', repo: 'Repository', models: 'Models', fleet: 'Fleet',
   };
   $('huginn-title').textContent = titles[huginn.tab];
+  stopFleetWatch();
   body.innerHTML = '';
 
   if (huginn.tab === 'repo') return renderAdminRepo(body);
@@ -3264,11 +3455,63 @@ async function renderAdminFleet(body) {
     body.append(nodeCard(n, residentByBackend.get(n.name) || [],
       (assigned.assignments || {})[n.name] || [], repo.files || [], data.agent_build));
   }
+  // The cards keep up on their own from here. What the poll returns is the
+  // nodes alone; the three lists a card is drawn against — resident models,
+  // assignments and the repository — change only when somebody changes them,
+  // and each of those already redraws the view, so they are held rather than
+  // re-fetched ten times a minute for an answer that has not moved.
+  watchFleet(body, data.nodes.map((n) => n.name).join('\n'), {
+    resident: residentByBackend,
+    assigned: assigned.assignments || {},
+    repoFiles: repo.files || [],
+  });
   // The instructions above only appear while the fleet is empty, which is the
   // one time nobody needs to look them up. Adding the second machine is when
   // the question comes back, and by then the page is a list of cards with no
   // way in.
   body.append(fleetGuideLink());
+}
+
+/* ---- keeping the cards current ----
+   An agent pushes every 60s by default, so a Fleet tab left open used to go
+   stale the moment it was drawn: the numbers on screen were as old as however
+   long you had been looking at them, with nothing saying so.
+
+   Two rules make the redraw safe to do behind somebody's back. A card holding
+   the focus is left alone — the store panel carries a select and an Unassign
+   button, and redrawing the element under an open dropdown closes it. And a
+   change to the *set* of nodes is not a repaint at all: a machine appearing or
+   going away needs the whole view, which is fetched properly.
+
+   The subscription is dropped when the tab is left, not merely paused. Every
+   route out of here — another Huginn tab, another view, a refresh — runs
+   through renderHuginn(), and an old subscriber would be writing into a body
+   that has since been emptied. */
+let unwatchFleet = null;
+
+function stopFleetWatch() {
+  if (unwatchFleet) unwatchFleet();
+  unwatchFleet = null;
+}
+
+function watchFleet(body, drawn, held) {
+  stopFleetWatch();
+  unwatchFleet = NodeFeed.subscribe((data) => {
+    if (huginn.tab !== 'fleet' || state.view !== 'huginn' || !body.isConnected) {
+      return stopFleetWatch();
+    }
+    const nodes = (data.configured && data.nodes) || [];
+    if (nodes.map((n) => n.name).join('\n') !== drawn) {
+      return renderHuginn().catch(showError);
+    }
+    const cards = body.querySelectorAll('.node-card');
+    nodes.forEach((n, i) => {
+      const card = cards[i];
+      if (!card || card.contains(document.activeElement)) return;
+      card.replaceWith(nodeCard(n, held.resident.get(n.name) || [],
+        held.assigned[n.name] || [], held.repoFiles, data.agent_build));
+    });
+  });
 }
 
 // A way back to the full instructions, on a page that otherwise only explains

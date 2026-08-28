@@ -436,19 +436,28 @@
          element for the whole app rather than a copy per view: it is pinned to
          the bottom-left of the window, which is where every view's sidebar
          already ends. Inside #app, so the gate never shows it. -->
-    <aside id="system-gauges" class="system-gauges" aria-label="Server activity" hidden>
-      <div class="resource-gauge" data-gauge="cpu">
-        <div class="resource-dial"><span class="resource-value">–</span></div>
-        <div class="resource-label">CPU</div>
+    <!-- One row per machine. The server's is fixed markup because it is always
+         there; the fleet's are built by SystemGauges as nodes report in, and
+         the whole panel is absent on a server with no fleet. -->
+    <aside id="system-gauges" class="system-gauges" aria-label="Machine activity" hidden>
+      <div id="server-gauges" class="gauge-machine">
+        <div class="gauge-machine-head"><span class="gauge-machine-name">this server</span></div>
+        <div class="gauge-dials">
+          <div class="resource-gauge" data-gauge="cpu">
+            <div class="resource-dial"><span class="resource-value">–</span></div>
+            <div class="resource-label">CPU</div>
+          </div>
+          <div class="resource-gauge" data-gauge="net">
+            <div class="resource-dial"><span class="resource-value">–</span></div>
+            <div class="resource-label">Net MB/s</div>
+          </div>
+          <div class="resource-gauge" data-gauge="disk">
+            <div class="resource-dial"><span class="resource-value">–</span></div>
+            <div class="resource-label">Disk MB/s</div>
+          </div>
+        </div>
       </div>
-      <div class="resource-gauge" data-gauge="net">
-        <div class="resource-dial"><span class="resource-value">–</span></div>
-        <div class="resource-label">Net MB/s</div>
-      </div>
-      <div class="resource-gauge" data-gauge="disk">
-        <div class="resource-dial"><span class="resource-value">–</span></div>
-        <div class="resource-label">Disk MB/s</div>
-      </div>
+      <div id="node-gauges"></div>
     </aside>
   </div>
 
