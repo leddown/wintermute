@@ -3339,7 +3339,14 @@ function nodeCard(n, resident, assignments, repoFiles, serverBuild) {
   // GPU gauges only on hosts that have one. A row of zeroes on a CPU-only box
   // reads as a broken card rather than an absent one.
   if (s && n.gpus && n.gpus.length) {
-    gaugeRow.push(gauge('GPU', `${s.gpu_util_percent.toFixed(0)}%`, s.gpu_util_percent));
+    // Read through zero rather than off the sample directly. Every GPU field on
+    // node.Sample is `omitempty`, so an idle card — nothing running, 0% and
+    // nothing resident — sends a sample with those keys absent entirely, and
+    // `undefined.toFixed()` throws out of the card, out of renderAdminFleet,
+    // and takes the whole Fleet page with it. An idle GPU is the ordinary case,
+    // not an edge one.
+    const util = s.gpu_util_percent || 0;
+    gaugeRow.push(gauge('GPU', `${util.toFixed(0)}%`, util));
     gaugeRow.push(gauge('VRAM', bytes(s.gpu_mem_used_bytes),
       s.gpu_mem_total_bytes ? (s.gpu_mem_used_bytes / s.gpu_mem_total_bytes) * 100 : 0));
     if (s.gpu_temp_c) {

@@ -1,186 +1,167 @@
-# Session handoff — 2026-08-24
+# Session handoff — 2026-08-28
 
 Working notes for picking this back up. Not project documentation: delete it
 when it stops being useful, or commit it if you'd rather keep the trail.
 
 ---
 
-## 1. Where the code stands
+## 1. Start here
 
-`main` is at **`6dd10aa`**, **not pushed** — three commits ahead of `origin/main`.
-The tree is clean apart from this file.
+**The Fleet page fault is found and fixed in the working tree, uncommitted.**
+It needs a deploy to reach the browser, and it needs one confirmation.
+
+`nodeCard()` read `s.gpu_util_percent.toFixed(0)` straight off the sample. Every
+GPU field on `node.Sample` is `omitempty`, so an **idle** card — nothing
+running, 0% util, nothing resident — sends a sample with those keys absent
+altogether. `undefined.toFixed()` throws out of `nodeCard`, out of
+`renderAdminFleet`, and takes the whole page. An idle GPU is the ordinary case,
+not an edge one, which is why this reads as "the Fleet page errors on refresh"
+rather than as an intermittent glitch.
+
+Proven, not reasoned: marshalling a `node.Node` with GPU facts and a
+zero-valued sample emits
+
+```
+"gpus":[{"index":0,"name":"RTX 4090",...}],"latest":{"cpu_percent":3,...}
+```
+
+— `gpu_util_percent`, `gpu_mem_used_bytes` and `gpu_mem_total_bytes` all
+absent. And `s.gpu_util_percent.toFixed(0)` on that object throws
+`TypeError: Cannot read properties of undefined (reading 'toFixed')`.
+
+The fix reads the field through zero, as `bytes()` and `gauge()` on the same
+three lines already did. The other four GPU reads were checked and were already
+guarded; `bytes()` and `gauge()` both coerce.
+
+**The one thing still unconfirmed** is whether this is the fault that was
+reported, because the error text never arrived. It is *a* fault that breaks
+exactly that page on exactly that action, but if the Fleet page still errors
+after the deploy below, the console text is still the thing to get.
+
+```bash
+# on the server
+git pull && sudo ./update.sh
+```
+
+### Two questions from the last session, both now answered
+
+- **Has the server been rebuilt since `8bfe1b9`? Yes.** `curl
+  http://wintermute.l3d.internal/app.js` returns 291,653 bytes, byte-identical
+  to the tree at `8bfe1b9`. The UI is embedded in the binary, so a matching
+  `app.js` is a matching build — and `app.js` did change in `8bfe1b9`. This is
+  a cheap deploy check worth keeping: it needs no token and no ssh.
+- **Is the new card code at fault? No.** `agentBuildChip()` and
+  `fleetGuideLink()` were both read through. Every value they touch is
+  interpolated or null-guarded, and `el()` takes varargs children and treats
+  `null` as absent, so the untested `fleetGuideLink()` cannot throw at render —
+  only inside its `onclick`. The bug is in older code that today's commits
+  merely made newly visible.
+
+Not done, and still worth doing: nobody has looked at the rendered page. No ssh
+key to the server from coven (`Permission denied (publickey,password)`), and no
+client token on coven either — `~/.config/wintermute/` does not exist — so the
+four-endpoint curl check below has not been run.
+
+```bash
+TOKEN=wm_...
+for p in /api/v1/nodes /api/v1/nodes/assignments /api/v1/models /api/v1/repo; do
+  printf '%-32s ' "$p"
+  curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $TOKEN" \
+    http://wintermute.l3d.internal$p
+done
+```
+
+Only `/api/v1/nodes` can break the render: it is fetched **without** a
+`.catch()` on purpose — it is the point of the screen — while the other three
+fall back to empty results. So a failure there takes the whole page and a
+failure elsewhere is silent.
+
+## 2. Where the code stands
+
+`main` is at **`8bfe1b9`**, pushed. The tree carries **two uncommitted
+changes**: this file, and the one-line GPU guard in `nodeCard()` described
+above. Six commits landed on 27 August:
 
 | Commit | What |
 |---|---|
-| `15f9b92` | EROFS told apart from EACCES in `writeFailure()` (yesterday's uncommitted work) |
-| `c69e4fa` | Split GGUFs fetched whole, or refused |
-| `6dd10aa` | Hugging Face search asks for the facts the cards were missing |
+| `12613f4` | Tasks and Scratch merged under one **Workspace** tab |
+| `61f9102` | `wintermute-node-update`: the node pulls its own builds |
+| `ba0ff9e` | `add-node.sh`, and `-add-client` stops writing to the wrong database |
+| `30fbdd4` | Utilities → Guides → Adding a node |
+| `fa359fd` | Token on its own line; the install address is checked, not guessed |
+| `8bfe1b9` | Real agent build identity, shown on the node card (committed by hand) |
 
-`go build`, `go vet`, `gofmt -l .`, `go test ./...`, the Windows cross-compile
-and `node --check` are all clean.
+`go build`, `go vet`, `gofmt -l .`, `go test ./...`, `shellcheck` on all five
+scripts and `node --check` were clean at `8bfe1b9`.
 
-Verified against the live Hub and a throwaway server on 127.0.0.1:18099, not
-just against tests:
+## 3. The two failures this took to find, and what closed them
 
-- 17 quantisations now listed for `unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF`
-  where the old dedupe showed about 13.
-- `BF16` reports 61.10 GB across its two shards; it previously offered shard
-  one alone at 49 GB and called it the model.
-- A 15-result search: 143 KB from the Hub, **14.5 KB** onward to the browser
-  once the chat templates are dropped.
+Both were diagnosed live against the real server, and both are worth
+recognising again because they produce identical symptoms to real faults.
 
-**Not yet done: nobody has looked at the rendered page.** The JavaScript is
-syntax-checked and the JSON behind it was read field by field, but the card
-layout itself is unreviewed in a browser. That is the first thing to do.
+**A 401 that was not a bad token.** A 46-character token written into the curl
+line twice makes one line long enough for a terminal to wrap. Pasting a wrapped
+line brings the wrap back as literal spaces — inside the `Authorization`
+header. The server answers `401 invalid token` while working perfectly. Every
+place that prints the command now assigns `TOKEN=` on its own line first.
 
-## 2. The live blocker: the deployed server is from 13 August
+**A connection refused that was not a wrong host.** `add-node.sh` guessed the
+port from `WINTERMUTE_ADDR`, which is what wintermuted *binds*. With nginx in
+front, that is precisely the port a node cannot reach. It now tries the plain
+host first and confirms the choice by fetching the installer with the token it
+just issued.
 
-**This supersedes yesterday's diagnosis, which was wrong.** Initialise did not
-fail because of `ProtectSystem=strict`. It failed because the endpoint is not
-in the running binary:
+To tell a mangled token from a genuinely wrong one:
+`curl -s -H "Authorization: Bearer $TOKEN" http://wintermute.l3d.internal/api/v1/me`
 
+## 4. Adding coven to the fleet — where it got to
+
+Not finished. The last known state:
+
+- The server had **no `WINTERMUTE_NODE_AGENT_DIR`**; the user was editing
+  `/etc/wintermute/wintermute.env` to add it. Whether `update.sh` has run since
+  is unknown — it is what builds the agent binaries into that directory.
+- A valid node token for `coven` was issued and confirmed working
+  (`/api/v1/me` → `{"kind":"node","name":"coven"}`). It has been pasted into
+  two conversations, so rotate it: `sudo scripts/clients.sh revoke coven`.
+- The install command itself was never successfully run on coven.
+
+The whole path, once the server is rebuilt:
+
+```bash
+# on the server
+sudo scripts/add-node.sh coven --server http://wintermute.l3d.internal
+# then the two lines it prints, on coven
 ```
-$ ls -l /usr/local/bin/wintermuted
--rwxr-xr-x 1 root root 23008316 Aug 13 15:59 /usr/local/bin/wintermuted
-$ strings /usr/local/bin/wintermuted | grep -cF /api/v1/repo/init
-0
-```
-
-Zero for `/api/v1/repo/init`, `repo/download` and `WINTERMUTE_MODEL_REPO`. The
-deployed build predates the model repository entirely, and since the browser UI
-is embedded in the binary, the served JS and CSS are that old too. Everything
-from `a6f72e8` onward — eight commits — is unreleased. **Nothing in this repo
-can be reviewed in the running UI until `./update.sh` is run.**
-
-That script rebuilds from the working tree and restarts the service; it was
-offered and explicitly declined on 24 August, so the stale deploy is a known
-state, not an oversight.
-
-### What is still expected to bite after deploying
-
-Both of these are unproven — they were reasoned from the unit file and the
-filesystem, not observed against a build that has the feature.
-
-1. **The unit still has no writable path outside its state directory:**
-
-   ```
-   ProtectSystem=strict
-   ReadWritePaths=          <-- empty
-   StateDirectory=wintermute
-   ```
-
-   So the EROFS reasoning probably does apply once the endpoint exists. The
-   fix, unchanged:
-
-   ```bash
-   sudo systemctl edit wintermuted
-   ```
-   ```ini
-   [Service]
-   ReadWritePaths=/mnt/usb-drive/wintermute
-   RequiresMountsFor=/mnt/usb-drive
-   ```
-
-2. **`/mnt` is empty on this host.** Whatever `WINTERMUTE_MODEL_REPO` points
-   at, `/mnt/usb-drive` is not mounted, so the write has nowhere to land
-   whatever the unit permits. Check `findmnt --target` before blaming systemd
-   a second time.
-
-`15f9b92` means the distinction will now be reported in the browser rather
-than guessed at: EROFS names `ReadWritePaths`, EACCES names `chown`.
-
-## 3. The Hugging Face search work — done, with notes
-
-Both complaints are addressed. `expand[]` on the search endpoint carries the
-real parameter count, architecture, context length, tool support, licence,
-base model, all-time downloads and quantisation count; results are graded for
-fit on the way past; the download is a `Download…` button rather than a text
-link called `Files`. Sizes come from `?blobs=true` on the detail request.
-
-Findings from yesterday's research that are now settled and need no revisiting:
-`expand[]=gguf` works on search, `usedStorage` is not expandable, and the Hub
-returns the full valid list in the body of a 400 if a bad one is passed.
-
-Three things worth knowing about what landed:
-
-- **The split-file fix went in separately** (`c69e4fa`), as a correctness bug
-  rather than a display one. It also fixed a second case of the same mistake:
-  `Q2_K_L` and `UD-Q2_K_XL` both infer to the label `Q2_K`, and deduping on
-  the label was dropping all but the first. Grouping is now by file name.
-- **A consequence of that:** several rows can share a label, so each quant row
-  shows its file name as well. `inferQuant` still does not know `_L`, `_XL` or
-  `UD-` variants, and they are graded for fit at the base label's bits per
-  weight — a small under-estimate, not a wrong one. Teaching `quantBPW` those
-  variants would be the honest fix if it ever matters.
-- **A shard set is several jobs, started together.** The job registry is
-  per-file and that was left alone. The progress panel therefore shows two
-  bars for one BF16 download, which is accurate but may read oddly.
-
-## 3b. Text brightness in Admin → Appearance
-
-Added 24 August (`8cf3889`). A slider lifting `--text` and `--muted` towards
-white, 100–175, per browser, on all four themes at once.
-
-- `--text` and `--muted` are now **derived** in `style.css` from `--text-base`
-  and `--muted-base`, which is what each palette sets. A new theme must define
-  the `-base` pair, not `--text`/`--muted` directly, or the lift will not
-  reach it.
-- The derivation is inside `@supports (color: color-mix(...))` with a plain
-  fallback before it. This is not defensive habit: a custom property that
-  fails to compute does not fall back to the palette, it invalidates every
-  colour depending on it, and on these backgrounds that is an unreadable page.
-- Applied in `theme-init.js` before first paint, so the clamp is duplicated
-  there. If the range changes, both files move.
-- Verified in headless Chrome rather than by eye: at 175 the body colour goes
-  from `#e6e8ec` to `#f9f9fa` and mean text-pixel brightness across the pane
-  from (115,129,152) to (157,166,180); junk and out-of-range input clamp to
-  100/175; the pre-paint path and the module path produce identical colours.
-
-Not checked: how the lift reads on the Matrix and 40K palettes on a real
-screen. Both mix towards white, so at the top of the range the Matrix green
-pales and the 40K brass loses some of its warmth. That is the trade the
-setting exists to offer, but nobody has looked at it.
-
-## 4. Other things left open
-
-- **Ollama ingest on a node is untested against a real Ollama.** The
-  `llamacpp` path was verified end to end against a live agent — fetch, config
-  generation, inventory reporting. The Ollama path (`/api/blobs` push then
-  `/api/create`) is covered by unit tests and the API docs only. First thing to
-  watch when a real Ollama node is pointed at it.
-- **llama-swap `-watch-config` reload over NFS is unverified.** Irrelevant to
-  the current design — the agent writes to local disk, where inotify works —
-  but it is why config generation happens on the node rather than the server
-  writing one config onto a share.
-- The user does not care about the **Ollama double-disk cost**, so the
-  Ollama-registry idea is closed. The agent still prints a one-line note about
-  it at startup; drop that if it becomes noise.
-
----
 
 ## 5. Environment notes
 
-- **Do not `pkill -f wintermuted`.** There is a production server running on
-  this machine as PID **1361** (`/usr/local/bin/wintermuted`, user
-  `wintermute`, since 08:53). A broad pkill matches it. Kill test servers by
-  exact PID, or match on the scratchpad path:
+Read these before assuming which machine anything is on — half of today went on
+getting this wrong.
 
-  ```bash
-  pgrep -f wintermuted | while read p; do
-    case "$(readlink /proc/$p/exe)" in "$SCRATCH"*) kill "$p";; esac
-  done
-  ```
+| | |
+|---|---|
+| **coven** — `10.232.231.8`, `coven.l3d.local` | The dev box, and the node being added. Checkout at `~/go/wintermute`. Ollama on `:11434`, postgres on `:5432`. |
+| **wintermute** — `wintermute.l3d.internal`, `10.232.231.9` | The server. Checkout at `~/code/wintermute`. **nginx 1.24.0 on port 80** in front of wintermuted. |
 
-- Test servers were run on **127.0.0.1:18099** to stay clear of anything real.
-- Scratchpad paths are session-specific; assume any named here is gone.
-- The production server now runs as **PIDs 1347 and 1361** (they change on
-  restart — check `readlink /proc/<pid>/exe` and the owning user before
-  killing anything).
-- Starting a throwaway server needs `WINTERMUTE_DB`, `WINTERMUTE_ADDR`,
-  `WINTERMUTE_LLM_PROVIDER=ollama`, `WINTERMUTE_LLM_BASE_URL`,
-  `WINTERMUTE_LLM_MODEL`, and `WINTERMUTE_METRICS_DB` if the fleet is involved.
-
----
+- **Use `http://wintermute.l3d.internal` with no port.** `:8088` is what
+  wintermuted binds behind the proxy; `:8080` is llama.cpp and is not running.
+- nginx **does** forward `Authorization` — proven, not assumed: a bad token
+  returns wintermuted's own `{"error":"invalid token"}` rather than
+  `missing bearer token`.
+- **coven runs its own `wintermuted` on `0.0.0.0:80`**, active and enabled,
+  logging a failed backend probe every 60s. It looks like a leftover and it is
+  what made coven look like the server for most of a session. If coven is only
+  ever a node: `sudo systemctl disable --now wintermuted`.
+- The service unit is **`wintermuted.service`**, not `wintermute.service`.
+- The server's database is `/var/lib/wintermute/wintermute.db`. The
+  `wintermute.db` in the coven checkout is a stray with **no clients in it**.
+- Deploying is `git pull && sudo ./update.sh` on the server. It restarts the
+  service, which is also what makes an env-file change take effect.
+- Throwaway servers were run on `127.0.0.1:8199` with `ANTHROPIC_API_KEY=dummy`
+  and scratch `WINTERMUTE_DB` / `WINTERMUTE_METRICS_DB`. Add
+  `WINTERMUTE_NODE_AGENT_DIR` if the install endpoints are involved, or they
+  answer 503.
 
 ## 6. Verification worth repeating after changes
 
@@ -188,11 +169,16 @@ setting exists to offer, but nobody has looked at it.
 go build ./... && go vet ./... && gofmt -l . && go test ./...
 GOOS=windows GOARCH=amd64 go build -o /dev/null ./cmd/wintermute   # client must cross-compile
 node --check internal/web/static/app.js                            # no JS test runner here
+shellcheck scripts/*.sh update.sh && shellcheck -s sh deploy/wintermute-node-update.sh
 ```
 
-The Repository and fleet work was verified against a real server and a real
-agent, not just tests — a genuine Hugging Face download (sha256 matched the
-published digest byte for byte) and a real node fetch (byte-identical, exactly
-one fetch across ~15 reports). Worth doing again for anything that touches
-those paths; the Xet digest bug in `a6f72e8` was invisible to unit tests and
-only showed up against the live API.
+There is no browser here — the Chrome extension was declined this session — so
+**every UI change today is unverified visually.** That includes the Workspace
+tab strip, the Scratch pad, the guide page and the node card. The markdown
+documents were at least rendered through the real `renderMarkdown` in node with
+a stub DOM, which is worth repeating for any doc change: it catches tables and
+lists that silently fall through to paragraphs.
+
+`GOOS=windows go build ./...` fails on `internal/modelrepo` and
+`internal/utilities` — pre-existing and expected. Only `./cmd/wintermute` is
+required to cross-compile.
