@@ -1014,7 +1014,20 @@ function emptyChatHint() {
   return 'Ask about your models, your tasks, or anything else.';
 }
 
+// Loading a transcript is slow enough to be overtaken.
+//
+// Crossing to a surface starts one of these without waiting for it, and a turn
+// can be sent while it is still in the air — the composer only needs
+// state.sessionId, which is set before the fetch. The load then came back and
+// replaced #messages wholesale, throwing away the question and the reply that
+// had arrived in the meantime: the conversation looked like it had swallowed
+// the turn. Every load takes a ticket, and a load that is no longer the newest
+// keeps its answer to itself. Sending takes a ticket too, so a load started
+// before a turn cannot repaint over it.
+let transcriptLoad = 0;
+
 async function openSession(id) {
+  const ticket = ++transcriptLoad;
   state.sessionId = id;
   const opened = sessionIndex.find((x) => x.id === id);
   // A conversation belongs to the surface its flag says it does, whichever
@@ -1033,6 +1046,9 @@ async function openSession(id) {
   renderChatControls();
   renderCorePicker();
   const { messages } = await api(`/api/v1/sessions/${id}/messages`);
+  // Overtaken: another session was opened, or a turn was sent, while this was
+  // in flight. Whatever is on screen now is newer than what this would paint.
+  if (ticket !== transcriptLoad) return;
   $('messages').innerHTML = '';
   // A conversation with nothing in it yet — a new one, or one kept off the
   // record — is a blank pane otherwise, which reads as a transcript that
@@ -1525,6 +1541,9 @@ $('composer').addEventListener('submit', async (e) => {
   if (!text || state.sending) return;
 
   state.sending = true;
+  // Anything already loading a transcript is now stale: this turn is about to
+  // put messages on screen that no in-flight fetch knows about.
+  transcriptLoad++;
   $('send').disabled = true;
   input.value = '';
   input.style.height = 'auto';
