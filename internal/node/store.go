@@ -39,7 +39,12 @@ func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
 // by the retention pass, which is exactly the workload secure_delete makes
 // slower.
 func Open(path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
+	// _txlock=immediate for the same reason as the conversation store: a
+	// deferred transaction that reads before it writes cannot wait for the
+	// lock upgrade, so busy_timeout does not apply to it. Ingest reads before
+	// it writes on every report.
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
+		"&_pragma=foreign_keys(ON)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open metrics database: %w", err)

@@ -35,6 +35,20 @@ func Open(path string) (*Store, error) {
 	// WAL keeps the browser UI's reads from blocking the harness's writes;
 	// busy_timeout avoids spurious SQLITE_BUSY under concurrent turns.
 	//
+	// _txlock=immediate is what makes that busy_timeout worth anything. Every
+	// transaction in this package writes, and several of them read first —
+	// AppendMessages takes the next seq before inserting. A deferred
+	// transaction that reads and then writes has to *upgrade* its lock, and
+	// SQLite will not wait for an upgrade: two connections both holding a read
+	// lock and both wanting to write would deadlock, so it returns
+	// SQLITE_BUSY at once and busy_timeout never comes into it. Two turns
+	// landing together then failed one of them about a tenth of a second in,
+	// which reads as a question that got no answer.
+	//
+	// Taking the write lock at BEGIN costs nothing here because there are no
+	// read-only transactions to serialise — plain queries run outside one — and
+	// a writer that waits is a writer busy_timeout can actually help.
+	//
 	// secure_delete makes a DELETE overwrite the row's content with zeros
 	// instead of only unlinking it. It is off by default in SQLite, which
 	// means deleted records survive in freeblocks and are routinely recovered
@@ -44,7 +58,7 @@ func Open(path string) (*Store, error) {
 	// It costs a little write throughput, which is not the scarce resource on
 	// a single-operator server.
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
-		"&_pragma=foreign_keys(ON)&_pragma=secure_delete(ON)"
+		"&_pragma=foreign_keys(ON)&_pragma=secure_delete(ON)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)

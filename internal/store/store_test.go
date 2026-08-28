@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
@@ -1018,5 +1019,60 @@ func TestBackendConfigKeepsItsNode(t *testing.T) {
 		if b.Name == "big" && b.Node != "erebus" {
 			t.Errorf("node = %q after moving it, want %q", b.Node, "erebus")
 		}
+	}
+}
+
+// Concurrent turns must not lose to each other.
+//
+// AppendMessages reads the next seq and then inserts, and a deferred
+// transaction that reads before it writes has to *upgrade* its lock. SQLite
+// refuses to wait for that upgrade — two connections both holding a read lock
+// and both wanting to write would deadlock — so it returns SQLITE_BUSY at once
+// and busy_timeout never comes into it. On the live server that surfaced as a
+// turn failing with "insert message: database is locked (5) (SQLITE_BUSY)"
+// about a tenth of a second after it was sent.
+func TestConcurrentAppendsDoNotDeadlockOut(t *testing.T) {
+	ctx := t.Context()
+	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	client, _, err := st.CreateClient(ctx, "harness", KindHarness)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 8
+	sessions := make([]*Session, writers)
+	for i := range sessions {
+		sessions[i], err = st.CreateSession(ctx, client.ID, "s", "", "", "", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var wg sync.WaitGroup
+	errs := make(chan error, writers*4)
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(sess *Session) {
+			defer wg.Done()
+			for n := 0; n < 4; n++ {
+				_, err := st.AppendMessages(ctx, sess.ID, llm.Message{
+					Role: llm.RoleUser, Content: "hello",
+				})
+				if err != nil {
+					errs <- err
+				}
+			}
+		}(sessions[i])
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("concurrent append failed: %v", err)
 	}
 }
