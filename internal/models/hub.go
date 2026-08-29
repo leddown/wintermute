@@ -892,7 +892,7 @@ func (h *Hub) fetch(ctx context.Context, rawURL, accept string, ttl time.Duratio
 	}
 	meta := hubMeta{next: nextCursor(resp.Header.Get("Link"))}
 
-	if err := h.classify(resp, payload); err != nil {
+	if err := h.classify(resp, rawURL, payload); err != nil {
 		return nil, meta, err
 	}
 	h.cache.put(rawURL, payload, meta, ttl)
@@ -900,7 +900,7 @@ func (h *Hub) fetch(ctx context.Context, rawURL, accept string, ttl time.Duratio
 }
 
 // classify turns a status code into an error a caller can act on.
-func (h *Hub) classify(resp *http.Response, payload []byte) error {
+func (h *Hub) classify(resp *http.Response, rawURL string, payload []byte) error {
 	switch {
 	case resp.StatusCode == http.StatusOK:
 		return nil
@@ -930,6 +930,9 @@ func (h *Hub) classify(resp *http.Response, payload []byte) error {
 			hint = "a token is configured, so the repository may not exist, or may be " +
 				"private, or gated on terms that account has not accepted"
 		}
+		if page := h.repoPage(rawURL); page != "" {
+			hint += ". Terms can only be accepted in a browser, at " + page
+		}
 		return fmt.Errorf("%w: %s (%s)", ErrHubForbidden, hubErrorText(payload, resp.Status), hint)
 
 	case resp.StatusCode >= 500:
@@ -938,6 +941,38 @@ func (h *Hub) classify(resp *http.Response, payload []byte) error {
 	default:
 		return fmt.Errorf("%w: %s", ErrHubBadRequest, hubErrorText(payload, resp.Status))
 	}
+}
+
+// repoPage turns the API URL a request failed on into the address of that
+// repository's page on the web.
+//
+// Worth the trouble because of what the operator has to do next: the Hub has no
+// API for accepting a gated repository's terms — that is a form in a browser,
+// and only there — so the link is the entire remedy for the commonest cause of
+// a 403 here. Reconstructing it by hand from a failed download is exactly the
+// step where an owner or a quantisation suffix gets mistyped.
+//
+// Empty for the URLs that name no single repository: search, whoami, the tag
+// vocabulary. Segments are taken from the escaped path, so what comes back is
+// as safe to print as what went out.
+func (h *Hub) repoPage(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	path := strings.Trim(u.EscapedPath(), "/")
+	if rest, ok := strings.CutPrefix(path, "api/models/"); ok {
+		path = rest
+	} else if strings.HasPrefix(path, "api/") {
+		return ""
+	}
+	// Whatever follows "owner/name" — a tree, a revision, a file — is detail
+	// the page itself does not want.
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return ""
+	}
+	return h.baseURL + "/" + parts[0] + "/" + parts[1]
 }
 
 // hubErrorText prefers the Hub's own explanation over the bare status line. It

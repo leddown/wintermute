@@ -1597,6 +1597,14 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
 .repo-gated { font-size: 11px; padding: 2px 8px; border-radius: 999px;
   border: 1px solid var(--accent); color: var(--accent); }
 
+/* The repository id is a link out to the Hub. Underlined only on hover, so a
+   page of results still reads as a list of names rather than a wall of blue. */
+a.repo-result-id { color: inherit; text-decoration: none; }
+a.repo-result-id:hover, a.repo-result-id:focus-visible {
+  color: var(--accent); text-decoration: underline;
+}
+.hub-card-original { color: var(--accent); white-space: nowrap; }
+
 .repo-quants { display: flex; flex-direction: column; gap: 6px; }
 .repo-quant {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;

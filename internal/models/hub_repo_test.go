@@ -82,6 +82,36 @@ func TestHubForbiddenSaysWhetherATokenWasSent(t *testing.T) {
 	}
 }
 
+// The Hub has no API for accepting a gated repository's terms — that is a form
+// in a browser and nowhere else — so a 403 that does not say which page to open
+// leaves the operator retyping an owner and a quantisation suffix from memory.
+func TestHubForbiddenNamesTheRepositoryPage(t *testing.T) {
+	refuse := func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"error":"Access to model is restricted"}`))
+	}
+
+	hub := hubHandler(t, "hf_test", refuse)
+	_, err := hub.Detail(context.Background(), "meta-llama/Llama-3.1-8B-Instruct", nil, 0)
+	want := hub.baseURL + "/meta-llama/Llama-3.1-8B-Instruct"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("want the page %q in %v", want, err)
+	}
+
+	// The revision and the file are the API's business, not the page's.
+	_, err = hub.Card(context.Background(), "meta-llama/Llama-3.1-8B-Instruct", "refs/pr/3")
+	if err == nil || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "README") {
+		t.Errorf("want the page alone, got %v", err)
+	}
+
+	// A search names no repository, so there is no page to offer and nothing
+	// that looks like one may be invented from the endpoint's own path.
+	_, err = hub.Search(context.Background(), SearchOptions{Query: "x"})
+	if err == nil || strings.Contains(err.Error(), "in a browser") {
+		t.Errorf("a search refusal has no repository page to name: %v", err)
+	}
+}
+
 // A 429 is routine at 500 calls per five minutes, and the only useful thing to
 // say about one is how long the wait is.
 func TestHubRateLimitCarriesTheWait(t *testing.T) {

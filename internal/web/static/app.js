@@ -5441,6 +5441,21 @@ function toggleHubTag(tag) {
   runHubSearch(resultsHost, true).catch(showError);
 }
 
+// A link out to the repository on the Hub itself.
+//
+// This panel is deliberately a summary — quantisations, files, revisions — and
+// the page has everything it leaves out: discussions, the author's other work,
+// the card as its author laid it out. It is also the only place a gated
+// repository's terms can be accepted. The Hub has no API for accepting them,
+// which is why the server's own 403 names this same address.
+function hubRepoLink(id, attrs) {
+  return el('a', Object.assign({
+    href: `https://huggingface.co/${encodeURI(id)}`,
+    target: '_blank',
+    rel: 'noopener noreferrer',
+  }, attrs));
+}
+
 // One card. The facts are the ones that decide whether to open it at all: what
 // it is, whether it runs here, and whether it can be fetched without an
 // account.
@@ -5473,10 +5488,13 @@ function hubResultCard(m) {
 
   const card = el('div', { class: 'repo-result' }, [
     el('div', { class: 'repo-result-head' }, [
-      el('span', { class: 'repo-result-id', text: m.id }),
+      hubRepoLink(m.id, { class: 'repo-result-id', text: m.id,
+        title: `Open ${m.id} on Hugging Face` }),
       fitBadge(m.fit, m.host_fits),
       m.gated ? el('span', { class: 'repo-gated', title:
-        'This repository needs a token and its terms accepted before it can be fetched.',
+        'This repository needs a token and its terms accepted before it can be fetched. '
+        + 'Accepting them can only be done in a browser — open the id to the left, on the '
+        + 'account whose token this server holds.',
       text: 'gated' }) : null,
       el('span', { class: 'repo-result-spacer' }),
       m.quant_count
@@ -5632,13 +5650,24 @@ async function paintHubTab(host, open) {
     const key = `card:${open.revision}`;
     const { card } = await hubFetch(open, key, `/api/v1/hub/card/${id}${hubRev(open)}`);
     host.innerHTML = '';
+    // Rendered here as a safe subset, so images, HTML and anything clever in it
+    // are gone. When the card is the thing being researched, the original is
+    // one click away rather than a URL to reassemble by hand.
+    const original = hubRepoLink(open.id, {
+      class: 'hub-card-original', text: 'Read it on Hugging Face \u2197',
+    });
     if (!card || !card.trim()) {
-      host.append(el('p', { class: 'muted', text: 'This repository has no model card.' }));
+      host.append(el('p', { class: 'muted' }, [
+        el('span', { text: 'This repository has no model card. ' }), original,
+      ]));
       return;
     }
-    host.append(el('p', { class: 'muted hub-card-note', text:
-      'Written by whoever published this repository. Treat it the way you would any page '
-      + 'off the internet: it is shown, not trusted, and nothing in it has been acted on.' }));
+    host.append(el('p', { class: 'muted hub-card-note' }, [
+      el('span', { text:
+        'Written by whoever published this repository. Treat it the way you would any page '
+        + 'off the internet: it is shown, not trusted, and nothing in it has been acted on. ' }),
+      original,
+    ]));
     // Rendered into DOM nodes by the same subset renderer the FAQ uses. No
     // innerHTML anywhere on the path, so raw HTML in a card appears as the text
     // it is rather than becoming markup in this page.
