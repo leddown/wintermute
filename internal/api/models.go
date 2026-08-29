@@ -525,7 +525,7 @@ func (s *Server) handleModelSearch(w http.ResponseWriter, r *http.Request) {
 		// search now carries the GGUF header for every result, so the verdict
 		// costs nothing extra and answers the only question that matters
 		// before opening one.
-		Hosts:         s.catalog.Hosts(r.Context()),
+		Hosts:         s.catalog.FitHosts(r.Context()),
 		ContextTokens: queryInt(r, "context", defaultPlanContext),
 	})
 	if err != nil {
@@ -554,7 +554,7 @@ func (s *Server) handleModelDetail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	detail, err := s.catalog.Hub().Detail(r.Context(), id,
-		s.catalog.Hosts(r.Context()), queryInt(r, "context", defaultPlanContext))
+		s.catalog.FitHosts(r.Context()), queryInt(r, "context", defaultPlanContext))
 	if err != nil {
 		s.log.Warn("hub detail failed", "model", id, "error", err)
 		writeError(w, http.StatusBadGateway, "could not fetch model: "+err.Error())
@@ -623,7 +623,7 @@ func (s *Server) handleFit(w http.ResponseWriter, r *http.Request) {
 		ContextTokens: req.ContextTokens,
 		KVCacheType:   req.KVCacheType,
 		ActiveParamsB: req.ActiveParamsB,
-	}, s.catalog.Hosts(r.Context()))
+	}, s.catalog.FitHosts(r.Context()))
 	// The best verdict is spread at the top level, so a reader that predates
 	// the fleet finds the same fields where it left them. hosts carries what
 	// each machine said, which is the question that follows immediately.

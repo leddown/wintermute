@@ -1612,7 +1612,11 @@ pre.wrap { white-space: pre-wrap; word-break: break-word; margin: 0; font: inher
 /* The fit verdict is why a list of eight near-identical filenames is readable
    at all: it says which one will actually run, and on which machine. The name
    rides inside the pill rather than beside it so the two cannot be read apart
-   — a verdict separated from its host is worse than no verdict. */
+   — a verdict separated from its host is worse than no verdict.
+
+   One pill per machine, wrapped as a group so the fleet's answers stay together
+   and cannot be read as belonging to whatever else shares the row. */
+.repo-fits { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .repo-fit { font-size: 11px; padding: 2px 8px; border-radius: 999px;
   border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .repo-fit.fits { border-color: var(--gain, #3fb950); color: var(--gain, #3fb950); }

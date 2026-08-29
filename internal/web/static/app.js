@@ -4656,33 +4656,82 @@ async function refreshRepoFiles() {
   paintRepoFiles(filesHost, data.files || [], data.tags || []);
 }
 
-/* ---- the fit badge ----
+/* ---- which machines run it ----
    A verdict is a statement about one machine, and until this server had a
    fleet there was only ever one it could be about. Now there are several, and
-   "fits" without a name is an answer to a question nobody asked: what is being
-   decided is which box to put the weights on.
+   the reader's question is not "does it fit" but "which box do I put it on" —
+   so the answer is one chip per machine, named, coloured by its own verdict,
+   and ordered with the ones that would run it first.
 
-   The name is omitted when the server has no fleet, where it would be noise —
-   the badge then reads exactly as it always did. */
+   A single word cannot say this. Collapsing several machines into the best of
+   them throws away the half the reader wanted: "no" from a Celeron serving the
+   API is how a model that runs perfectly well on the box with the card in it
+   gets skipped, and "fits" without a name is a promise nobody can act on.
+
+   A server with one machine has nothing to choose between and gets one chip,
+   exactly as it always did. */
+
+// Best answer first. "no" outranks "unknown" for the reason models.verdictRank
+// gives: a machine that was measured and refused is a fact to act on, and a
+// machine nobody looked at is not.
+const fitOrder = { fits: 4, tight: 3, partial: 2, no: 1, unknown: 0 };
+
 function fitBadge(fit, hostFits) {
-  if (!fit || !fit.verdict) return null;
-  const host = fit.host || '';
-  const lines = [];
-  if (host) lines.push(`Best of ${(hostFits || []).length || 1} machine(s): ${host}.`);
-  // Every other machine's answer, so a red badge does not hide a green one on
-  // a box further down the list.
-  for (const f of hostFits || []) {
-    if (f.host === fit.host) continue;
-    lines.push(`${f.host || 'this server'}: ${f.verdict}`);
+  const graded = (hostFits || []).filter((f) => f && f.verdict);
+  if (graded.length > 1) {
+    const ordered = [...graded].sort((a, b) => (fitOrder[b.verdict] || 0) - (fitOrder[a.verdict] || 0)
+      || (b.tokens_per_sec || 0) - (a.tokens_per_sec || 0));
+    return el('span', { class: 'repo-fits' }, ordered.map((f) => fitChip(f, true)));
   }
-  // The notes are where the reason lives — which is the part worth reading
-  // when the verdict is not the one that was hoped for.
+  if (!fit || !fit.verdict) return null;
+  // One machine and no name for it means no fleet: naming it would be noise,
+  // and the badge reads exactly as it did before any of this existed.
+  return el('span', { class: 'repo-fits' }, [fitChip(fit, Boolean(fit.host))]);
+}
+
+// One machine's answer. The name leads, because on a fleet it is what the row
+// is scanned for and the verdict is already in the colour.
+function fitChip(fit, named) {
+  const host = fit.host || 'this server';
+  const lines = [`${host}: ${fitReading(fit)}`];
+  // Why, in the numbers that produced it. What the machine has, what the
+  // weights want, and which way the difference goes — enough to tell "buy a
+  // bigger card" from "drop to a smaller quant".
+  if (fit.total_vram_mb) {
+    lines.push(`${bytes(fit.free_vram_mb * 1048576)} VRAM free of `
+      + `${bytes(fit.total_vram_mb * 1048576)}`);
+  }
+  if (fit.total_mb) lines.push(`${bytes(fit.total_mb * 1048576)} to load`);
+  if (fit.total_vram_mb && fit.total_mb) {
+    const spare = (fit.free_vram_mb - fit.total_mb) * 1048576;
+    lines.push(spare >= 0 ? `${bytes(spare)} to spare` : `${bytes(-spare)} short`);
+  }
+  if (fit.verdict === 'partial' && fit.total_layers) {
+    lines.push(`${fit.gpu_layers} of ${fit.total_layers} layers on the GPU`);
+  }
+  if (fit.tokens_per_sec) lines.push(`about ${fit.tokens_per_sec.toFixed(0)} tokens/s`);
+  // The notes are where the reason lives — the part worth reading when the
+  // verdict is not the one that was hoped for.
   for (const note of fit.notes || []) lines.push(note);
+
   return el('span', {
     class: `repo-fit ${fit.verdict}`,
     title: lines.join('\n'),
-    text: host ? `${fit.verdict} · ${host}` : fit.verdict,
+    text: named ? `${host} · ${fit.verdict}` : fit.verdict,
   });
+}
+
+// The verdict as a sentence, for the first line of the tooltip. "no" and
+// "unknown" are the two that are misread as each other, so neither is left to
+// stand as a bare word.
+function fitReading(fit) {
+  switch (fit.verdict) {
+    case 'fits': return 'runs this, with room to spare';
+    case 'tight': return 'runs this, with under 10% headroom';
+    case 'partial': return 'runs this only with layers on the CPU';
+    case 'no': return 'has been measured and will not run this';
+    default: return 'was not measured, so this is not a refusal — nobody looked';
+  }
 }
 
 // Counts on this page run from tens to tens of millions, and a column of full
@@ -4707,7 +4756,7 @@ function repoQuantRow(detail, q, opts = {}) {
     // not say which row is which. The file name does, and it is also what
     // ends up on the drive.
     el('span', { class: 'repo-quant-file', text: (q.filename || '').split('/').pop() }),
-    fitBadge(fit),
+    fitBadge(fit, q.host_fits),
     // The download size and the memory it will occupy are different numbers
     // and both matter: one decides whether it fits on the drive, the other
     // whether it fits in the card.
@@ -4810,7 +4859,7 @@ function repoFileCard(f, vocab) {
       !f.missing && f.verified
         ? el('span', { class: 'repo-badge verified', title: `sha256 ${f.sha256}`, text: 'verified' })
         : null,
-      fitBadge(f.fit),
+      fitBadge(f.fit, f.host_fits),
     ]),
     el('div', { class: 'muted repo-file-facts', text: facts }),
     f.hub_id ? el('div', { class: 'muted repo-file-src', text: f.hub_id }) : null,
@@ -4944,21 +4993,23 @@ function paintHubRate(host) {
   host.innerHTML = '';
   const rl = hubView.rate;
   const hosts = hubView.fitHosts || [];
-  // Which machines the badges below are about. A fleet server grades against
-  // its nodes and not against itself, and with nothing declared it grades
-  // against nothing at all — which is worth saying out loud, because the
-  // symptom is a page of "unknown" that looks like a fault in the estimator.
+  // Which machines the badges below are about. This is the whole fleet the
+  // weights could land on — the hosts a backend was declared on, plus any node
+  // reporting a card of its own — and with none of them it grades against
+  // nothing at all, which is worth saying out loud: the symptom is a page of
+  // "unknown" that looks like a fault in the estimator.
   const graded = hosts.length
     ? el('span', { class: 'muted', title:
-        'Fit verdicts describe these machines. A model is graded against each '
-        + 'and the badge names the one that runs it best.',
+        'Every model below is graded against each of these machines and gets one '
+        + 'badge per machine, so a model that will not run here but runs on a node '
+        + 'says so rather than reading as a flat no.',
       text: `fit graded on ${hosts.join(', ')}` })
     : el('span', { class: 'muted', title:
-        'No machine is declared as one that runs models, so nothing can be '
-        + 'graded and every verdict reads "unknown". Set "node" on the backend '
-        + 'that serves your models — the name it was registered under with '
-        + '-add-client — or run a backend on this host.',
-      text: 'no machine declared — fit unknown' });
+        'No machine could be graded: this server runs no backend of its own, and '
+        + 'no fleet node has reported a GPU. Every verdict will read "unknown". '
+        + 'Run wintermute-node on the machine with the card in it, or set "node" '
+        + 'on the backend that serves your models.',
+      text: 'no machine to grade against — fit unknown' });
 
   const token = hubView.hasToken
     ? el('span', { class: 'hub-token ok', title:

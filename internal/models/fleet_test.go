@@ -1,6 +1,7 @@
 package models
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -214,4 +215,71 @@ func TestSortHostsPutsTheBestEquippedFirst(t *testing.T) {
 		t.Errorf("order = %q, %q, %q; want tycho, mid, pi",
 			hosts[0].Host, hosts[1].Host, hosts[2].Host)
 	}
+}
+
+// The two questions the fleet answers are not the same question, and the rule
+// that guards one is the wrong rule for the other.
+//
+// Hosts is "where would this be served", and a backend has to say so — an
+// address on a node is not a declaration that the node runs anything. FitHosts
+// is "which box has the memory to hold this", and a card that reported itself
+// is an answer to that whether or not anything has been pointed at it yet.
+func TestFitHostsGradesAnUndeclaredCardThatHostsWillNot(t *testing.T) {
+	dir := t.TempDir()
+	fleet, err := node.Open(filepath.Join(dir, "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fleet.Close() })
+
+	now := time.Now().UTC()
+	report := node.Report{
+		FormatVersion: 1,
+		Facts: node.Facts{
+			Hostname: "tycho.lan",
+			GPUs:     []node.GPUCard{{Index: 0, Name: "NVIDIA GeForce RTX 3090", MemTotalBytes: 24 * 1 << 30}},
+		},
+		Samples: []node.Sample{{At: now, GPUMemTotal: 24 * 1 << 30}},
+	}
+	if _, err := fleet.Ingest(t.Context(), "tycho", report); err != nil {
+		t.Fatal(err)
+	}
+	// A Pi alongside it: reporting, useful on the Fleet screen, and not an
+	// answer to "what has the VRAM for twelve gigabytes of weights".
+	if _, err := fleet.Ingest(t.Context(), "pi", node.Report{
+		FormatVersion: 1,
+		Facts:         node.Facts{Hostname: "pi.lan", Cores: 4},
+		Samples:       []node.Sample{{At: now, MemTotal: 8 * 1 << 30}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// No backend names either machine, and the local probe is whatever this
+	// test machine happens to be — so both lists are filtered to the fleet.
+	cat := NewCatalog([]Backend{
+		{Name: "big", Kind: KindLlamaCPP, BaseURL: "http://tycho.lan:8080/v1"},
+	}, nil, NewHub("", ""), nil)
+	cat.SetFleet(fleet)
+
+	if named := fleetNames(cat.Hosts(t.Context())); len(named) != 0 {
+		t.Errorf("Hosts named %v, want none: nothing declared a node as a machine "+
+			"that serves models, and a base URL is not a declaration", named)
+	}
+	named := fleetNames(cat.FitHosts(t.Context()))
+	if len(named) != 1 || named[0] != "tycho" {
+		t.Fatalf("FitHosts named %v, want [tycho]: the card is a fact, and the Pi "+
+			"has none", named)
+	}
+}
+
+// fleetNames drops the local host, whose presence depends on the machine the
+// test is running on, and keeps the fleet's own names in order.
+func fleetNames(hosts []*Hardware) []string {
+	var out []string
+	for _, h := range hosts {
+		if h.Host != "" {
+			out = append(out, h.Host)
+		}
+	}
+	return out
 }

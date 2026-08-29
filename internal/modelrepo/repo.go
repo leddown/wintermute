@@ -323,9 +323,14 @@ type Entry struct {
 	// the normal state after deleting a file outside this program, and a
 	// symptom worth showing rather than hiding.
 	Missing bool `json:"missing,omitempty"`
-	// Fit is the estimate against the server's own hardware, attached at query
-	// time because free VRAM moves.
+	// Fit is the best estimate across every machine that could hold these
+	// weights, attached at query time because free VRAM moves.
 	Fit *models.Fit `json:"fit,omitempty"`
+	// HostFits is that estimate per machine. Which box has room for a file
+	// already on the drive is the same question the Hub half of the screen
+	// answers about one it has not fetched yet, and it is answered the same
+	// way: one line per machine, named. Carried only when there is a choice.
+	HostFits []models.Fit `json:"host_fits,omitempty"`
 
 	AddedAt string `json:"added_at,omitempty"`
 }
@@ -465,11 +470,15 @@ func (r *Repo) entry(key, name string, size int64, rec store.RepoFile, tags []st
 		}
 	}
 	if len(hosts) > 0 && e.ParamsB > 0 {
-		fit := models.FleetFit(models.FitInput{
+		graded := models.EstimateFleetFit(models.FitInput{
 			ParamsB: e.ParamsB,
 			Quant:   e.Quant,
 		}, hosts)
-		e.Fit = &fit
+		best := models.BestFit(graded)
+		e.Fit = &best
+		if len(graded) > 1 {
+			e.HostFits = graded
+		}
 	}
 	return e
 }

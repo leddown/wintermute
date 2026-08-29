@@ -500,9 +500,3 @@ func BestFit(fits []Fit) Fit {
 	}
 	return best
 }
-
-// FleetFit grades a model against every candidate and returns the best verdict.
-// It is the two calls above in the order every caller wants them.
-func FleetFit(in FitInput, hosts []*Hardware) Fit {
-	return BestFit(EstimateFleetFit(in, hosts))
-}

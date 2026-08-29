@@ -57,7 +57,7 @@ func (s *Server) handleRepoList(w http.ResponseWriter, r *http.Request) {
 		// answer only when the server is also what runs the models; the
 		// hardware panel already says which, so the number is offered rather
 		// than hidden.
-		files, err := s.modelRepo.List(r.Context(), s.catalog.Hosts(r.Context()))
+		files, err := s.modelRepo.List(r.Context(), s.catalog.FitHosts(r.Context()))
 		if err != nil {
 			s.fail(w, "list model repository", err)
 			return

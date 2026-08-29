@@ -389,6 +389,11 @@ type HubQuant struct {
 	// started at all.
 	SizeBytes int64 `json:"size_bytes,omitempty"`
 	Fit       *Fit  `json:"fit,omitempty"`
+	// HostFits is that grading per machine. A quantization is chosen *in order
+	// to* land on a particular box — the whole reason there are eight of them —
+	// so the best verdict alone throws away the answer being looked for. It is
+	// carried only when there is more than one machine to choose between.
+	HostFits []Fit `json:"host_fits,omitempty"`
 }
 
 // splitPart matches one shard of a split GGUF: the convention llama.cpp
@@ -520,16 +525,20 @@ func (r hubRecord) model(hosts []*Hardware, contextTokens int) HubModel {
 	m.QuantCount = len(quants)
 	for _, q := range quants {
 		if len(hosts) > 0 && m.ParamsB > 0 {
-			// The best machine for this quantization, which is not necessarily
-			// the best machine for the repository: a smaller quant can fit a
-			// card the default one does not, and that is the whole reason this
-			// list is worth reading file by file.
-			fit := FleetFit(FitInput{
+			// One verdict per machine for this quantization, which is not the
+			// same set of answers as the repository's default: a smaller quant
+			// can fit a card the default one does not, and that is the whole
+			// reason this list is worth reading file by file.
+			graded := EstimateFleetFit(FitInput{
 				ParamsB:       m.ParamsB,
 				Quant:         q.Quant,
 				ContextTokens: contextTokens,
 			}, hosts)
-			q.Fit = &fit
+			best := BestFit(graded)
+			q.Fit = &best
+			if len(graded) > 1 {
+				q.HostFits = graded
+			}
 		}
 		m.Quants = append(m.Quants, q)
 	}

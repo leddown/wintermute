@@ -17,9 +17,11 @@ import (
 //
 // Two rules keep that from becoming a confident lie:
 //
-//   - A node is a candidate only when a backend was *declared* to run on it.
-//     The link is written down (backends.json, or the Backends screen) and is
-//     never inferred from a base URL — see Backend.Node.
+//   - A node is a candidate for *serving* a model only when a backend was
+//     *declared* to run on it. The link is written down (backends.json, or the
+//     Backends screen) and is never inferred from a base URL — see
+//     Backend.Node. Whether a node has the memory to hold some weights is a
+//     separate, weaker question, answered per machine by name — see FitHosts.
 //   - A node's figures are live measurements with an age. Past fleetStale they
 //     are reported as unknown rather than used, because a machine that stopped
 //     reporting last night still has a plausible profile in the database.
@@ -94,6 +96,59 @@ func (c *Catalog) Hosts(ctx context.Context) []*Hardware {
 	return out
 }
 
+// FitHosts is every machine a set of weights could be judged against: the hosts
+// above, plus any fleet node that reports a GPU.
+//
+// Hosts answers "where would this be served", which is the right question for
+// the planner — it builds one recommendation and a model it cannot serve is not
+// a recommendation. It is the wrong question for the Repository screen, where
+// what is being decided is which box has the VRAM to hold a download. A node
+// with a card in it is an answer to that whether or not a backend has been
+// pointed at it yet, and leaving it out is how a fleet with a 3090 in it gets
+// told a 7B model does not fit because the API server is a Celeron.
+//
+// What made the declared link necessary was a verdict that named no machine:
+// "fits", computed from a host the reader could not identify. That does not
+// arise here. Every Fit carries the host it was graded against, and the screens
+// fed by this list them one per machine rather than collapsing them into one
+// answer — so an undeclared node contributes a line about itself and cannot be
+// mistaken for a statement about anything else.
+//
+// Nodes with no GPU are left out. Each would grade as a slow CPU-only partial,
+// which is true of every machine ever made and decides nothing.
+func (c *Catalog) FitHosts(ctx context.Context) []*Hardware {
+	out := c.Hosts(ctx)
+
+	c.mu.Lock()
+	fleet := c.fleet
+	c.mu.Unlock()
+	if fleet == nil {
+		return out
+	}
+	nodes, err := fleet.Nodes(ctx)
+	if err != nil {
+		// Same rule as Hosts: a fleet listing that fails must not take the
+		// verdicts that were already computable down with it.
+		if c.log != nil {
+			c.log.Warn("fleet hosts unavailable for fit", "error", err)
+		}
+		return out
+	}
+
+	seen := map[string]bool{}
+	for _, h := range out {
+		seen[h.Host] = true
+	}
+	for _, n := range nodes {
+		if seen[n.Name] || len(n.GPUs) == 0 {
+			continue
+		}
+		out = append(out, HardwareFromNode(n))
+	}
+	sortHosts(out)
+	return out
+}
+
 // inferenceNodes is the set of node names some non-cloud backend was declared
 // to run on.
 func inferenceNodes(backends []Backend) map[string]bool {
@@ -157,11 +212,11 @@ func HardwareFromNode(n node.Node) *Hardware {
 		// the GPU, never whether they fit.
 		RAMBandwidthGBs: defaultRAMBandwidthGBs,
 		DetectedAt:      n.LastSeenAt,
-		// A profile is only built for a machine already established as one
-		// that would run the model — by a declared backend, or by an operator
-		// naming it as the target of an assignment. The flag exists to stop a
-		// verdict being computed from a machine nobody said runs anything, and
-		// by the time this is called somebody has.
+		// A profile is only built for a machine somebody has pointed at: a
+		// declared backend, the target of an assignment, or — for FitHosts —
+		// a node that reported a GPU of its own. The flag exists to stop a
+		// verdict being computed from a machine that has no bearing on the
+		// question, and every caller has named one.
 		RunsInference: true,
 	}
 

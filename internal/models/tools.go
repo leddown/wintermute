@@ -202,7 +202,7 @@ func estimateFit(cat *Catalog) tool.Handler {
 		// wants to know if it can be run at all, and the answer "no" from the
 		// API server is not the answer when a node with a real GPU is standing
 		// by. The per-host grading goes back too, so it can say where.
-		hosts := cat.Hosts(ctx)
+		hosts := cat.FitHosts(ctx)
 		graded := EstimateFleetFit(in, hosts)
 		return encode(map[string]any{
 			"input": in, "fit": BestFit(graded), "hosts": graded,

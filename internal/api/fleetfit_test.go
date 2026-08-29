@@ -134,10 +134,17 @@ func TestFitIsGradedAgainstTheDeclaredNode(t *testing.T) {
 	}
 }
 
-// The declaration is what makes a node a candidate. Without it the node is
-// still reporting, still visible on the Fleet screen, and still not something
-// this server will compute a verdict from — an address is not a machine.
-func TestUndeclaredNodeIsNotGraded(t *testing.T) {
+// Whether a node has the memory to hold a set of weights is a weaker question
+// than where they would be served from, and it is answered per machine, by
+// name. So an undeclared node with a card in it is graded — the alternative is
+// telling an operator with a 3090 on the network that an 8B model does not fit,
+// because the box serving the API has no GPU at all.
+//
+// The declaration still governs Hosts, and through it the planner. What is
+// relaxed here is only the fit question, and only because every answer it
+// produces names the machine it is about and so cannot be mistaken for a
+// statement about another.
+func TestUndeclaredNodeWithACardIsGradedByName(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -201,9 +208,92 @@ func TestUndeclaredNodeIsNotGraded(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode fit: %v", err)
 	}
+	if got.Verdict != models.VerdictFits {
+		t.Errorf("verdict = %q, want %q: the node reported a 24GB card, and no "+
+			"backend having been pointed at it yet does not shrink the card",
+			got.Verdict, models.VerdictFits)
+	}
+	if got.Host != "tycho" {
+		t.Errorf("host = %q, want %q: a verdict that does not name its machine is "+
+			"exactly what the declaration rule existed to prevent", got.Host, "tycho")
+	}
+	if len(got.Hosts) != 1 {
+		t.Errorf("graded %d machines, want 1: the API server serves no models and "+
+			"must not be a candidate", len(got.Hosts))
+	}
+	if got.TotalMB <= 0 {
+		t.Error("the memory footprint was discarded")
+	}
+}
+
+// A node with no GPU is not a candidate. It would grade as a slow CPU-only
+// partial, which is true of every machine ever made and decides nothing — and
+// on a fleet of Raspberry Pis it would bury the one answer worth reading.
+func TestNodeWithNoGPUIsNotGraded(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	router, err := llm.NewRouter([]*llm.Backend{{Name: "local", Provider: stubProvider{}}}, "local", "", log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools := tool.NewRegistry()
+	ag := agent.New(router, st, tools, log, 4)
+
+	cat := models.NewCatalog([]models.Backend{
+		{Name: "big", Kind: models.KindLlamaCPP, BaseURL: "http://pi.lan:8080/v1"},
+	}, st, models.NewHub("", ""), log)
+
+	nodeStore, err := node.Open(filepath.Join(t.TempDir(), "metrics.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { nodeStore.Close() })
+	cat.SetFleet(nodeStore)
+
+	srv := New(ag, st, tools, cat, Workspace{}, ServerInfo{}, log).WithNodes(nodeStore, 2*time.Hour)
+	handler := srv.Handler()
+
+	_, nodeToken, err := st.CreateClient(t.Context(), "pi", store.KindNode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, browserToken, err := st.CreateClient(t.Context(), "laptop", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	report := fmt.Sprintf(`{"format_version":1,
+		"facts":{"hostname":"pi.lan","cores":4},
+		"samples":[{"at":%q,"mem_total_bytes":%d}]}`,
+		time.Now().UTC().Format(time.RFC3339Nano), 8*1<<30)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/nodes/report", strings.NewReader(report))
+	req.Header.Set("Authorization", "Bearer "+nodeToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("report gave %d: %s", rec.Code, rec.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/models/fit",
+		strings.NewReader(`{"params_b":8,"quant":"Q4_K_M","context_tokens":4096}`))
+	req.Header.Set("Authorization", "Bearer "+browserToken)
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	var got fitResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode fit: %v", err)
+	}
 	if got.Verdict != models.VerdictUnknown {
-		t.Errorf("verdict = %q, want %q: nothing was declared as a machine that "+
-			"runs models, so nothing may be graded", got.Verdict, models.VerdictUnknown)
+		t.Errorf("verdict = %q, want %q: nothing with a GPU was reporting",
+			got.Verdict, models.VerdictUnknown)
 	}
 	// The footprint survives, as it does everywhere a verdict cannot be given.
 	if got.TotalMB <= 0 {

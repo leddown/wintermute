@@ -64,7 +64,7 @@ func (s *Server) handleHubSearch(w http.ResponseWriter, r *http.Request) {
 		InferenceProvider: q.Get("inference_provider"),
 		Filters:           q["filter"],
 		Cursor:            q.Get("cursor"),
-		Hosts:             s.catalog.Hosts(r.Context()),
+		Hosts:             s.catalog.FitHosts(r.Context()),
 		ContextTokens:     queryInt(r, "context", defaultPlanContext),
 	}
 	// A search with no terms at all is a browse of the whole Hub by whatever
@@ -92,7 +92,7 @@ func (s *Server) handleHubSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHubDetail(w http.ResponseWriter, r *http.Request) {
 	detail, err := s.catalog.Hub().Detail(r.Context(), r.PathValue("id"),
-		s.catalog.Hosts(r.Context()), queryInt(r, "context", defaultPlanContext))
+		s.catalog.FitHosts(r.Context()), queryInt(r, "context", defaultPlanContext))
 	if err != nil {
 		s.failHub(w, "hub detail", err)
 		return
@@ -176,10 +176,11 @@ func (s *Server) handleHubTags(w http.ResponseWriter, r *http.Request) {
 // unreachable or the window is spent — which is exactly when it is worth
 // asking.
 func (s *Server) handleHubStatus(w http.ResponseWriter, r *http.Request) {
-	// Which machines the verdicts on this screen are about. Without it a page
-	// of "unknown" badges looks like a broken estimator rather than what it
-	// is: nothing has been declared as the machine that runs the models.
-	hosts := s.catalog.Hosts(r.Context())
+	// Which machines the verdicts on this screen are about — every host that
+	// could hold a set of weights, not only the ones a backend was declared
+	// on. Without it a page of "unknown" badges looks like a broken estimator
+	// rather than what it is: nothing on the network has reported a GPU.
+	hosts := s.catalog.FitHosts(r.Context())
 	names := make([]string, 0, len(hosts))
 	for _, h := range hosts {
 		if h.Host == "" {
