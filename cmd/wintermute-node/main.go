@@ -505,7 +505,24 @@ func collectFacts() node.Facts {
 	return f
 }
 
+// defaultSpool prefers the state directory systemd hands the unit.
+//
+// The user cache directory is $HOME/.cache, and the service user is created
+// with --no-create-home: under the shipped unit $HOME is a directory that does
+// not exist and that ProtectHome=true masks anyway, so the spool write failed
+// silently and an outage that outlasted a restart lost its backlog after all —
+// which is the one thing the spool is for.
+//
+// STATE_DIRECTORY is set by systemd from StateDirectory=, already created and
+// owned by the service user. It is a colon-separated list when the unit names
+// several; the first is ours.
 func defaultSpool() string {
+	if dirs := strings.TrimSpace(os.Getenv("STATE_DIRECTORY")); dirs != "" {
+		first, _, _ := strings.Cut(dirs, ":")
+		if first = strings.TrimSpace(first); first != "" {
+			return filepath.Join(first, "spool.json")
+		}
+	}
 	if dir, err := os.UserCacheDir(); err == nil {
 		return filepath.Join(dir, "wintermute-node", "spool.json")
 	}
