@@ -121,6 +121,14 @@ func run() error {
 		interval: *interval,
 	}
 
+	// Said once at startup, and only when it is a fault rather than a fact: a
+	// host with no NVIDIA driver reports no GPU and that is the end of it, but
+	// a host that has nvidia-smi somewhere this process cannot reach would
+	// otherwise appear in the fleet view as a machine with no cards.
+	if note := hostmetrics.GPUToolStatus(); note != "" {
+		fmt.Fprintln(os.Stderr, note)
+	}
+
 	if strings.TrimSpace(*storeDir) != "" {
 		st, err := buildStore(*storeDir, *runtimeName, *ollamaURL, *runtimeURL,
 			*swapConfig, *serverBin, *serverArgs)

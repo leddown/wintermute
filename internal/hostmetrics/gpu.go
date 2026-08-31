@@ -2,7 +2,10 @@ package hostmetrics
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +44,46 @@ type GPU struct {
 // gpuQueryTimeout bounds the call. nvidia-smi normally answers in milliseconds
 // but can block on a wedged driver, and a metrics agent must never hang on it.
 const gpuQueryTimeout = 5 * time.Second
+
+// gpuToolCandidates are the places nvidia-smi is installed that a service's
+// PATH does not usually cover. A variable so the tests can point it elsewhere.
+var gpuToolCandidates = []string{
+	"/usr/bin/nvidia-smi",
+	"/usr/local/bin/nvidia-smi",
+	"/usr/local/nvidia/bin/nvidia-smi",
+	"/opt/nvidia/bin/nvidia-smi",
+	// Snap installs, which systemd's default PATH does not include.
+	"/snap/bin/nvidia-smi",
+	// WSL, where the driver comes from the Windows side.
+	"/usr/lib/wsl/lib/nvidia-smi",
+}
+
+// GPUToolStatus explains a missing nvidia-smi, when the explanation is one an
+// operator can act on. It returns "" when there is nothing to say.
+//
+// The distinction it draws is the whole point. A machine with no NVIDIA driver
+// is most machines, and saying so every start would be noise on a fleet of
+// ARM boards. A machine that *has* nvidia-smi somewhere this process cannot
+// reach is a misconfiguration — and an invisible one, because the fleet view
+// then shows the host with no cards, which reads as a hardware fact rather
+// than a PATH.
+func GPUToolStatus() string {
+	if _, err := exec.LookPath("nvidia-smi"); err == nil {
+		return ""
+	}
+	for _, candidate := range gpuToolCandidates {
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+		return fmt.Sprintf(
+			"nvidia-smi is installed at %s but is not on this process's PATH, so no GPU "+
+				"is reported. Under systemd, add a drop-in with "+
+				"Environment=PATH=%s:/usr/local/bin:/usr/bin:/bin — or symlink it into /usr/bin",
+			candidate, filepath.Dir(candidate))
+	}
+	return ""
+}
 
 // ReadGPUs returns every NVIDIA card's live state.
 //
