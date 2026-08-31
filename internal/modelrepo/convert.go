@@ -88,9 +88,20 @@ func (d *Downloader) StartConvert(ctx context.Context, hub Lister, req ConvertRe
 	if hub == nil {
 		return nil, fmt.Errorf("%w: no hub client", ErrInvalidRequest)
 	}
-	root, err := d.repo.resolve()
+	// Ready rather than resolve: it also requires the marker, which is what
+	// tells a mounted drive from a bare mount point. A download has always
+	// checked it and a conversion writes far more, so it cannot be the one
+	// path that fills a server's root filesystem with an unmounted drive's
+	// worth of weights.
+	root, err := d.repo.Ready()
 	if err != nil {
 		return nil, err
+	}
+	// Probed before a job exists, so a repository the service cannot write to
+	// is a message at the button rather than a failure four seconds into a
+	// transfer. The staging directory is the first thing the job would create.
+	if err := os.MkdirAll(filepath.Join(root, stagingDir), 0o755); err != nil {
+		return nil, writeFailure(root, err)
 	}
 	hubID, err := cleanHubID(req.HubID)
 	if err != nil {
@@ -137,7 +148,7 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 
 	stage := filepath.Join(root, stagingDir, filepath.FromSlash(hubID))
 	if err := os.MkdirAll(stage, 0o755); err != nil {
-		jobs.Finish(jobID, JobFailed, fmt.Errorf("make staging directory: %w", err))
+		jobs.Finish(jobID, JobFailed, writeFailure(root, err))
 		return
 	}
 
@@ -213,7 +224,7 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 		return
 	}
 	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-		jobs.Finish(jobID, JobFailed, fmt.Errorf("make repository directory: %w", err))
+		jobs.Finish(jobID, JobFailed, writeFailure(root, err))
 		return
 	}
 	if err := os.Rename(out, dest); err != nil {

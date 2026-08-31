@@ -97,6 +97,50 @@ func TestStartConvertNeedsAConverter(t *testing.T) {
 	}
 }
 
+// A conversion writes more than anything else this server does, so it may not
+// be the one path that skips the marker check and fills a root filesystem with
+// an unmounted drive's worth of weights.
+func TestStartConvertRequiresAnInitialisedRepository(t *testing.T) {
+	repo, _ := newTestRepo(t)
+	repo.down.ConvertCommand = "sh /nonexistent"
+
+	_, err := repo.down.StartConvert(context.Background(), stubHub{},
+		ConvertRequest{HubID: "Qwen/Qwen3-8B"})
+	if !errors.Is(err, ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable for a directory with no marker, got %v", err)
+	}
+}
+
+// A repository the service cannot write to is the commonest deployment fault
+// there is — ProtectSystem=strict makes every path outside StateDirectory
+// read-only — and it must be a message before the job rather than a raw mkdir
+// error four seconds into one.
+func TestStartConvertReportsAnUnwritableRepository(t *testing.T) {
+	repo, root := newTestRepo(t)
+	if err := repo.Initialise(); err != nil {
+		t.Fatal(err)
+	}
+	repo.down.ConvertCommand = "sh /nonexistent"
+	if err := os.Chmod(root, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(root, 0o755) })
+
+	_, err := repo.down.StartConvert(context.Background(), stubHub{},
+		ConvertRequest{HubID: "Qwen/Qwen3-8B"})
+	if !errors.Is(err, ErrNotWritable) {
+		t.Fatalf("want ErrNotWritable, got %v", err)
+	}
+	// The message has to name the fix. Both causes are outside this server and
+	// the operator cannot guess between them.
+	if !strings.Contains(err.Error(), "ReadWritePaths") {
+		t.Errorf("the error must name the systemd fix, got %q", err)
+	}
+	if len(repo.jobs.List()) != 0 {
+		t.Error("no job should exist for a repository that cannot be written to")
+	}
+}
+
 // The whole pipeline against a stub Hub and a converter that is a shell script:
 // the release is fetched, converted, filed under a name that says it was
 // converted, and the staging directory is gone afterwards.
