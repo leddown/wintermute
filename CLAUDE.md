@@ -106,6 +106,30 @@ the model sometimes writes a tool call into its visible text instead of
 emitting a tool_use block, which looks like a turn that succeeded while the
 action silently never ran).
 
+## The machines
+
+Two hosts, and confusing them wastes an afternoon: they have different jobs,
+different service users and different things installed.
+
+- **`wintermute`** (10.232.231.9) — **the server.** Runs `wintermuted` as user
+  `wintermute`, behind nginx on port 80. It owns `WINTERMUTE_MODEL_REPO`, the
+  Samba export of that directory, the conversion toolchain
+  (`WINTERMUTE_CONVERT_CMD` → llama.cpp's `convert_hf_to_gguf.py`), and the
+  browser UI. Anything about downloading, converting or serving the repository
+  happens here.
+- **`coven`** (10.232.231.8) — **a rig node and the development machine.** This
+  repository is checked out here and this is where builds, `go test`, headless
+  Chrome and throwaway servers run. It also runs `wintermute-node` as user
+  `wintermute-node`, reporting to `http://wintermute.l3d.internal`: Ollama on
+  127.0.0.1:11434, model store `/mnt/stor/Models`, repository mount
+  `/mnt/wintermute_model_repo` (read-only, over Samba from the server).
+
+So a change is *built and tested* on coven and *deployed* to wintermute, and a
+tool the server needs — the converter, the model repository, the drive with room
+on it — is installed on wintermute even though the work of writing the code
+happened on coven. Coven also carries a `wintermuted` service of its own; it is
+not the fleet's server, so don't reason about the live installation from it.
+
 ## Testing against running servers
 
 Testing against the live server on this network is **explicitly allowed and
