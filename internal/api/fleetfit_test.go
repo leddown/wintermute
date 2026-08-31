@@ -219,10 +219,12 @@ func TestUndeclaredNodeWithACardIsGradedByName(t *testing.T) {
 	}
 }
 
-// A node with no GPU is not a candidate. It would grade as a slow CPU-only
-// partial, which is true of every machine ever made and decides nothing — and
-// on a fleet of Raspberry Pis it would bury the one answer worth reading.
-func TestNodeWithNoGPUIsNotGraded(t *testing.T) {
+// A node with no GPU is graded against its RAM rather than skipped. It is a
+// machine models get assigned to, and "runs on the CPU, and here is what that
+// costs" is the answer somebody deciding what to put on the mini PC in the
+// cupboard actually needs. EstimateFit has always computed it; for a while
+// nothing handed it the machine.
+func TestNodeWithNoGPUIsGradedAgainstRAM(t *testing.T) {
 	st := storetest.New(t)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -280,12 +282,16 @@ func TestNodeWithNoGPUIsNotGraded(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode fit: %v", err)
 	}
-	if got.Verdict != models.VerdictUnknown {
-		t.Errorf("verdict = %q, want %q: nothing with a GPU was reporting",
-			got.Verdict, models.VerdictUnknown)
+	// A real verdict about a real machine: 8B at Q4_K_M against 8GB of RAM and
+	// no GPU. Anything but "unknown" means the Pi was actually looked at.
+	if got.Verdict == models.VerdictUnknown {
+		t.Errorf("verdict = %q: the node reported its memory, so there was "+
+			"something to judge against", got.Verdict)
 	}
-	// The footprint survives, as it does everywhere a verdict cannot be given.
 	if got.TotalMB <= 0 {
 		t.Error("the memory footprint was discarded along with the verdict")
+	}
+	if len(got.Hosts) != 1 || got.Hosts[0].Host != "pi" {
+		t.Errorf("graded %+v, want the Pi named as the machine judged", got.Hosts)
 	}
 }

@@ -114,8 +114,16 @@ func (c *Catalog) Hosts(ctx context.Context) []*Hardware {
 // answer — so an undeclared node contributes a line about itself and cannot be
 // mistaken for a statement about anything else.
 //
-// Nodes with no GPU are left out. Each would grade as a slow CPU-only partial,
-// which is true of every machine ever made and decides nothing.
+// A node is graded whether or not it has a GPU. EstimateFit computes a
+// GPU-less machine against system RAM and says so in the verdict, which for a
+// fleet node is a real answer rather than a truism: these are the machines the
+// models are actually assigned to, and "fits in RAM, CPU-only" is what decides
+// whether a small model is worth putting on the mini PC in the cupboard.
+//
+// What is left out is a node that has never reported a reading. Its memory is
+// unknown, so it would grade as refusing everything — and a machine that has
+// not said anything yet has not said it cannot run the model. One report puts
+// it back, which takes a minute.
 func (c *Catalog) FitHosts(ctx context.Context) []*Hardware {
 	out := c.Hosts(ctx)
 
@@ -140,7 +148,7 @@ func (c *Catalog) FitHosts(ctx context.Context) []*Hardware {
 		seen[h.Host] = true
 	}
 	for _, n := range nodes {
-		if seen[n.Name] || len(n.GPUs) == 0 {
+		if seen[n.Name] || n.Latest == nil {
 			continue
 		}
 		out = append(out, HardwareFromNode(n))

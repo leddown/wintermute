@@ -244,12 +244,21 @@ func TestFitHostsGradesAnUndeclaredCardThatHostsWillNot(t *testing.T) {
 	if _, err := fleet.Ingest(t.Context(), "tycho", report); err != nil {
 		t.Fatal(err)
 	}
-	// A Pi alongside it: reporting, useful on the Fleet screen, and not an
-	// answer to "what has the VRAM for twelve gigabytes of weights".
+	// A Pi alongside it: no GPU, and still a machine models get assigned to.
+	// It is graded against its RAM, which is what deciding whether to put a
+	// small model on it actually turns on.
 	if _, err := fleet.Ingest(t.Context(), "pi", node.Report{
 		FormatVersion: 1,
 		Facts:         node.Facts{Hostname: "pi.lan", Cores: 4},
 		Samples:       []node.Sample{{At: now, MemTotal: 8 * 1 << 30}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A node that has registered and never reported. Its memory is unknown, so
+	// grading it would mean refusing every model on no evidence.
+	if _, err := fleet.Ingest(t.Context(), "silent", node.Report{
+		FormatVersion: 1,
+		Facts:         node.Facts{Hostname: "silent.lan", Cores: 8},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -266,9 +275,11 @@ func TestFitHostsGradesAnUndeclaredCardThatHostsWillNot(t *testing.T) {
 			"that serves models, and a base URL is not a declaration", named)
 	}
 	named := fleetNames(cat.FitHosts(t.Context()))
-	if len(named) != 1 || named[0] != "tycho" {
-		t.Fatalf("FitHosts named %v, want [tycho]: the card is a fact, and the Pi "+
-			"has none", named)
+	// Both, VRAM first: every node that has reported is a machine a model could
+	// be assigned to, and sortHosts puts the one with the most to offer at the
+	// front rather than sorting by name.
+	if len(named) != 2 || named[0] != "tycho" || named[1] != "pi" {
+		t.Fatalf("FitHosts named %v, want [tycho pi]", named)
 	}
 }
 
