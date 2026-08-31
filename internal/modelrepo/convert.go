@@ -36,14 +36,18 @@ package modelrepo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"wintermute/internal/models"
@@ -81,6 +85,21 @@ type Lister interface {
 	Tree(ctx context.Context, id, revision, prefix, cursor string) (models.HubTree, error)
 }
 
+// stagingRoot is where releases are assembled and converted.
+//
+// Inside the repository by default, which needs no configuration and makes the
+// last step a rename. WINTERMUTE_CONVERT_STAGING moves it to another disk,
+// which is worth doing on a spinning repository drive: a conversion reads the
+// release and writes the GGUF at the same time, and one head serving both
+// streams spends its time seeking between them. The finished model is then
+// copied across once, sequentially, which is the transfer the drive is good at.
+func (d *Downloader) stagingRoot(repoRoot string) string {
+	if custom := strings.TrimSpace(d.ConvertStaging); custom != "" {
+		return custom
+	}
+	return filepath.Join(repoRoot, stagingDir)
+}
+
 // StartConvert fetches a safetensors release and converts it, returning the job
 // to watch. The work continues after the request that asked for it returns.
 func (d *Downloader) StartConvert(ctx context.Context, hub Lister, req ConvertRequest) (*Job, error) {
@@ -102,8 +121,9 @@ func (d *Downloader) StartConvert(ctx context.Context, hub Lister, req ConvertRe
 	// Probed before a job exists, so a repository the service cannot write to
 	// is a message at the button rather than a failure four seconds into a
 	// transfer. The staging directory is the first thing the job would create.
-	if err := os.MkdirAll(filepath.Join(root, stagingDir), 0o755); err != nil {
-		return nil, writeFailure(root, err)
+	stagingBase := d.stagingRoot(root)
+	if err := os.MkdirAll(stagingBase, 0o755); err != nil {
+		return nil, writeFailure(stagingBase, err)
 	}
 	hubID, err := cleanHubID(req.HubID)
 	if err != nil {
@@ -149,9 +169,10 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 		return
 	}
 
-	stage := filepath.Join(root, stagingDir, filepath.FromSlash(hubID))
+	stagingBase := d.stagingRoot(root)
+	stage := filepath.Join(stagingBase, filepath.FromSlash(hubID))
 	if err := os.MkdirAll(stage, 0o755); err != nil {
-		jobs.Finish(jobID, JobFailed, writeFailure(root, err))
+		jobs.Finish(jobID, JobFailed, writeFailure(stagingBase, err))
 		return
 	}
 
@@ -159,11 +180,19 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 	for _, f := range files {
 		grand += f.Size
 	}
-	// The conversion writes a GGUF about the size of what it read, so the disk
-	// has to hold both at once. Said now rather than at 90%.
-	if err := d.checkSpace(stage, grand*2, 0); err != nil {
+	// Staging holds the release and the GGUF at the same time. The repository
+	// only ever holds the GGUF — and when staging is elsewhere, that is a
+	// second drive with its own free space to check. Both said now rather than
+	// at 90%.
+	if err := d.checkSpace(filepath.Join(stage, "x"), grand*2, 0); err != nil {
 		jobs.Finish(jobID, JobFailed, err)
 		return
+	}
+	if stagingBase != filepath.Join(root, stagingDir) {
+		if err := d.checkSpace(filepath.Join(root, "x"), grand, 0); err != nil {
+			jobs.Finish(jobID, JobFailed, err)
+			return
+		}
 	}
 
 	var done int64
@@ -228,25 +257,6 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 	// Hashed because nothing upstream published a digest for a file this
 	// server invented. A fleet node verifies what it fetches against this, so
 	// the alternative is a model that can only ever be checked by its length.
-	outSize := int64(0)
-	if info, err := os.Stat(out); err == nil {
-		outSize = info.Size()
-	}
-	jobs.Update(jobID, func(j *Job) {
-		j.Phase = "hashing"
-		j.DoneBytes = 0
-		j.TotalBytes = outSize
-		j.Note = ""
-	})
-	sum, err := fileSHA256(ctx, out, func(read int64) {
-		jobs.Update(jobID, func(j *Job) { j.DoneBytes = read })
-	})
-	if err != nil {
-		jobs.Finish(jobID, JobFailed, err)
-		return
-	}
-
-	jobs.Update(jobID, func(j *Job) { j.Phase = "filing" })
 	dest, err := d.repo.safeJoin(root, relPath)
 	if err != nil {
 		jobs.Finish(jobID, JobFailed, err)
@@ -256,8 +266,9 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 		jobs.Finish(jobID, JobFailed, writeFailure(root, err))
 		return
 	}
-	if err := os.Rename(out, dest); err != nil {
-		jobs.Finish(jobID, JobFailed, fmt.Errorf("file the converted model: %w", err))
+	sum, err := d.fileConverted(ctx, jobID, out, dest)
+	if err != nil {
+		jobs.Finish(jobID, JobFailed, err)
 		return
 	}
 	// The shards are the one thing here that is reproducible from the Hub, and
@@ -266,7 +277,7 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 	if err := os.RemoveAll(stage); err != nil {
 		d.log.Warn("could not clear staging directory", "path", stage, "error", err)
 	}
-	pruneStaging(filepath.Join(root, stagingDir), stage)
+	pruneStaging(stagingBase, stage)
 
 	size := int64(0)
 	if info, err := os.Stat(dest); err == nil {
@@ -290,22 +301,133 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 }
 
 // pruneStaging removes the empty directories a finished conversion leaves
-// behind, up to and including the staging root.
+// behind, stopping below the staging root.
 //
-// os.Remove refuses a directory that is not empty, which is exactly the wanted
-// behaviour when a second conversion is running: its files stop the prune where
-// they are, and nothing checks or locks anything.
+// The root itself is left alone. By default it is ours to delete, but when an
+// operator has pointed WINTERMUTE_CONVERT_STAGING at a directory on another
+// disk it is theirs — possibly a mount point, possibly one they created with
+// particular ownership — and a program that tidies away a directory it was
+// handed is a program nobody can predict.
+//
+// os.Remove refuses a directory that is not empty, which is exactly right when
+// a second conversion is running: its files stop the prune where they are, and
+// nothing has to check or lock anything.
 func pruneStaging(stagingRoot, from string) {
-	for dir := from; strings.HasPrefix(dir, stagingRoot); dir = filepath.Dir(dir) {
+	for dir := from; dir != stagingRoot && strings.HasPrefix(dir, stagingRoot); dir = filepath.Dir(dir) {
 		// Already gone is not a reason to stop: the model's own directory was
 		// removed wholesale a moment ago, and its parents are what is left.
 		if err := os.Remove(dir); err != nil && !os.IsNotExist(err) {
 			return
 		}
-		if dir == stagingRoot {
-			return
+	}
+}
+
+// fileConverted moves the finished GGUF into the repository and returns its
+// digest, taking whichever of two routes the filesystems allow.
+//
+// A rename when staging is on the repository's own disk: instant, atomic, and
+// then the file is read once to hash it. A copy when staging is elsewhere,
+// because a rename across filesystems fails — and since those bytes are being
+// read anyway, the digest is taken on the way past rather than in a second pass
+// over eighteen gigabytes.
+//
+// Either way the model appears under its real name only once it is whole: the
+// copy lands in a .part file beside the destination and is renamed within the
+// repository, so a crash mid-copy leaves something the listing ignores rather
+// than a truncated model.
+func (d *Downloader) fileConverted(ctx context.Context, jobID, out, dest string) (string, error) {
+	jobs := d.repo.jobs
+
+	if err := os.Rename(out, dest); err == nil {
+		size := int64(0)
+		if info, statErr := os.Stat(dest); statErr == nil {
+			size = info.Size()
+		}
+		jobs.Update(jobID, func(j *Job) {
+			j.Phase = "hashing"
+			j.DoneBytes, j.TotalBytes, j.Note = 0, size, ""
+		})
+		return fileSHA256(ctx, dest, func(read int64) {
+			jobs.Update(jobID, func(j *Job) { j.DoneBytes = read })
+		})
+	} else if !errors.Is(err, syscall.EXDEV) {
+		return "", fmt.Errorf("file the converted model: %w", err)
+	}
+	return d.copyConverted(ctx, jobID, out, dest)
+}
+
+// copyConverted is the cross-filesystem half of fileConverted: stream the file
+// into the repository, hashing on the way past, and give it its real name only
+// once it is whole.
+func (d *Downloader) copyConverted(ctx context.Context, jobID, out, dest string) (string, error) {
+	jobs := d.repo.jobs
+
+	src, err := os.Open(out)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = src.Close() }()
+	size := int64(0)
+	if info, statErr := src.Stat(); statErr == nil {
+		size = info.Size()
+	}
+
+	part := dest + partSuffix
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return "", writeFailure(filepath.Dir(dest), err)
+	}
+	jobs.Update(jobID, func(j *Job) {
+		j.Phase = "filing"
+		j.DoneBytes, j.TotalBytes, j.Note = 0, size, ""
+	})
+
+	h := sha256.New()
+	buf := make([]byte, copyBuffer)
+	var written int64
+	last := time.Now()
+	var copyErr error
+	for copyErr == nil {
+		if copyErr = ctx.Err(); copyErr != nil {
+			break
+		}
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			h.Write(buf[:n])
+			if _, writeErr := f.Write(buf[:n]); writeErr != nil {
+				copyErr = writeErr
+				break
+			}
+			written += int64(n)
+			if time.Since(last) >= progressInterval {
+				last = time.Now()
+				at := written
+				jobs.Update(jobID, func(j *Job) { j.DoneBytes = at })
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				copyErr = readErr
+			}
+			break
 		}
 	}
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	switch {
+	case copyErr != nil:
+		_ = os.Remove(part)
+		return "", fmt.Errorf("copy the converted model into the repository: %w", copyErr)
+	case syncErr != nil:
+		_ = os.Remove(part)
+		return "", fmt.Errorf("flush the converted model: %w", syncErr)
+	case closeErr != nil:
+		return "", closeErr
+	}
+	if err := os.Rename(part, dest); err != nil {
+		return "", fmt.Errorf("file the converted model: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // convert runs the configured converter over the staged release.

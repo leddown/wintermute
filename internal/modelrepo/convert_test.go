@@ -2,6 +2,8 @@ package modelrepo
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
@@ -199,8 +201,10 @@ func TestConvertFetchesConvertsAndFiles(t *testing.T) {
 	if string(got) != "GGUF-converted" {
 		t.Errorf("filed %q", got)
 	}
-	if _, err := os.Stat(filepath.Join(root, stagingDir)); !os.IsNotExist(err) {
-		t.Error("the staging directory should be gone once the model is filed")
+	// The staged release is gone; the staging root itself stays, empty, and is
+	// skipped by the listing either way.
+	if entries, err := os.ReadDir(filepath.Join(root, stagingDir)); err != nil || len(entries) != 0 {
+		t.Errorf("staging should be empty once the model is filed, holds %v (%v)", entries, err)
 	}
 	// The digest is this server's own: nothing upstream published one for a
 	// file it never had.
@@ -210,6 +214,117 @@ func TestConvertFetchesConvertsAndFiles(t *testing.T) {
 	}
 	if len(files) != 1 || files[0].SHA256 == "" {
 		t.Errorf("listed %+v; want one entry carrying a digest", files)
+	}
+}
+
+// Staging can live on another disk, which is the point: a conversion reads the
+// release and writes the GGUF at once, and one spinning drive serving both
+// spends the job seeking. Nothing about the result changes — the model is filed
+// in the repository, with its digest, and the staging area is left clean.
+func TestConvertStagesOnAnotherDiskWhenTold(t *testing.T) {
+	repo, root := newTestRepo(t)
+	if err := repo.Initialise(); err != nil {
+		t.Fatal(err)
+	}
+	elsewhere := t.TempDir()
+
+	shard := strings.Repeat("w", 4096)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".safetensors") {
+			_, _ = w.Write([]byte(shard))
+			return
+		}
+		_, _ = w.Write([]byte(`{"architectures":["Qwen3ForCausalLM"]}`))
+	}))
+	defer srv.Close()
+
+	script := filepath.Join(t.TempDir(), "convert.sh")
+	// Asserts it was handed the staging directory it was told about, not one
+	// inside the repository.
+	body := "#!/bin/sh\n" +
+		"case \"$1\" in " + elsewhere + "/*) ;; *) echo \"staged in $1\" >&2; exit 1 ;; esac\n" +
+		"printf 'GGUF-elsewhere' > \"$3\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo.down.ConvertCommand = "sh " + script
+	repo.down.ConvertStaging = elsewhere
+	repo.down.hubBase = srv.URL
+
+	job, err := repo.down.StartConvert(context.Background(),
+		stubHub{files: []models.HubFile{
+			file("config.json", 38), file("model.safetensors", int64(len(shard))),
+		}},
+		ConvertRequest{HubID: "Qwen/Qwen3-8B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitForJob(t, repo, job.ID)
+	if final.State != JobDone {
+		t.Fatalf("job %s: %s", final.State, final.Error)
+	}
+
+	got, err := os.ReadFile(filepath.Join(root, "Qwen", "Qwen3-8B", "Qwen3-8B-f16.gguf"))
+	if err != nil {
+		t.Fatalf("the model should still be filed in the repository: %v", err)
+	}
+	if string(got) != "GGUF-elsewhere" {
+		t.Errorf("filed %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, stagingDir)); !os.IsNotExist(err) {
+		t.Error("nothing should have been staged inside the repository")
+	}
+
+	if entries, err := os.ReadDir(elsewhere); err != nil || len(entries) != 0 {
+		t.Errorf("the staging disk should be left clean, holds %v (%v)", entries, err)
+	}
+	files, err := repo.List(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0].SHA256 == "" {
+		t.Errorf("listed %+v; want one entry carrying a digest", files)
+	}
+}
+
+// The cross-filesystem half of filing, exercised directly: a rename cannot
+// cross devices, so the copy has to leave the same result — the whole file
+// under its real name, and the digest of what was written.
+func TestFileConvertedCopiesAndHashes(t *testing.T) {
+	repo, root := newTestRepo(t)
+	if err := repo.Initialise(); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(strings.Repeat("g", 200000))
+	sum := sha256.Sum256(body)
+
+	src := filepath.Join(t.TempDir(), "staged.gguf")
+	if err := os.WriteFile(src, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(root, "copied.gguf")
+
+	job, _, err := repo.jobs.Start(context.Background(), "o/n", "copied.gguf", "copied.gguf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer repo.jobs.Finish(job.ID, JobDone, nil)
+
+	// Renaming would succeed here — both paths are on the same filesystem — so
+	// the copy is called directly. What matters is that its result is right.
+	got, err := repo.down.copyConverted(context.Background(), job.ID, src, dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != hex.EncodeToString(sum[:]) {
+		t.Errorf("digest %s, want %s", got, hex.EncodeToString(sum[:]))
+	}
+	landed, err := os.ReadFile(dest)
+	if err != nil || len(landed) != len(body) {
+		t.Fatalf("copied file is %d bytes (%v)", len(landed), err)
+	}
+	if _, err := os.Stat(dest + partSuffix); !os.IsNotExist(err) {
+		t.Error("the partial copy should be gone once the file is whole")
 	}
 }
 

@@ -351,6 +351,7 @@ func New(cfg *config.Config, log *slog.Logger) (*App, error) {
 	// checked everywhere.
 	repo := modelrepo.New(cfg.ModelRepoPath, cfg.HuggingFaceToken, st, log)
 	repo.Downloader().ConvertCommand = cfg.ConvertCommand
+	repo.Downloader().ConvertStaging = cfg.ConvertStaging
 	if cfg.ModelRepoPath != "" {
 		status := repo.Status(context.Background())
 		log.Info("model repository configured",

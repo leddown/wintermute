@@ -26,6 +26,14 @@ type Config struct {
 	Backends []models.Backend
 	// DefaultBackend is used by sessions that name none.
 	DefaultBackend string
+	// ConvertStaging is where a release is assembled and converted, when that
+	// should not be the repository itself. A conversion reads the release and
+	// writes the GGUF at the same time, so putting the two on one spinning
+	// disk makes the head seek between them for the whole job; pointing this
+	// at a different disk turns that into two sequential streams. Empty means
+	// a directory inside the repository, which needs no second drive and is
+	// the right answer on an SSD.
+	ConvertStaging string
 	// ConvertCommand turns a safetensors release into a GGUF: llama.cpp's
 	// convert_hf_to_gguf.py and the interpreter to run it with. Empty means a
 	// model published without a GGUF cannot be converted here, which is a
@@ -392,6 +400,7 @@ func Load() (*Config, error) {
 		RecallIndexInterval:   recallInterval,
 
 		ConvertCommand:      strings.TrimSpace(os.Getenv("WINTERMUTE_CONVERT_CMD")),
+		ConvertStaging:      strings.TrimSpace(os.Getenv("WINTERMUTE_CONVERT_STAGING")),
 		MetricsDatabasePath: strings.TrimSpace(os.Getenv("WINTERMUTE_METRICS_DB")),
 		NodeAgentDir:        strings.TrimSpace(os.Getenv("WINTERMUTE_NODE_AGENT_DIR")),
 		NodeRawRetention:    rawRetention,

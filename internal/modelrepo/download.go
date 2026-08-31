@@ -84,6 +84,9 @@ type Downloader struct {
 	// with. Empty turns conversion off; see convert.go. It is set from the
 	// environment at startup and is never derived from anything off the Hub.
 	ConvertCommand string
+	// ConvertStaging is where releases are assembled and converted. Empty puts
+	// them inside the repository; see stagingRoot.
+	ConvertStaging string
 }
 
 // NewDownloader builds a Downloader. The token is optional and only needed for
