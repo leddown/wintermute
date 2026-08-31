@@ -75,6 +75,17 @@ LockPersonality=true
 MemoryDenyWriteExecute=true
 CapabilityBoundingSet=
 
+# ExecStartPre=+/usr/bin/nvidia-smi -L
+#
+# Uncomment on a headless host whose /dev/nvidia* device nodes do not exist
+# until something opens the driver. nvidia-smi normally creates them by way of
+# nvidia-modprobe, which is setuid root — and NoNewPrivileges=true below makes
+# a setuid binary do nothing, so the agent gets a driver error while the same
+# command works perfectly for an operator with sudo. The + prefix runs this one
+# line as root before the agent starts, which is enough to bring the devices
+# into existence; the alternative is nvidia-persistenced, which is tidier if
+# you already run it.
+#
 # Deliberately NOT set: PrivateDevices=true.
 #
 # GPU telemetry shells out to nvidia-smi, which needs /dev/nvidia*. With
