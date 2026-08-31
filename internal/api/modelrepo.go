@@ -39,6 +39,7 @@ func (s *Server) registerModelRepoRoutes(authed func(string, http.HandlerFunc)) 
 	authed("POST /api/v1/repo/convert", s.handleRepoConvert)
 	authed("GET /api/v1/repo/jobs", s.handleRepoJobs)
 	authed("POST /api/v1/repo/jobs/{id}/cancel", s.handleRepoCancel)
+	authed("DELETE /api/v1/repo/jobs/{id}", s.handleRepoForgetJob)
 	authed("POST /api/v1/repo/delete", s.handleRepoDelete)
 	// Serving weights to fleet nodes. A GET, cacheable and resumable, because
 	// the thing on the other end is an agent fetching gigabytes over a home
@@ -128,6 +129,17 @@ func (s *Server) handleRepoConvert(w http.ResponseWriter, r *http.Request) {
 // and no filesystem walk — just the in-memory registry.
 func (s *Server) handleRepoJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": s.modelRepo.Jobs().List()})
+}
+
+// handleRepoForgetJob clears a finished job from the panel. It touches nothing
+// on disk: the registry is a record of transfers, and what they produced —
+// a model, or a .part file to resume from — is on the drive either way.
+func (s *Server) handleRepoForgetJob(w http.ResponseWriter, r *http.Request) {
+	if err := s.modelRepo.Jobs().Forget(r.PathValue("id")); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleRepoCancel(w http.ResponseWriter, r *http.Request) {

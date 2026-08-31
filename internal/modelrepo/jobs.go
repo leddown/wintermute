@@ -233,6 +233,27 @@ func (r *Jobs) Running() int {
 	return n
 }
 
+// Forget removes a finished job from the listing.
+//
+// The TTL clears these on its own, but half an hour is a long time to look at
+// a failure you have already read, understood and acted on — and the panel is
+// above the thing you are trying to use. Only finished jobs: a running one is
+// cancelled, which is a different verb with a different consequence.
+func (r *Jobs) Forget(id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	j, ok := r.jobs[id]
+	if !ok {
+		return fmt.Errorf("no such download %q", id)
+	}
+	if !j.Done() {
+		return fmt.Errorf("download %q is still running — cancel it first", id)
+	}
+	delete(r.jobs, id)
+	delete(r.cancel, id)
+	return nil
+}
+
 // pruneLocked drops finished jobs past their TTL. Called from the paths that
 // already hold the lock rather than on a timer, because a registry nobody is
 // looking at does not need tidying.

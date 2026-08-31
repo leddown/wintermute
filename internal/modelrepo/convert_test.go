@@ -321,6 +321,31 @@ func TestListSkipsTheStagingDirectory(t *testing.T) {
 	}
 }
 
+// Dismissing is not cancelling: a finished job can be cleared from the panel,
+// a running one has to be stopped first, and neither touches the drive.
+func TestForgetClearsOnlyFinishedJobs(t *testing.T) {
+	repo, _ := newTestRepo(t)
+
+	job, _, err := repo.jobs.Start(context.Background(), "owner/name", "m.gguf", "owner/name/m.gguf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.jobs.Forget(job.ID); err == nil {
+		t.Error("a running download must not be dismissible — that is what cancel is for")
+	}
+
+	repo.jobs.Finish(job.ID, JobFailed, errors.New("converter failed"))
+	if err := repo.jobs.Forget(job.ID); err != nil {
+		t.Fatalf("a finished job should be dismissible: %v", err)
+	}
+	if len(repo.jobs.List()) != 0 {
+		t.Errorf("still listed: %+v", repo.jobs.List())
+	}
+	if err := repo.jobs.Forget(job.ID); err == nil {
+		t.Error("dismissing the same job twice should say it is gone")
+	}
+}
+
 func waitForJob(t *testing.T, repo *Repo, id string) Job {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)

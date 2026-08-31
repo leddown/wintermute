@@ -5019,7 +5019,15 @@ function repoJobCard(j) {
         class: 'link-btn', type: 'button', text: 'Cancel',
         title: 'Stops the transfer. What has arrived is kept, so starting it again resumes.',
         onclick: () => cancelRepoJob(j.id).catch(showError),
-      }) : null,
+      }) : el('button', {
+        // A finished job clears itself after half an hour, which is a long
+        // time to keep reading a failure you have already acted on — and this
+        // panel sits above the thing you came here to use.
+        class: 'link-btn', type: 'button', text: 'Dismiss',
+        title: 'Clears this from the panel. Nothing on the drive changes: a '
+          + 'finished model stays, and a failed transfer keeps its partial file.',
+        onclick: () => forgetRepoJob(j.id).catch(showError),
+      }),
     ]),
     el('div', { class: 'repo-bar' }, [
       el('div', {
@@ -5033,6 +5041,12 @@ function repoJobCard(j) {
     j.error ? el('div', { class: 'repo-job-error', text: j.error }) : null,
     el('div', { class: 'muted repo-job-src', text: j.hub_id }),
   ]);
+}
+
+async function forgetRepoJob(id) {
+  await api(`/api/v1/repo/jobs/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  const { jobs } = await api('/api/v1/repo/jobs');
+  paintRepoJobs(document.querySelector('.repo-jobs'), jobs || []);
 }
 
 async function cancelRepoJob(id) {
