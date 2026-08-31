@@ -700,17 +700,24 @@ button:disabled { opacity: .5; cursor: default; }
 
 /* A slot is a place the transcript can be. It fills the pane so that whichever
    of #chat or the stand-in is in it lays out exactly as the pane used to. */
-.chat-slot { flex: 1; display: flex; flex-direction: column; min-width: 0; }
-.chat-slot > .chat-away { flex: 1; }
+/* min-height: 0 on both, and it is load-bearing rather than defensive. A flex
+   item defaults to min-height: auto, which refuses to shrink below its content
+   — so a long transcript grew #chat past the viewport, took the composer with
+   it, and left the whole page scrolling while .messages never scrolled at all.
+   The composer belongs at the bottom of the window, so every wrapper between
+   .body and .messages has to be allowed to be shorter than what is inside it.
+   .pad-wrap and .dock-slot carry the same line for the same reason. */
+.chat-slot { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.chat-slot > .chat-away { flex: 1; min-height: 0; }
 
-.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.chat { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 
 /* The Core sidebar's two selects, stacked rather than inline: they are a pair
    of questions about one thing, and the second only makes sense after the
    first has been answered. */
 .core-picker { display: flex; flex-direction: column; gap: 6px; }
 .core-select { width: 100%; min-width: 0; }
-.messages { flex: 1; overflow-y: auto; padding: 20px; display: grid; gap: 16px; align-content: start; }
+.messages { flex: 1; min-height: 0; overflow-y: auto; padding: 20px; display: grid; gap: 16px; align-content: start; }
 .empty { text-align: center; margin-top: 15vh; }
 
 .msg { max-width: 760px; width: 100%; margin: 0 auto; display: grid; gap: 6px; }
@@ -754,9 +761,12 @@ button:disabled { opacity: .5; cursor: default; }
   .dots i { animation: none; opacity: 0.6; }
 }
 
+/* Last in the flow and against the bottom edge, so the padding is even: the
+   4px it used to have below was the hint line's job, and the hint now sits
+   above. */
 .composer {
   display: flex; gap: 8px; align-items: flex-end;
-  padding: 12px 20px 4px;
+  padding: 12px 20px;
   border-top: 1px solid var(--border);
 }
 .composer textarea { flex: 1; max-height: 200px; }

@@ -114,12 +114,17 @@
                  model is under the size where wording starts to matter; see
                  renderWordCloud() in app.js. -->
             <div id="word-cloud" class="word-cloud" hidden></div>
+            <div id="chat-agent" class="chat-agent"></div>
+            <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
+            <!-- The composer is last on purpose: it is the one thing that must
+                 sit against the bottom edge of the window, and anything after
+                 it in the flow pushes it up by its own height. The agent row
+                 and the hint read as a strip above the input rather than a
+                 footer below it. -->
             <form id="composer" class="composer">
               <textarea id="input" rows="1" placeholder="Ask anything…" autocomplete="off"></textarea>
               <button id="send" type="submit" aria-label="Send">↑</button>
             </form>
-            <div id="chat-agent" class="chat-agent"></div>
-            <p class="hint muted">The browser cannot run local actions — use the desktop client for file operations.</p>
           </main>
         </div>
       </section>
