@@ -4798,6 +4798,20 @@ async function loadOnNode(host, backendName, modelID, repoFiles) {
 
 const repoView = { pane: 'disk', timer: null, busy: false };
 
+/* ---- releases: one publisher's newest work ----
+
+   The Hub half of this screen answers "what is out there that I can load",
+   which means GGUF, which means somebody has already converted it. On the day
+   a model is released that somebody does not exist yet: the original weights
+   go up as safetensors and the GGUFs follow days later.
+
+   This is the other question — "what has Qwen just published" — and it is a
+   browse rather than a search, so it is a tab rather than a filter. What it
+   adds beyond the Hub tab is the conversion: a release with no GGUF is offered
+   to the converter instead of being a dead end. */
+const RELEASE_ORGS = [['qwen', 'Qwen', 'Qwen']];
+const releaseView = { results: null, loading: false, error: '', org: '' };
+
 async function renderAdminRepo(body) {
   stopRepoPolling();
 
@@ -4809,8 +4823,9 @@ async function renderAdminRepo(body) {
   const hubFilterEl = el('div', { class: 'hub-filters' });
   const hubResultsEl = el('div', { class: 'hub-results' });
   const hubEl = el('div', { class: 'repo-pane-hub' }, [hubFilterEl, hubResultsEl]);
+  const releaseEls = new Map(RELEASE_ORGS.map(([id]) => [id, el('div', { class: 'repo-pane-hub' })]));
 
-  body.append(statusEl, rateEl, jobsEl, switchEl, filesEl, hubEl);
+  body.append(statusEl, rateEl, jobsEl, switchEl, filesEl, hubEl, ...releaseEls.values());
 
   // The repository state decides whether a download can be offered at all; the
   // Hub state decides what the search will be allowed to ask. Neither is fatal
@@ -4868,7 +4883,7 @@ async function renderAdminRepo(body) {
   paintHubRate(rateEl);
 
   paintRepoJobs(jobsEl, data.jobs || []);
-  paintRepoPanes(switchEl, filesEl, hubEl);
+  paintRepoPanes(switchEl, filesEl, hubEl, releaseEls);
   // The disk half is only worth showing once there is a disk to read.
   if (hubView.repoReady) paintRepoFiles(filesEl, data.files || [], data.tags || []);
   else filesEl.append(el('p', { class: 'muted', text: hubView.repoNote }));
@@ -4880,14 +4895,24 @@ async function renderAdminRepo(body) {
 
 // The switch between the two halves. Both stay built; only their visibility
 // moves, so nothing typed into either is lost by crossing over.
-function paintRepoPanes(host, filesEl, hubEl) {
+function paintRepoPanes(host, filesEl, hubEl, releaseEls) {
   host.innerHTML = '';
-  const panes = [['disk', 'On this disk'], ['hub', 'Hugging Face']];
+  const panes = [['disk', 'On this disk'], ['hub', 'Hugging Face'],
+    ...RELEASE_ORGS.map(([id, label]) => [id, label])];
   const apply = () => {
     filesEl.hidden = repoView.pane !== 'disk';
     hubEl.hidden = repoView.pane !== 'hub';
+    for (const [id, node] of releaseEls) {
+      node.hidden = repoView.pane !== id;
+    }
     for (const b of host.querySelectorAll('.hub-tab')) {
       b.classList.toggle('active', b.dataset.pane === repoView.pane);
+    }
+    // Fetched on first sight rather than with the page: it is a Hub request,
+    // and the operator who never opens this tab should not spend one.
+    const org = RELEASE_ORGS.find(([id]) => id === repoView.pane);
+    if (org && releaseView.org !== org[2]) {
+      loadReleases(releaseEls.get(org[0]), org[2]).catch(showError);
     }
   };
   host.append(el('div', { class: 'hub-tabs' }, panes.map(([id, label]) => el('button', {
@@ -5201,6 +5226,134 @@ async function startRepoDownload(detail, q, button, revision) {
     if (host) {
       const { jobs } = await api('/api/v1/repo/jobs');
       paintRepoJobs(host, jobs || []);
+    }
+    startRepoPolling();
+  } finally {
+    button.disabled = false;
+  }
+}
+
+/* ---- one publisher's newest releases ---- */
+
+async function loadReleases(host, org) {
+  releaseView.org = org;
+  releaseView.loading = true;
+  releaseView.error = '';
+  host.innerHTML = '';
+  host.append(el('p', { class: 'muted', text: `Asking the Hub what ${org} has published…` }));
+
+  const params = new URLSearchParams({
+    author: org, sort: 'lastModified', limit: '25', gguf: 'false',
+  });
+  try {
+    const data = await api(`/api/v1/hub/search?${params.toString()}`);
+    releaseView.results = data.results || [];
+  } catch (err) {
+    releaseView.error = err.message;
+    // Cleared so the next visit retries rather than showing a stale list under
+    // an error that has since been fixed.
+    releaseView.org = '';
+  } finally {
+    releaseView.loading = false;
+  }
+  paintReleases(host, org);
+}
+
+function paintReleases(host, org) {
+  host.innerHTML = '';
+  if (releaseView.error) {
+    host.append(el('p', { class: 'error', text: releaseView.error }));
+    return;
+  }
+  const found = releaseView.results || [];
+  if (!found.length) {
+    host.append(el('p', { class: 'muted', text: `The Hub listed nothing for ${org}.` }));
+    return;
+  }
+
+  host.append(el('p', { class: 'hint muted', text:
+    `${org}'s most recently updated repositories. A release carrying GGUF can be `
+    + 'downloaded as it is; one that has only the original safetensors has to be '
+    + 'converted first, which this server can do.' }));
+
+  host.append(el('div', { class: 'release-list' }, found.map((m) => releaseRow(m))));
+}
+
+function releaseRow(m) {
+  const hasGGUF = Boolean(m.quant_count) || Boolean((m.quants || []).length);
+  const facts = [
+    // Rounded the way the Hub cards round it. The count comes off the
+    // safetensors header as an exact tensor total, so an unrounded 80B model
+    // reads as 179.999981459B.
+    m.params_b ? `${Number(m.params_b).toFixed(m.params_b < 10 ? 1 : 0)}B` : null,
+    m.updated_at ? `updated ${relativeTime(new Date(m.updated_at))}` : null,
+    m.downloads ? `${m.downloads.toLocaleString()} downloads` : null,
+    m.gated ? `gated (${m.gated})` : null,
+  ].filter(Boolean).join(' · ');
+
+  // One action, and which one is a property of the repository rather than a
+  // choice. Offering both would mean offering a conversion of weights that
+  // somebody has already converted better.
+  const action = hasGGUF
+    ? el('button', {
+        class: 'link-btn', type: 'button', text: 'Open on the Hub tab',
+        title: 'This release already carries GGUF files — pick a quantisation there.',
+        onclick: () => {
+          hubView.query = m.id;
+          hubView.author = '';
+          repoView.pane = 'hub';
+          renderAdminRepo(document.querySelector('.pane-body')).catch(showError);
+        },
+      })
+    : el('button', {
+        class: 'ghost-btn', type: 'button', text: 'Convert to F16 GGUF',
+        title: 'Fetch the safetensors release and convert it here on the server.',
+        onclick: (ev) => startConversion(m, ev.currentTarget).catch(showError),
+      });
+
+  return el('div', { class: 'release-row' }, [
+    el('div', { class: 'release-main' }, [
+      el('span', { class: 'release-id', text: m.id }),
+      el('span', { class: 'muted', text: facts }),
+    ]),
+    el('span', {
+      class: `repo-badge ${hasGGUF ? 'held' : 'pending'}`,
+      title: hasGGUF
+        ? 'GGUF files are published for this release.'
+        : 'Only the original safetensors are published, so it needs converting.',
+      text: hasGGUF ? 'GGUF' : 'safetensors',
+    }),
+    action,
+  ]);
+}
+
+async function startConversion(m, button) {
+  if (!hubView.repoReady) {
+    toast(hubView.repoNote || 'The model repository is not ready.', true);
+    return;
+  }
+  // Said before the press rather than discovered afterwards: this is the
+  // longest thing this server does, and an F16 is about twice the size of the
+  // quantisation somebody would normally download.
+  if (!window.confirm(
+    `Convert ${m.id} to F16 GGUF?\n\n`
+    + 'The safetensors release is fetched in full, converted on this server, and '
+    + 'filed in the repository. It needs room for the release and the GGUF at the '
+    + 'same time, and takes as long as the download plus a pass over the weights.\n\n'
+    + 'An F16 is the honest intermediate, not the file you would normally serve — '
+    + 'quantise it afterwards if that is what you are after.')) return;
+
+  button.disabled = true;
+  try {
+    await api('/api/v1/repo/convert', {
+      method: 'POST',
+      body: JSON.stringify({ hub_id: m.id }),
+    });
+    toast(`Converting ${m.id}. It carries on if you leave this page.`);
+    const jobsHost = document.querySelector('.repo-jobs');
+    if (jobsHost) {
+      const { jobs } = await api('/api/v1/repo/jobs');
+      paintRepoJobs(jobsHost, jobs || []);
     }
     startRepoPolling();
   } finally {

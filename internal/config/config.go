@@ -26,6 +26,11 @@ type Config struct {
 	Backends []models.Backend
 	// DefaultBackend is used by sessions that name none.
 	DefaultBackend string
+	// ConvertCommand turns a safetensors release into a GGUF: llama.cpp's
+	// convert_hf_to_gguf.py and the interpreter to run it with. Empty means a
+	// model published without a GGUF cannot be converted here, which is a
+	// feature being off rather than an error — see internal/modelrepo/convert.go.
+	ConvertCommand string
 	// FallbackBackend is retried when the selected backend fails. Empty means
 	// no fallback: a local backend that is down simply reports the failure
 	// rather than quietly sending the transcript somewhere else.
@@ -386,6 +391,7 @@ func Load() (*Config, error) {
 		RecallTokenBudget:     recallBudget,
 		RecallIndexInterval:   recallInterval,
 
+		ConvertCommand:      strings.TrimSpace(os.Getenv("WINTERMUTE_CONVERT_CMD")),
 		MetricsDatabasePath: strings.TrimSpace(os.Getenv("WINTERMUTE_METRICS_DB")),
 		NodeAgentDir:        strings.TrimSpace(os.Getenv("WINTERMUTE_NODE_AGENT_DIR")),
 		NodeRawRetention:    rawRetention,

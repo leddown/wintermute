@@ -14,6 +14,12 @@
   --loss: #ff8a8a;
   --radius: 10px;
 
+  /* The widest a message is allowed to get. The transcript follows the window
+     rather than sitting in a fixed column, and this is where it stops: past
+     roughly this width a line is long enough that the eye loses the return
+     sweep back to the left edge. One number, so it can be tuned in one place. */
+  --chat-measure: 1100px;
+
   /* Text brightness, set from Admin → Appearance and stored in this browser.
      0% is the palette exactly as designed. See the derivation below. */
   --text-lift: 0%;
@@ -720,7 +726,12 @@ button:disabled { opacity: .5; cursor: default; }
 .messages { flex: 1; min-height: 0; overflow-y: auto; padding: 20px; display: grid; gap: 16px; align-content: start; }
 .empty { text-align: center; margin-top: 15vh; }
 
-.msg { max-width: 760px; width: 100%; margin: 0 auto; display: grid; gap: 6px; }
+/* Fluid, not a fixed column: a message fills the transcript pane until it hits
+   --chat-measure, then stays centred at that width. Widening the window widens
+   the messages, narrowing it narrows them, and no percentage inset is applied
+   on top — .messages already carries the gutter as padding, and taking another
+   slice of a phone screen is exactly where the width is worth the most. */
+.msg { width: 100%; max-width: var(--chat-measure); margin: 0 auto; display: grid; gap: 6px; }
 .msg .role { font-size: 11px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .msg .bubble {
   background: var(--surface);
@@ -772,6 +783,20 @@ button:disabled { opacity: .5; cursor: default; }
 .composer textarea { flex: 1; max-height: 200px; }
 .composer button { width: 42px; height: 42px; padding: 0; border-radius: 50%; }
 .hint { padding: 0 20px 12px; font-size: 11.5px; text-align: center; }
+
+/* One publisher's newest releases: a row per repository, the facts on the left
+   and the single action that applies on the right. Deliberately plainer than a
+   Hub search card — this is a list to scan for a name, not a shortlist to
+   compare quantisations in. */
+.release-list { display: grid; gap: 8px; }
+.release-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.release-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.release-id { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.release-main .muted { font-size: 11.5px; }
 
 /* Ready-made phrasings for a small backend, above the composer. Wraps rather
    than scrolls: it is a set of options to scan, and a hidden option is not

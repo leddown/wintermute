@@ -34,6 +34,9 @@ func (s *Server) registerModelRepoRoutes(authed func(string, http.HandlerFunc)) 
 	authed("GET /api/v1/repo", s.handleRepoList)
 	authed("POST /api/v1/repo/init", s.handleRepoInit)
 	authed("POST /api/v1/repo/download", s.handleRepoDownload)
+	// Converting a safetensors release into a GGUF. Same job registry as a
+	// download, because from the operator's side it is the same wait.
+	authed("POST /api/v1/repo/convert", s.handleRepoConvert)
 	authed("GET /api/v1/repo/jobs", s.handleRepoJobs)
 	authed("POST /api/v1/repo/jobs/{id}/cancel", s.handleRepoCancel)
 	authed("POST /api/v1/repo/delete", s.handleRepoDelete)
@@ -98,6 +101,24 @@ func (s *Server) handleRepoDownload(w http.ResponseWriter, r *http.Request) {
 	job, err := s.modelRepo.Downloader().Start(r.Context(), req)
 	if err != nil {
 		s.failRepo(w, "start model download", err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
+}
+
+// handleRepoConvert fetches a safetensors release and converts it to GGUF.
+//
+// The Hub client is handed in from the catalog rather than built here: it
+// carries the token, the cache and the rate-limit accounting, and a second one
+// would quietly double this server's request budget against Hugging Face.
+func (s *Server) handleRepoConvert(w http.ResponseWriter, r *http.Request) {
+	var req modelrepo.ConvertRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	job, err := s.modelRepo.Downloader().StartConvert(r.Context(), s.catalog.Hub(), req)
+	if err != nil {
+		s.failRepo(w, "start model conversion", err)
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"job": job})
@@ -216,6 +237,7 @@ func (s *Server) failRepo(w http.ResponseWriter, what string, err error) {
 		errors.Is(err, modelrepo.ErrUnavailable),
 		errors.Is(err, modelrepo.ErrOutsideRepo),
 		errors.Is(err, modelrepo.ErrInvalidRequest),
+		errors.Is(err, modelrepo.ErrNoConverter),
 		errors.Is(err, modelrepo.ErrNotWritable):
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

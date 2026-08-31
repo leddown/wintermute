@@ -399,6 +399,14 @@ func (r *Repo) List(ctx context.Context, hosts []*models.Hardware) ([]Entry, err
 			return nil
 		}
 		if d.IsDir() {
+			// Dot-directories are this package's own working space — .staging,
+			// where a release is assembled before it is a model. Skipping the
+			// whole subtree is what keeps a conversion in progress out of the
+			// listing: the GGUF the converter is part-way through writing is a
+			// real .gguf on disk long before it is a model.
+			if path != root && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir
+			}
 			return nil
 		}
 		if !strings.HasSuffix(strings.ToLower(d.Name()), weightSuffix) {

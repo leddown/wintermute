@@ -74,15 +74,26 @@ type Downloader struct {
 	token  string
 	client *http.Client
 	log    *slog.Logger
+	// hubBase is where files are resolved from. It is huggingface.co in every
+	// real configuration and a stub in the tests, which is the only reason it
+	// is a field: a transfer is most of this package and testing it against
+	// the real Hub would be neither fast nor kind.
+	hubBase string
+	// ConvertCommand is the command that turns a safetensors release into a
+	// GGUF — llama.cpp's convert_hf_to_gguf.py and the interpreter to run it
+	// with. Empty turns conversion off; see convert.go. It is set from the
+	// environment at startup and is never derived from anything off the Hub.
+	ConvertCommand string
 }
 
 // NewDownloader builds a Downloader. The token is optional and only needed for
 // gated repositories.
 func NewDownloader(repo *Repo, token string, log *slog.Logger) *Downloader {
 	return &Downloader{
-		repo:  repo,
-		token: token,
-		log:   log,
+		repo:    repo,
+		token:   token,
+		log:     log,
+		hubBase: "https://huggingface.co",
 		// No client timeout. A timeout here would bound the whole transfer,
 		// and a 24GB model over a domestic line legitimately takes hours; the
 		// context handles cancellation, and a stalled connection is caught by
@@ -177,7 +188,7 @@ func (d *Downloader) run(ctx context.Context, jobID, root, relPath string, req R
 	}
 
 	// Start has already cleaned the revision and defaulted it to main.
-	url := fmt.Sprintf("https://huggingface.co/%s/resolve/%s/%s", hubID, req.Revision, filename)
+	url := fmt.Sprintf("%s/%s/resolve/%s/%s", d.hubBase, hubID, req.Revision, filename)
 	part := dest + partSuffix
 
 	var digest string
@@ -194,7 +205,7 @@ func (d *Downloader) run(ctx context.Context, jobID, root, relPath string, req R
 			case <-time.After(time.Duration(attempt) * 2 * time.Second):
 			}
 		}
-		digest, lastErr = d.transfer(ctx, jobID, url, part)
+		digest, lastErr = d.transfer(ctx, jobID, url, part, span{})
 		if lastErr == nil {
 			break
 		}
@@ -258,9 +269,85 @@ func (d *Downloader) run(ctx context.Context, jobID, root, relPath string, req R
 		"bytes", size, "verified", sum != "")
 }
 
+// fetchInto brings one file down to dest, retrying with resume, and gives it
+// its real name only once it is whole.
+//
+// This is the download loop without the parts that are specific to a model: no
+// digest to check against — the Hub publishes none for a config or a shard —
+// and no repository row, because the thing being fetched is an ingredient
+// rather than a model. What it keeps is the part file, so a release interrupted
+// at shard nine of twelve resumes there.
+func (d *Downloader) fetchInto(ctx context.Context, jobID, url, dest string, sp span) error {
+	part := dest + partSuffix
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			d.repo.jobs.Update(jobID, func(j *Job) { j.Attempt = attempt })
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Duration(attempt) * 2 * time.Second):
+			}
+		}
+		if _, lastErr = d.transfer(ctx, jobID, url, part, sp); lastErr == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		d.log.Warn("release file attempt failed", "url", url, "attempt", attempt, "error", lastErr)
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	if err := os.Rename(part, dest); err != nil {
+		return fmt.Errorf("finalise %s: %w", filepath.Base(dest), err)
+	}
+	return nil
+}
+
+// fileSHA256 hashes a file on disk, stopping promptly on cancellation.
+//
+// Read back in a second pass rather than accumulated during the transfer,
+// because a transfer can resume — across retries and across restarts — and a
+// hash taken over one attempt's bytes would be a hash of part of the file.
+func fileSHA256(ctx context.Context, path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = f.Close() }()
+
+	h := sha256.New()
+	buf := make([]byte, copyBuffer)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			h.Write(buf[:n])
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return hex.EncodeToString(h.Sum(nil)), nil
+			}
+			return "", readErr
+		}
+	}
+}
+
+// span positions one file's bytes inside a job that is fetching several.
+//
+// A single-file download leaves it zero and the progress figures are the
+// file's own. A conversion fetches a dozen shards into one job, where the
+// number an operator wants is how far through the release they are — not how
+// far through shard seven.
+type span struct{ base, grand int64 }
+
 // transfer runs one attempt, resuming from whatever is already in the part
 // file. It returns the digest the server published, when it published one.
-func (d *Downloader) transfer(ctx context.Context, jobID, url, part string) (string, error) {
+func (d *Downloader) transfer(ctx context.Context, jobID, url, part string, sp span) (string, error) {
 	var resumeFrom int64
 	if info, err := os.Stat(part); err == nil {
 		resumeFrom = info.Size()
@@ -323,12 +410,16 @@ func (d *Downloader) transfer(ctx context.Context, jobID, url, part string) (str
 
 	d.repo.jobs.Update(jobID, func(j *Job) {
 		j.Phase = "downloading"
-		j.TotalBytes = total
-		j.DoneBytes = resumeFrom
-		j.ResumedBytes = resumeFrom
+		if sp.grand > 0 {
+			j.TotalBytes = sp.grand
+		} else {
+			j.TotalBytes = total
+		}
+		j.DoneBytes = sp.base + resumeFrom
+		j.ResumedBytes = sp.base + resumeFrom
 	})
 
-	written, copyErr := d.copy(ctx, f, resp.Body, jobID, resumeFrom)
+	written, copyErr := d.copy(ctx, f, resp.Body, jobID, resumeFrom, sp.base)
 
 	// Flush to the platter before calling the attempt good. Without this a
 	// power cut between here and the rename leaves a file the index believes
@@ -352,7 +443,7 @@ func (d *Downloader) transfer(ctx context.Context, jobID, url, part string) (str
 // copy streams the body into the file, publishing progress as it goes and
 // stopping promptly on cancellation.
 func (d *Downloader) copy(ctx context.Context, dst io.Writer, src io.Reader,
-	jobID string, startAt int64) (int64, error) {
+	jobID string, startAt, base int64) (int64, error) {
 
 	buf := make([]byte, copyBuffer)
 	done := startAt
@@ -369,12 +460,13 @@ func (d *Downloader) copy(ctx context.Context, dst io.Writer, src io.Reader,
 			done += int64(n)
 			if time.Since(last) >= progressInterval {
 				last = time.Now()
-				at := done
+				at := base + done
 				d.repo.jobs.Update(jobID, func(j *Job) { j.DoneBytes = at })
 			}
 		}
 		if readErr != nil {
-			d.repo.jobs.Update(jobID, func(j *Job) { j.DoneBytes = done })
+			at := base + done
+			d.repo.jobs.Update(jobID, func(j *Job) { j.DoneBytes = at })
 			if errors.Is(readErr, io.EOF) {
 				return done, nil
 			}
@@ -400,31 +492,10 @@ func (d *Downloader) verify(ctx context.Context, jobID, part, published string) 
 	}
 	d.repo.jobs.Update(jobID, func(j *Job) { j.Phase = "verifying" })
 
-	f, err := os.Open(part)
+	sum, err := fileSHA256(ctx, part)
 	if err != nil {
 		return "", fmt.Errorf("verify: %w", err)
 	}
-	defer func() { _ = f.Close() }()
-
-	h := sha256.New()
-	buf := make([]byte, copyBuffer)
-	for {
-		if err := ctx.Err(); err != nil {
-			return "", err
-		}
-		n, readErr := f.Read(buf)
-		if n > 0 {
-			h.Write(buf[:n])
-		}
-		if readErr != nil {
-			if errors.Is(readErr, io.EOF) {
-				break
-			}
-			return "", fmt.Errorf("verify: %w", readErr)
-		}
-	}
-
-	sum := hex.EncodeToString(h.Sum(nil))
 	if !strings.EqualFold(sum, published) {
 		// The partial file is removed here, unlike everywhere else in this
 		// package. A resume is only ever correct when the bytes on disk are a

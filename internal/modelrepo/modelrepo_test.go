@@ -365,7 +365,7 @@ func downloadTo(t *testing.T, repo *Repo, srv *httptest.Server, part string) (st
 	// Finish it the way run() would, so a second call in the same test is not
 	// refused as a duplicate of a job nothing ever closed.
 	defer func() { repo.jobs.Finish(job.ID, JobDone, nil) }()
-	return repo.down.transfer(context.Background(), job.ID, srv.URL, part)
+	return repo.down.transfer(context.Background(), job.ID, srv.URL, part, span{})
 }
 
 func TestTransferResumesAfterInterruption(t *testing.T) {
