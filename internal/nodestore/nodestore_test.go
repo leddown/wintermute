@@ -328,7 +328,7 @@ func TestFetchRefusesTraversalAssignment(t *testing.T) {
 func TestLlamaCPPWritesConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "llama-swap.yaml")
-	ing := NewLlamaCPPIngester(cfg, "/usr/bin/llama-server", []string{"--n-gpu-layers", "99"})
+	ing := NewLlamaCPPIngester(cfg, "", "/usr/bin/llama-server", []string{"--n-gpu-layers", "99"})
 
 	if err := ing.Ingest(context.Background(), "Qwen/Qwen3-8B-Q4_K_M.gguf",
 		"/store/Qwen/Qwen3-8B-Q4_K_M.gguf"); err != nil {
@@ -362,7 +362,7 @@ func TestLlamaCPPWritesConfig(t *testing.T) {
 func TestLlamaCPPQuotesAwkwardPaths(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "c.yaml")
-	ing := NewLlamaCPPIngester(cfg, "llama-server", nil)
+	ing := NewLlamaCPPIngester(cfg, "", "llama-server", nil)
 	if err := ing.Ingest(context.Background(), "a b.gguf", "/my models/a b.gguf"); err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +375,7 @@ func TestLlamaCPPQuotesAwkwardPaths(t *testing.T) {
 // With no config path there is nothing to generate, and the agent must not
 // claim the host can serve anything.
 func TestLlamaCPPWithoutConfigClaimsNothing(t *testing.T) {
-	ing := NewLlamaCPPIngester("", "llama-server", nil)
+	ing := NewLlamaCPPIngester("", "", "llama-server", nil)
 	if err := ing.Ingest(context.Background(), "m.gguf", "/store/m.gguf"); err != nil {
 		t.Fatal(err)
 	}
@@ -385,5 +385,63 @@ func TestLlamaCPPWithoutConfigClaimsNothing(t *testing.T) {
 	}
 	if len(names) != 0 {
 		t.Errorf("nothing is generated, so nothing is servable; got %v", names)
+	}
+}
+
+// stubIngester stands in for a runtime that can serve some names and not
+// others, and that knows where it listens.
+type stubIngester struct {
+	names    map[string]bool
+	endpoint string
+}
+
+func (s stubIngester) ServableNames() (map[string]bool, error)      { return s.names, nil }
+func (s stubIngester) Ingest(context.Context, string, string) error { return nil }
+func (s stubIngester) Describe() string                             { return "stub" }
+func (s stubIngester) Endpoint() string                             { return s.endpoint }
+
+// The server declares a backend from what a scan reports, so two fields have to
+// survive the trip: where the runtime listens, and what it calls each file.
+// Deriving either on the server would mean guessing at a vocabulary that
+// belongs to whichever runtime is installed here.
+func TestScanReportsRuntimeAddressAndServeNames(t *testing.T) {
+	ing := stubIngester{
+		names:    map[string]bool{"done": true},
+		endpoint: "http://127.0.0.1:11434",
+	}
+	s, root := newStore(t, RuntimeOllama, ing)
+	for _, name := range []string{"done.gguf", "waiting.gguf"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("weights"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	report := s.Scan()
+	if report.RuntimeURL != "http://127.0.0.1:11434" {
+		t.Errorf("RuntimeURL = %q", report.RuntimeURL)
+	}
+	byPath := map[string]node.StoreFile{}
+	for _, f := range report.Files {
+		byPath[f.RelPath] = f
+	}
+	if f := byPath["done.gguf"]; !f.Ingested || f.ServeName != "done" {
+		t.Errorf("an imported file reported %+v", f)
+	}
+	// The name is reported before the import as well as after: a server waiting
+	// on one needs to know what it will be called when it arrives.
+	if f := byPath["waiting.gguf"]; f.Ingested || f.ServeName != "waiting" {
+		t.Errorf("a file the runtime cannot serve yet reported %+v", f)
+	}
+}
+
+// A node that keeps weights and runs nothing has no address to report, and must
+// not invent one — the server would offer it as a backend that answers nothing.
+func TestScanWithoutRuntimeReportsNoAddress(t *testing.T) {
+	s, root := newStore(t, RuntimeNone, nil)
+	if err := os.WriteFile(filepath.Join(root, "m.gguf"), []byte("weights"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if report := s.Scan(); report.RuntimeURL != "" {
+		t.Errorf("RuntimeURL = %q for a node with no runtime", report.RuntimeURL)
 	}
 }

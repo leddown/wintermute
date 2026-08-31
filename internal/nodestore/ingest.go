@@ -42,6 +42,12 @@ type Ingester interface {
 	Ingest(ctx context.Context, relPath, absPath string) error
 	// Describe names the runtime for the agent's log.
 	Describe() string
+	// Endpoint is where this runtime serves, as this host addresses it —
+	// usually loopback, since the agent and the runtime share a machine. It is
+	// reported to the server so a backend for this node can be suggested
+	// rather than typed out; empty when the agent has not been told, which
+	// reads as "unknown" rather than as a guess.
+	Endpoint() string
 }
 
 // ---- Ollama ----------------------------------------------------------------
@@ -55,16 +61,27 @@ type Ingester interface {
 // HTTP server keeps it a network client, which is all it has ever been.
 type OllamaIngester struct {
 	baseURL string
-	client  *http.Client
+	// serveURL is the same Ollama as another caller would reach it. It is
+	// usually baseURL and is allowed to differ, because the agent reaches its
+	// runtime over loopback while anything else has to come over the network.
+	// Imports always go to baseURL; only what is reported changes.
+	serveURL string
+	client   *http.Client
 }
 
-// NewOllamaIngester builds an ingester against a local Ollama.
-func NewOllamaIngester(baseURL string) *OllamaIngester {
+// NewOllamaIngester builds an ingester against a local Ollama. An empty
+// serveURL means it serves at the address it is imported into, which is the
+// ordinary case.
+func NewOllamaIngester(baseURL, serveURL string) *OllamaIngester {
 	if strings.TrimSpace(baseURL) == "" {
 		baseURL = "http://127.0.0.1:11434"
 	}
+	if strings.TrimSpace(serveURL) == "" {
+		serveURL = baseURL
+	}
 	return &OllamaIngester{
-		baseURL: strings.TrimSuffix(baseURL, "/"),
+		baseURL:  strings.TrimSuffix(baseURL, "/"),
+		serveURL: strings.TrimSuffix(strings.TrimSpace(serveURL), "/"),
 		// Importing copies gigabytes through loopback into Ollama's blob
 		// store, which is disk-bound and slow. No overall timeout, for the
 		// same reason the repository downloader has none.
@@ -73,6 +90,9 @@ func NewOllamaIngester(baseURL string) *OllamaIngester {
 }
 
 func (o *OllamaIngester) Describe() string { return "ollama at " + o.baseURL }
+
+// Endpoint is where this Ollama serves what it was given.
+func (o *OllamaIngester) Endpoint() string { return o.serveURL }
 
 // ModelName derives the Ollama model name for a stored file.
 //
@@ -237,7 +257,11 @@ func (o *OllamaIngester) putBlob(ctx context.Context, blob, absPath string) erro
 // by having the server write one config onto a share.
 type LlamaCPPIngester struct {
 	configPath string
-	serverBin  string
+	// serveURL is where llama-swap answers, which this agent cannot discover:
+	// it writes a config file and never speaks to the process reading it. So
+	// it is declared on the command line or not known at all.
+	serveURL  string
+	serverBin string
 	// extraArgs are appended to every generated command, for the flags that are
 	// a property of the host rather than of the model — "--n-gpu-layers 99" on
 	// a box with a big card, "--no-mmap" where the store is on a network
@@ -249,12 +273,13 @@ type LlamaCPPIngester struct {
 // NewLlamaCPPIngester builds an ingester that maintains one llama-swap config.
 // An empty configPath means the files are kept and nothing is generated, which
 // is the right setting for a host wired up by hand.
-func NewLlamaCPPIngester(configPath, serverBin string, extraArgs []string) *LlamaCPPIngester {
+func NewLlamaCPPIngester(configPath, serveURL, serverBin string, extraArgs []string) *LlamaCPPIngester {
 	if strings.TrimSpace(serverBin) == "" {
 		serverBin = "llama-server"
 	}
 	return &LlamaCPPIngester{
 		configPath: strings.TrimSpace(configPath),
+		serveURL:   strings.TrimSpace(serveURL),
 		serverBin:  serverBin,
 		extraArgs:  extraArgs,
 		models:     map[string]string{},
@@ -267,6 +292,11 @@ func (l *LlamaCPPIngester) Describe() string {
 	}
 	return "llama.cpp via " + l.configPath
 }
+
+// Endpoint is where llama-swap serves the config this agent writes. Empty
+// unless the operator said so: writing a config proves nothing about which
+// process is reading it or what port that process listens on.
+func (l *LlamaCPPIngester) Endpoint() string { return l.serveURL }
 
 // ServableNames reports what the generated config currently names.
 func (l *LlamaCPPIngester) ServableNames() (map[string]bool, error) {

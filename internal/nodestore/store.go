@@ -178,6 +178,9 @@ func (s *Store) Has(relPath string) bool {
 // has them, or onto the root filesystem underneath the missing mount.
 func (s *Store) Scan() node.StoreReport {
 	report := node.StoreReport{Path: s.root, Runtime: string(s.runtime)}
+	if s.ingester != nil {
+		report.RuntimeURL = s.ingester.Endpoint()
+	}
 
 	if total, free, err := diskSpace(s.root); err == nil {
 		report.TotalBytes, report.FreeBytes = total, free
@@ -215,8 +218,12 @@ func (s *Store) Scan() node.StoreReport {
 			if info, err := d.Info(); err == nil {
 				size = info.Size()
 			}
+			// ServeName is reported whether or not the runtime has it yet:
+			// it is what this file *will* be called, which is what a server
+			// waiting on an import needs in order to name it afterwards.
 			report.Files = append(report.Files, node.StoreFile{
 				RelPath: key, SizeBytes: size, Ingested: servable[ModelName(key)],
+				ServeName: ModelName(key),
 			})
 		}
 		return nil

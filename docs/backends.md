@@ -14,6 +14,7 @@ second GPU box and measuring no improvement at all.
 - [Why a second backend doesn't speed up one conversation](#why-a-second-backend-doesnt-speed-up-one-conversation)
 - [What actually gets faster](#what-actually-gets-faster)
 - [Configuration recipes](#configuration-recipes)
+- [Putting a model on a node and serving it](#putting-a-model-on-a-node-and-serving-it)
 - [Gotchas that will cost you performance](#gotchas-that-will-cost-you-performance)
 - [Measure before you build](#measure-before-you-build)
 - [Still to build](#still-to-build)
@@ -30,6 +31,7 @@ second GPU box and measuring no improvement at all.
 | Automatic retry against a fallback when a backend fails | **Works** |
 | Concurrent turns in different conversations | **Works** (see caveats below) |
 | Probing each backend for what it serves, and whether it fits | **Works** |
+| Sending a model from the server's repository to a node and serving it | **Works** — [below](#putting-a-model-on-a-node-and-serving-it) |
 | Splitting one turn across backends | Not built — and see below, it wouldn't help |
 | Routing steps within a turn to different models by role | **Not built** — [sketched below](#role-based-routing-within-a-turn) |
 
@@ -279,6 +281,74 @@ Two things keep the verdict honest once the link exists:
 With no backend declared on a node and none on loopback, nothing is graded and
 every verdict reads `unknown` — the Repository screen says so in as many words, because
 the alternative is a page of grey badges that looks like a broken estimator.
+
+## Putting a model on a node and serving it
+
+The file above is not the only way a backend gets declared, and for a fleet it
+is usually not the convenient one. **Huginn → Models** has a panel that takes a
+model off the server's own repository, puts it on a machine in the fleet, and
+declares the backend that serves it — without a file edit or a restart.
+
+It is three separate acts and the panel keeps them separate, because they are
+not the same decision:
+
+1. **Assign.** The server records that the node should hold this file. It does
+   not connect to anything: the agent reads its own desired state off the reply
+   to its next report and fetches for itself, so the pause after clicking
+   Deploy is the agent's push interval rather than a stall. This is the
+   existing assignment mechanism — see [the fleet](hardware-nodes.md).
+2. **Ingest.** The node's runtime is made able to serve the file. Ollama copies
+   it into its blob store, which takes minutes and a second copy of the disk
+   space; llama.cpp only needs a line in the config the agent owns.
+3. **Serve.** *This* server decides it will send turns there, by declaring a
+   backend on that node. Nothing before this point changes where a conversation
+   goes.
+
+Only the third one touches this document's subject, and it stores a row in the
+database rather than editing `backends.json`. The two coexist: a backend
+declared in the file wins at resolve time and the API refuses to redefine it,
+which is why one declared here can be edited from the browser and one declared
+there cannot.
+
+### One backend per node, not per model
+
+The instinct on first use is to declare a backend per downloaded model. Don't —
+a session pins a *backend and a model* separately, and a probe already
+enumerates everything a backend serves. So a node running Ollama wants exactly
+one backend, and every model that host holds is reachable through it. A second
+model deployed to the same node needs no second declaration; it appears in the
+Models list once the node has imported it.
+
+### Where the address comes from
+
+The panel prefills the backend's `base_url` from what the node reported, and
+the node reports what its own agent talks to — usually loopback, because the
+agent and the runtime share a machine. Loopback dialled from *here* is this
+server, so the address is rewritten to the node's reported hostname before it
+is offered, and the panel says that is what it did.
+
+It is a suggestion in the strict sense. It is shown, it is editable, and the
+backend is probed with a real prompt before anything is loaded — a fleet host
+saying "reach me here" is a host making a claim, and a claim from a node is
+confirmed rather than believed. Nothing is inferred from `base_url`, and the
+`node` field is still what links a backend to a machine's hardware for fit
+verdicts; the panel fills it in because the operator picked the machine.
+
+A node that never reported a runtime address gets no suggestion at all rather
+than a plausible guess — every Ollama host in the world would suggest port
+11434, and a wrong one looks exactly like a right one until a turn is sent to
+it. Set `WINTERMUTE_NODE_RUNTIME_URL` on that host, or declare the backend by
+hand on the Backends screen.
+
+### What it will not do
+
+Load a model on a llama.cpp node. `llama-server` serves what it was started
+with and llama-swap loads on the first request, so there is no "load" to
+perform — the panel says the backend is declared and stops there. Loading and
+unloading on demand remains an Ollama-only operation, for the reason given in
+[internal/models/control.go](../internal/models/control.go): it is not a
+read-only act, and it can take VRAM out from under a turn another conversation
+is in the middle of.
 
 ## Gotchas that will cost you performance
 

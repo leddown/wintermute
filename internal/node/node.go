@@ -153,6 +153,17 @@ type StoreReport struct {
 	// llama.cpp host can reference a GGUF where it lies, an Ollama host has to
 	// import it, and the server has no way to guess which.
 	Runtime string `json:"runtime,omitempty"`
+	// RuntimeURL is where that runtime listens, as this agent addresses it —
+	// which is very often loopback, because the agent and the runtime share a
+	// host. It is reported so the server can *suggest* a backend for this
+	// node rather than making an operator work out the address by hand; it is
+	// a report about the host, not a route the server takes on trust.
+	//
+	// The server rewrites a loopback host to this node's hostname before
+	// offering it, and an operator confirms the result. Nothing here is ever
+	// dialled without that confirmation — a node claiming an address is not a
+	// node deciding where this server connects.
+	RuntimeURL string `json:"runtime_url,omitempty"`
 	// FreeBytes and TotalBytes describe the filesystem holding the store, so
 	// the server can refuse an assignment that will not fit rather than
 	// discovering it after an hour of transfer.
@@ -179,6 +190,12 @@ type StoreFile struct {
 	// Partial marks an interrupted download. Reported so the fleet view can
 	// show a transfer in progress without the server having to poll for it.
 	Partial bool `json:"partial,omitempty"`
+	// ServeName is the id the runtime answers to for this file — the Ollama
+	// model name, or the llama-swap config entry. Reported rather than derived
+	// on the server because the derivation belongs to whichever runtime is
+	// installed here, and a server that guessed it would be issuing load
+	// requests for a name nothing serves.
+	ServeName string `json:"serve_name,omitempty"`
 }
 
 // ReportResponse is what the server sends back to an agent.

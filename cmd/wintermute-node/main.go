@@ -87,6 +87,9 @@ func run() error {
 			"llama-server binary named in the generated config")
 		serverArgs = flag.String("llama-server-args", envOr("WINTERMUTE_NODE_LLAMA_SERVER_ARGS", ""),
 			"extra flags appended to every generated llama-server command, e.g. \"--n-gpu-layers 99\"")
+		runtimeURL = flag.String("runtime-url", envOr("WINTERMUTE_NODE_RUNTIME_URL", ""),
+			"where this host's runtime serves, reported so the server can suggest a backend for this node; "+
+				"defaults to -ollama-url with -runtime ollama, and is otherwise unknown until given")
 	)
 	flag.Parse()
 
@@ -117,7 +120,8 @@ func run() error {
 	}
 
 	if strings.TrimSpace(*storeDir) != "" {
-		st, err := buildStore(*storeDir, *runtimeName, *ollamaURL, *swapConfig, *serverBin, *serverArgs)
+		st, err := buildStore(*storeDir, *runtimeName, *ollamaURL, *runtimeURL,
+			*swapConfig, *serverBin, *serverArgs)
 		if err != nil {
 			return err
 		}
@@ -391,7 +395,7 @@ func (a *agent) reconcile(ctx context.Context, assignments []node.Assignment) {
 
 // buildStore assembles the model store and whatever ingests into this host's
 // runtime.
-func buildStore(dir, runtimeName, ollamaURL, swapConfig, serverBin, serverArgs string) (*nodestore.Store, error) {
+func buildStore(dir, runtimeName, ollamaURL, runtimeURL, swapConfig, serverBin, serverArgs string) (*nodestore.Store, error) {
 	rt := nodestore.Runtime(strings.TrimSpace(runtimeName))
 	if !rt.Valid() {
 		return nil, fmt.Errorf("unknown -runtime %q: expected llamacpp, ollama, or empty", runtimeName)
@@ -400,9 +404,11 @@ func buildStore(dir, runtimeName, ollamaURL, swapConfig, serverBin, serverArgs s
 	var ingester nodestore.Ingester
 	switch rt {
 	case nodestore.RuntimeOllama:
-		ingester = nodestore.NewOllamaIngester(ollamaURL)
+		// The Ollama being imported into is the Ollama that serves, so an
+		// operator who has not said otherwise has already said this.
+		ingester = nodestore.NewOllamaIngester(ollamaURL, runtimeURL)
 	case nodestore.RuntimeLlamaCPP:
-		ingester = nodestore.NewLlamaCPPIngester(swapConfig, serverBin, strings.Fields(serverArgs))
+		ingester = nodestore.NewLlamaCPPIngester(swapConfig, runtimeURL, serverBin, strings.Fields(serverArgs))
 	}
 
 	store, err := nodestore.New(dir, rt, ingester)

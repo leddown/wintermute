@@ -1693,6 +1693,47 @@ a.repo-result-id:hover, a.repo-result-id:focus-visible {
 .repo-badge.unimported { border-color: var(--border); color: var(--muted); }
 .node-store-assign { margin-top: 6px; }
 
+/* ---------- deploying a model to a node ----------
+   Sits above the model cards on the Models tab and has to read as a different
+   kind of thing from them: those are a list of what exists, this is a control
+   for changing it. The panel gets a filled ground and the cards do not. */
+
+.deploy-panel {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.deploy-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.deploy-head h3 { margin: 0; font-size: 14px; }
+
+.deploy-form { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.deploy-select { max-width: 100%; min-width: 0; flex: 1 1 220px; }
+
+.deploy-target {
+  border-top: 1px solid var(--border); padding-top: 10px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.deploy-target.stale { opacity: 0.75; }
+.deploy-target-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.deploy-node { font-family: ui-monospace, "Courier New", monospace; font-weight: 600; }
+.deploy-rows { display: flex; flex-direction: column; gap: 4px; }
+
+/* The one place a backend is declared without leaving this screen. Indented
+   under the row it belongs to, so it is plainly about that model and not about
+   the panel as a whole. */
+.deploy-serve {
+  margin: 4px 0 8px 16px; padding: 8px 10px; font-size: 12px;
+  border-left: 2px solid var(--accent); background: var(--bg);
+}
+.deploy-serve p { margin: 0 0 6px; }
+.deploy-serve-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.deploy-input {
+  font-family: ui-monospace, "Courier New", monospace; font-size: 12px;
+  padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text); min-width: 0;
+}
+.deploy-input.wide { flex: 1 1 240px; }
+
 /* ---------- rendered documentation ----------
    The FAQ, rendered from Markdown. Measure is capped: this is prose, and a
    line of body text spanning a wide monitor is genuinely harder to read than

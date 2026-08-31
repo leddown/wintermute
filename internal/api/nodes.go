@@ -3,7 +3,11 @@ package api
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"sort"
+	"strings"
 	"time"
 
 	"wintermute/internal/models"
@@ -38,7 +42,15 @@ func (s *Server) registerNodeRoutes(authed func(string, http.HandlerFunc)) {
 	authed("GET /api/v1/nodes/assignments", s.handleNodeAssignments)
 	authed("POST /api/v1/nodes/{name}/models", s.handleAssignModel)
 	authed("POST /api/v1/nodes/{name}/models/remove", s.handleUnassignModel)
+	// The fleet as somewhere to put a model: one read behind the Models
+	// screen's deploy panel, so it does not have to join four endpoints itself.
+	authed("GET /api/v1/nodes/deploy-targets", s.handleDeployTargets)
 }
+
+// nodeStale is how long a node may go unheard-from before what it last said
+// about its own disk stops being news. Three report intervals at the agent's
+// default push of a minute, matching the fleet screen's own reading of quiet.
+const nodeStale = 3 * time.Minute
 
 func (s *Server) nodesUnavailable(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -369,4 +381,289 @@ func (s *Server) handleForgetNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---- deploying a model to a node -------------------------------------------
+//
+// Everything below is read-only composition. It answers one question the
+// existing endpoints could only answer between them: for this node, where has
+// each model got to, and what would it take to serve it from here.
+//
+// The three writes the Models screen makes afterwards are the ones that already
+// existed — assign, declare a backend, load — and they stay separate on
+// purpose. Assigning weights is desired state a node reconciles towards;
+// declaring a backend is this server deciding where it will send turns. Folding
+// them into one endpoint would make the second happen as a side effect of the
+// first, and the second is the one that changes where a conversation goes.
+
+// deployTarget is one node as a place to put a model.
+type deployTarget struct {
+	Node     string `json:"node"`
+	Hostname string `json:"hostname,omitempty"`
+	// Stale reports a node that has not been heard from recently. Its file
+	// states are then history rather than news, and the UI says so instead of
+	// showing a transfer that may have finished or died an hour ago.
+	Stale      bool      `json:"stale"`
+	LastSeenAt time.Time `json:"last_seen_at,omitempty"`
+
+	// Runtime is what serves models there, as the agent reports it. Empty
+	// means the node keeps weights and nothing runs them, which is a node that
+	// can be given a model but never asked to serve it.
+	Runtime   string `json:"runtime,omitempty"`
+	StorePath string `json:"store_path,omitempty"`
+	StoreFree int64  `json:"store_free_bytes,omitempty"`
+	StoreErr  string `json:"store_error,omitempty"`
+	// Controllable reports whether the runtime can be told to load a model.
+	// llama.cpp behind llama-swap loads on its first request instead, so a
+	// false here is not a failure — it is a load step that is somebody else's.
+	Controllable bool `json:"controllable"`
+
+	// Backend names the backend already declared on this node, if any, so the
+	// screen offers "load it" rather than "declare it" the second time round.
+	Backend string `json:"backend,omitempty"`
+	// BackendEditable is false for a backend that came from backends.json,
+	// which this server will not redefine — the file wins at resolve time.
+	BackendEditable bool `json:"backend_editable,omitempty"`
+	// Suggested is a backend that could be declared for this node, built from
+	// what the agent reported about its runtime. It is a suggestion in the
+	// strict sense: nothing is dialled and nothing is stored until an operator
+	// confirms it, because the address came off the node itself.
+	Suggested *suggestedBackend `json:"suggested,omitempty"`
+
+	Models []deployModel `json:"models"`
+}
+
+// suggestedBackend is a filled-in form, not a decision.
+type suggestedBackend struct {
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	BaseURL string `json:"base_url"`
+	// Reason explains where the address came from, so an operator confirming
+	// it knows what they are confirming.
+	Reason string `json:"reason,omitempty"`
+}
+
+// deployModel is one set of weights on its way to, or already on, a node.
+type deployModel struct {
+	RelPath string `json:"rel_path"`
+	// Assigned is what this server has asked for; the rest is what the node
+	// reports. The two disagreeing is the normal state of a transfer.
+	Assigned  bool   `json:"assigned"`
+	Present   bool   `json:"present"`
+	Partial   bool   `json:"partial"`
+	Ingested  bool   `json:"ingested"`
+	ServeName string `json:"serve_name,omitempty"`
+	SizeBytes int64  `json:"size_bytes,omitempty"`
+}
+
+// handleDeployTargets lists the fleet as somewhere to put a model.
+func (s *Server) handleDeployTargets(w http.ResponseWriter, r *http.Request) {
+	if s.nodes == nil {
+		s.nodesUnavailable(w)
+		return
+	}
+	list, err := s.nodes.Nodes(r.Context())
+	if err != nil {
+		s.fail(w, "list nodes", err)
+		return
+	}
+	assigned, err := s.store.AllNodeModels(r.Context())
+	if err != nil {
+		s.fail(w, "list assignments", err)
+		return
+	}
+	// Which backends came from the database, so the screen can tell an
+	// operator whether the one on this node is theirs to change here or a line
+	// in backends.json.
+	editable := map[string]bool{}
+	if declared, err := s.store.BackendConfigs(r.Context()); err == nil {
+		for _, d := range declared {
+			editable[d.Name] = true
+		}
+	}
+
+	backends := s.catalog.Backends()
+	control := s.catalog.Control()
+	taken := map[string]bool{}
+	for _, b := range backends {
+		taken[b.Name] = true
+	}
+
+	out := make([]deployTarget, 0, len(list))
+	for _, n := range list {
+		t := deployTarget{
+			Node:       n.Name,
+			Hostname:   n.Hostname,
+			LastSeenAt: n.LastSeenAt,
+			Stale:      time.Since(n.LastSeenAt) > nodeStale,
+		}
+		if n.Store != nil {
+			t.Runtime = n.Store.Runtime
+			t.StorePath = n.Store.Path
+			t.StoreFree = n.Store.FreeBytes
+			t.StoreErr = n.Store.Error
+		}
+
+		// An existing backend on this node settles both questions at once:
+		// there is nothing to suggest, and whether it can be told to load.
+		for _, b := range backends {
+			if b.Node == n.Name {
+				t.Backend = b.Name
+				t.BackendEditable = editable[b.Name]
+				t.Controllable = control.Supports(b)
+				break
+			}
+		}
+		if t.Backend == "" {
+			t.Suggested = suggestBackend(n, taken)
+			if t.Suggested != nil {
+				t.Controllable = control.Supports(models.Backend{
+					Kind: models.Kind(t.Suggested.Kind),
+				})
+			}
+		}
+
+		t.Models = deployModels(assigned[n.Name], n.Store)
+		out = append(out, t)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"configured": true,
+		// Declaring a backend needs the reload hook; without it the screen
+		// offers the transfer and says the serving half must be a file edit.
+		"editable": s.reloadBackends != nil,
+		"targets":  out,
+	})
+}
+
+// deployModels merges what the server asked for with what the node reports.
+//
+// A file the node holds without an assignment is listed too. Dropping an
+// assignment never deletes anything, so that is the ordinary state after
+// un-assigning something — and it is still a model that host can serve.
+func deployModels(assigned []string, report *node.StoreReport) []deployModel {
+	byPath := map[string]*deployModel{}
+	order := []string{}
+	get := func(rel string) *deployModel {
+		if m, ok := byPath[rel]; ok {
+			return m
+		}
+		m := &deployModel{RelPath: rel}
+		byPath[rel] = m
+		order = append(order, rel)
+		return m
+	}
+
+	for _, rel := range assigned {
+		get(rel).Assigned = true
+	}
+	if report != nil {
+		for _, f := range report.Files {
+			m := get(f.RelPath)
+			m.Present = !f.Partial
+			m.Partial = f.Partial
+			m.Ingested = f.Ingested
+			m.ServeName = f.ServeName
+			m.SizeBytes = f.SizeBytes
+		}
+	}
+
+	sort.Strings(order)
+	out := make([]deployModel, 0, len(order))
+	for _, rel := range order {
+		out = append(out, *byPath[rel])
+	}
+	return out
+}
+
+// suggestBackend fills in a backend form for a node from what its agent said.
+//
+// It returns nil rather than a guess when the node never reported a runtime
+// address. A node running Ollama on a port nobody mentioned is not a node whose
+// address can be worked out — every machine would produce the same plausible
+// suggestion, and a plausible wrong one is worse here than none, because the
+// failure it causes is a backend that looks declared and answers nothing.
+func suggestBackend(n node.Node, taken map[string]bool) *suggestedBackend {
+	if n.Store == nil {
+		return nil
+	}
+	kind := models.Kind(strings.TrimSpace(n.Store.Runtime))
+	if kind != models.KindOllama && kind != models.KindLlamaCPP {
+		return nil
+	}
+	base, reason := serveURL(n.Store.RuntimeURL, n.Hostname)
+	if base == "" {
+		return nil
+	}
+
+	name := n.Name
+	if taken[name] {
+		// The node's own name is the obvious one and is usually free, since a
+		// backend already on this node short-circuits before here. When it is
+		// not, a second name beats silently overwriting somebody's backend.
+		name = n.Name + "-" + string(kind)
+	}
+	return &suggestedBackend{
+		Name: name, Kind: string(kind), BaseURL: base, Reason: reason,
+	}
+}
+
+// serveURL turns the address a node reported into one this server could dial.
+//
+// The agent shares a host with its runtime, so what it reports is very often
+// loopback — which names this server if this server dials it. Rewriting that to
+// the node's hostname is the whole job, and it is done here rather than in the
+// browser so the reasoning is stated once and can be tested.
+//
+// The result is a suggestion an operator confirms. Nothing here proves the
+// hostname resolves or that the port is open from this machine; the Backends
+// screen's own test does that, after the operator has agreed to the address.
+func serveURL(reported, hostname string) (string, string) {
+	raw := strings.TrimSpace(reported)
+	if raw == "" {
+		return "", ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", ""
+	}
+
+	reason := "reported by the agent as where its runtime serves"
+	if isLoopbackHost(u.Hostname()) {
+		if strings.TrimSpace(hostname) == "" {
+			// Loopback and no name to put in its place: this would resolve to
+			// the wintermute host itself, which is emphatically not the
+			// machine holding the weights.
+			return "", ""
+		}
+		port := u.Port()
+		u.Host = hostname
+		if port != "" {
+			u.Host = net.JoinHostPort(hostname, port)
+		}
+		reason = fmt.Sprintf(
+			"the agent reported %s, which is loopback on that host — %s is its reported hostname",
+			raw, hostname)
+	}
+
+	// Both probers accept a base with or without the suffix and strip it back
+	// off, but every declared backend in this repository carries it, and a
+	// form field that matches what is already there is easier to check.
+	if p := strings.Trim(u.Path, "/"); p == "" {
+		u.Path = "/v1"
+	}
+	return u.String(), reason
+}
+
+// isLoopbackHost reports an address that means "this machine" to whoever dials
+// it — which, coming off a node's report, is the wrong machine here.
+func isLoopbackHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
+	}
+	return false
 }
