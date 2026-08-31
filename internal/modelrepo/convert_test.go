@@ -251,6 +251,51 @@ func TestConvertReportsConverterFailure(t *testing.T) {
 	}
 }
 
+// The converter logs a line per tensor to stderr and then says what went wrong,
+// so a job error built from the head of that stream is hundreds of INFO lines
+// and none of the reason. This is the regression that cost an afternoon.
+func TestConvertKeepsTheEndOfTheConverterLog(t *testing.T) {
+	repo, _ := newTestRepo(t)
+	if err := repo.Initialise(); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer srv.Close()
+
+	// Chattier than the 8KB the job keeps, with the only line that matters at
+	// the very end — exactly the shape of a real conversion.
+	script := filepath.Join(t.TempDir(), "chatty.sh")
+	body := "#!/bin/sh\n" +
+		"i=0\n" +
+		"while [ $i -lt 400 ]; do\n" +
+		"  echo \"INFO:hf-to-gguf:blk.$i.ffn_down.weight, torch.bfloat16 --> F16\" >&2\n" +
+		"  i=$((i+1))\n" +
+		"done\n" +
+		"echo 'ERROR:hf-to-gguf:Model Qwen3_5ForConditionalGeneration is not supported' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	repo.down.ConvertCommand = "sh " + script
+	repo.down.hubBase = srv.URL
+
+	job, err := repo.down.StartConvert(context.Background(),
+		stubHub{files: []models.HubFile{file("model.safetensors", 1), file("config.json", 1)}},
+		ConvertRequest{HubID: "Qwen/Qwen3.5-9B"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	final := waitForJob(t, repo, job.ID)
+	if final.State != JobFailed {
+		t.Fatalf("want a failed job, got %s", final.State)
+	}
+	if !strings.Contains(final.Error, "is not supported") {
+		t.Errorf("the last thing the converter said is the whole explanation, got %q", final.Error)
+	}
+}
+
 // Staging is inside the repository, so it is walked by the listing unless it is
 // deliberately skipped. A GGUF part-way through being written is a real .gguf
 // on disk, and showing it would offer a model that cannot be loaded.

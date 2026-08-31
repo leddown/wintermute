@@ -294,11 +294,14 @@ func (d *Downloader) convert(ctx context.Context, srcDir, outPath string) error 
 	args := append(fields[1:], srcDir, "--outfile", outPath, "--outtype", "f16")
 
 	cmd := exec.CommandContext(ctx, fields[0], args...)
-	// Only stderr is kept. The converter writes a tensor-by-tensor log to
-	// stdout that is megabytes for a large model and says nothing a failure
-	// does not say better.
-	var stderr strings.Builder
-	cmd.Stderr = &limitedWriter{w: &stderr, limit: 8 << 10}
+	// The tail of stderr, not the head. Python's logging goes to stderr, so a
+	// conversion writes a line per tensor there — hundreds of them — and
+	// whatever went wrong is the last thing said. Keeping the first 8KB
+	// captured the banner and the tensor list and discarded the error, which
+	// is a worse failure than not capturing anything: it looks like an
+	// explanation.
+	stderr := &tailWriter{limit: 8 << 10}
+	cmd.Stderr = stderr
 
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
@@ -379,19 +382,29 @@ func hasSafetensors(files []models.HubFile) bool {
 	return false
 }
 
-// limitedWriter keeps the first limit bytes and discards the rest, so a
-// converter that fails after printing a great deal still fits in a job error.
-type limitedWriter struct {
-	w     *strings.Builder
+// tailWriter keeps the last limit bytes written to it.
+//
+// A ring would be tidier and is not worth it: this holds kilobytes, the trim
+// runs once per write, and a write here is one log line from a subprocess.
+type tailWriter struct {
+	buf   []byte
 	limit int
 }
 
-func (l *limitedWriter) Write(p []byte) (int, error) {
-	if room := l.limit - l.w.Len(); room > 0 {
-		if len(p) > room {
-			p = p[:room]
-		}
-		_, _ = l.w.Write(p)
+func (t *tailWriter) Write(p []byte) (int, error) {
+	t.buf = append(t.buf, p...)
+	if over := len(t.buf) - t.limit; over > 0 {
+		t.buf = t.buf[over:]
 	}
 	return len(p), nil
+}
+
+// String returns what was kept, marked when it is only the tail so nobody
+// reads a truncated first line as the start of the story.
+func (t *tailWriter) String() string {
+	out := strings.TrimSpace(string(t.buf))
+	if len(t.buf) >= t.limit {
+		return "…" + out
+	}
+	return out
 }
