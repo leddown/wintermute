@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -134,16 +135,67 @@ func TestScanPrefersCompletedOverPartial(t *testing.T) {
 	}
 }
 
-func TestMissing(t *testing.T) {
+func TestPendingIsWhatIsAbsent(t *testing.T) {
 	s, root := newStore(t, RuntimeNone, nil)
 	if err := os.WriteFile(filepath.Join(root, "have.gguf"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	missing := s.Missing([]node.Assignment{
+	pending := s.Pending([]node.Assignment{
 		{RelPath: "have.gguf"}, {RelPath: "want.gguf"},
 	})
-	if len(missing) != 1 || missing[0].RelPath != "want.gguf" {
-		t.Fatalf("Missing = %+v", missing)
+	if len(pending) != 1 || pending[0].RelPath != "want.gguf" {
+		t.Fatalf("Pending = %+v; a store with no runtime has nothing to import", pending)
+	}
+}
+
+// Weights can be here without this agent having fetched them: copied in by
+// hand, or on a share the store points at. The import is then the whole of the
+// work, and selecting on absence alone skipped it — leaving the file assigned,
+// present, unservable and never retried, which the deploy screen showed as a
+// transfer that would not finish.
+func TestPendingIncludesPresentButUnservable(t *testing.T) {
+	ing := stubIngester{names: map[string]bool{"imported": true}}
+	s, root := newStore(t, RuntimeOllama, ing)
+	for _, name := range []string{"imported.gguf", "copied-in.gguf"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("weights"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pending := s.Pending([]node.Assignment{
+		{RelPath: "imported.gguf"}, {RelPath: "copied-in.gguf"}, {RelPath: "absent.gguf"},
+	})
+
+	got := map[string]bool{}
+	for _, a := range pending {
+		got[a.RelPath] = true
+	}
+	if got["imported.gguf"] {
+		t.Error("a model the runtime already serves has nothing outstanding")
+	}
+	if !got["copied-in.gguf"] {
+		t.Error("a model that is here but not servable still needs importing")
+	}
+	if !got["absent.gguf"] {
+		t.Error("a model that is not here still needs fetching")
+	}
+}
+
+// An unreachable runtime is exactly when an import cannot succeed, and Ollama's
+// takes the digest of every byte of a file before it finds that out. So a
+// runtime that will not answer is left alone rather than treated as serving
+// nothing, which would re-hash every model on the host once a minute for as
+// long as the outage lasted.
+func TestPendingLeavesAnUnreachableRuntimeAlone(t *testing.T) {
+	ing := stubIngester{err: errors.New("connection refused")}
+	s, root := newStore(t, RuntimeOllama, ing)
+	if err := os.WriteFile(filepath.Join(root, "here.gguf"), []byte("weights"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	pending := s.Pending([]node.Assignment{{RelPath: "here.gguf"}, {RelPath: "absent.gguf"}})
+	if len(pending) != 1 || pending[0].RelPath != "absent.gguf" {
+		t.Fatalf("Pending = %+v, want the fetch alone", pending)
 	}
 }
 
@@ -388,14 +440,105 @@ func TestLlamaCPPWithoutConfigClaimsNothing(t *testing.T) {
 	}
 }
 
+// The generated config is written in full from what this agent knows, and what
+// it knows starts empty on every start. So the first import after a restart
+// used to produce a config naming one model and dropping every other — taking
+// them out of service on a host that still had the weights, and reporting them
+// as not servable while the files sat right there.
+func TestLlamaCPPConfigSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "llama-swap.yaml")
+	for _, name := range []string{"first.gguf", "second.gguf"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("weights"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Opening over a store that already holds weights describes them, whether
+	// or not this agent is the one that fetched them.
+	if _, err := New(dir, RuntimeLlamaCPP, NewLlamaCPPIngester(cfg, "", "llama-server", nil)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatalf("a store with weights in it must be described at startup: %v", err)
+	}
+	for _, want := range []string{"first:", "second:"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("config missing %q:\n%s", want, raw)
+		}
+	}
+
+	// The agent restarts, and a third model arrives afterwards.
+	restarted := NewLlamaCPPIngester(cfg, "", "llama-server", nil)
+	if _, err := New(dir, RuntimeLlamaCPP, restarted); err != nil {
+		t.Fatal(err)
+	}
+	third := filepath.Join(dir, "third.gguf")
+	if err := os.WriteFile(third, []byte("weights"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Ingest(context.Background(), "third.gguf", third); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err = os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"first:", "second:", "third:"} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("an import after a restart dropped %q from the config:\n%s", want, raw)
+		}
+	}
+
+	names, err := restarted.ServableNames()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"first", "second", "third"} {
+		if !names[want] {
+			t.Errorf("ServableNames = %v, missing %q", names, want)
+		}
+	}
+}
+
+// An empty store is left alone. A config with no models in it is how an
+// operator who pointed this at a file they maintain themselves would lose it,
+// and holding nothing yet is the ordinary state of a new node.
+func TestLlamaCPPLeavesAnEmptyStoreAlone(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "llama-swap.yaml")
+	if err := os.WriteFile(cfg, []byte("models:\n  hand-written:\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(dir, RuntimeLlamaCPP, NewLlamaCPPIngester(cfg, "", "llama-server", nil)); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "hand-written") {
+		t.Errorf("an empty store must not rewrite the config:\n%s", raw)
+	}
+}
+
 // stubIngester stands in for a runtime that can serve some names and not
 // others, and that knows where it listens.
 type stubIngester struct {
 	names    map[string]bool
 	endpoint string
+	// err stands in for a runtime that is not answering.
+	err error
 }
 
-func (s stubIngester) ServableNames() (map[string]bool, error)      { return s.names, nil }
+func (s stubIngester) ServableNames() (map[string]bool, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.names, nil
+}
 func (s stubIngester) Ingest(context.Context, string, string) error { return nil }
 func (s stubIngester) Describe() string                             { return "stub" }
 func (s stubIngester) Endpoint() string                             { return s.endpoint }

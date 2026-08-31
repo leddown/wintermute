@@ -195,6 +195,22 @@ Huginn → Fleet, then the store panel on that node's card. Assigning records in
 only — nothing is transferred and nothing connects to the node. The agent notices
 on its next report and fetches for itself, usually within a minute.
 
+### Can the nodes share one copy of the weights?
+
+Yes. Point `WINTERMUTE_NODE_STORE` at a read-only mount of the server's model
+repository, and an assignment for a file that is already there is imported into
+the runtime rather than fetched — so the file never crosses the network, once
+per node or at all.
+
+With `llamacpp` nothing is copied anywhere: llama-server is given the path.
+With `ollama` the import is still a second copy into its blob store, but a local
+one. Set `--no-mmap` in `WINTERMUTE_NODE_LLAMA_SERVER_ARGS` if you do this;
+llama.cpp's mmap is pathological over a network filesystem.
+
+The server still has to hold the file in its own repository, because an
+assignment naming something the repository cannot open is dropped rather than
+sent. Sharing the repository itself satisfies that by construction.
+
 ### Why does the server not just push the file?
 
 Because it cannot. Nodes sit behind NAT and get addresses from DHCP, so there is

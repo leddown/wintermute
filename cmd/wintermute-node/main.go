@@ -343,7 +343,14 @@ func (a *agent) send(ctx context.Context, samples []node.Sample) error {
 	return nil
 }
 
-// reconcile fetches whatever this node has been assigned and does not hold.
+// reconcile brings this node up to what it has been assigned: fetching what it
+// does not hold, and importing what it holds and cannot yet serve.
+//
+// The second case is not only the tail of the first. Weights arrive here
+// without being fetched — copied in by hand, or sitting on a share the store
+// points at — and for those the transfer is already done and the import is the
+// whole of the job. Fetch does both, and does nothing when there is nothing to
+// do, so it is the same call either way.
 //
 // It runs in the background and returns immediately, because a model is
 // gigabytes: blocking the report loop on a transfer would stop the telemetry
@@ -362,8 +369,8 @@ func (a *agent) reconcile(ctx context.Context, assignments []node.Assignment) {
 		a.mu.Unlock()
 		return
 	}
-	missing := a.store.Missing(assignments)
-	if len(missing) == 0 {
+	pending := a.store.Pending(assignments)
+	if len(pending) == 0 {
 		a.mu.Unlock()
 		return
 	}
@@ -376,16 +383,24 @@ func (a *agent) reconcile(ctx context.Context, assignments []node.Assignment) {
 			a.reconciling = false
 			a.mu.Unlock()
 		}()
-		for _, want := range missing {
+		for _, want := range pending {
 			if ctx.Err() != nil {
 				return
 			}
-			fmt.Printf("fetching %s from %s\n", want.RelPath, a.server)
+			// Said apart because they are the two things an operator watching
+			// this is waiting on, and they take wildly different times. A
+			// transfer is the network; an import of a file already here is the
+			// local disk, and on Ollama it is a second copy of it.
+			if a.store.Has(want.RelPath) {
+				fmt.Printf("importing %s, already in the store\n", want.RelPath)
+			} else {
+				fmt.Printf("fetching %s from %s\n", want.RelPath, a.server)
+			}
 			if err := a.fetcher.Fetch(ctx, want); err != nil {
 				// Logged and moved on. The assignment is still standing, so the
 				// next report tries again — which is what makes a flaky link
 				// eventually succeed rather than needing an operator.
-				fmt.Fprintf(os.Stderr, "fetch %s failed: %v\n", want.RelPath, err)
+				fmt.Fprintf(os.Stderr, "%s failed: %v\n", want.RelPath, err)
 				continue
 			}
 			fmt.Printf("%s is ready\n", want.RelPath)

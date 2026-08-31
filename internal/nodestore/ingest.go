@@ -313,6 +313,39 @@ func (l *LlamaCPPIngester) ServableNames() (map[string]bool, error) {
 	return out, nil
 }
 
+// adopt takes what the store already holds as this ingester's own.
+//
+// models is the whole of what write() emits and it starts empty on every agent
+// start, so before this ran the first import after a restart produced a config
+// naming one model and silently dropped every other — taking them out of
+// service on a host that still had the weights. The set is not state worth
+// persisting beside the config: it is whatever the store holds, so it is read
+// back from there.
+//
+// An empty store is left alone rather than written as an empty model list. A
+// config with nothing in it is how an operator who pointed this at a file they
+// maintain themselves would lose it, and the store being empty is the ordinary
+// state of a node that has not been assigned anything yet.
+func (l *LlamaCPPIngester) adopt(s *Store) error {
+	if l.configPath == "" {
+		return nil
+	}
+	for _, f := range s.Scan().Files {
+		if f.Partial {
+			continue
+		}
+		abs, err := s.Path(f.RelPath)
+		if err != nil {
+			continue
+		}
+		l.models[f.RelPath] = abs
+	}
+	if len(l.models) == 0 {
+		return nil
+	}
+	return l.write()
+}
+
 // Ingest records the model and rewrites the config.
 func (l *LlamaCPPIngester) Ingest(_ context.Context, relPath, absPath string) error {
 	if l.configPath == "" {

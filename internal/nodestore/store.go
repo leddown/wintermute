@@ -105,7 +105,19 @@ func New(dir string, runtime Runtime, ingester Ingester) (*Store, error) {
 	if real, err := filepath.EvalSymlinks(abs); err == nil {
 		abs = real
 	}
-	return &Store{root: filepath.Clean(abs), runtime: runtime, ingester: ingester}, nil
+	store := &Store{root: filepath.Clean(abs), runtime: runtime, ingester: ingester}
+
+	// llama.cpp's config is generated in full from what this agent knows, and
+	// what it knows starts empty on every start. Handing it the store's
+	// existing contents now is what stops the first import after a restart
+	// rewriting the config with one model in it. Nothing equivalent is needed
+	// for Ollama, which keeps its own catalogue and is asked.
+	if l, ok := ingester.(*LlamaCPPIngester); ok {
+		if err := l.adopt(store); err != nil {
+			return nil, err
+		}
+	}
+	return store, nil
 }
 
 // Root returns the store directory.
@@ -252,12 +264,44 @@ func (s *Store) Scan() node.StoreReport {
 	return report
 }
 
-// Missing returns the assignments this node does not yet hold, in the order
-// given.
-func (s *Store) Missing(assignments []node.Assignment) []node.Assignment {
+// Pending returns the assignments this store still has work outstanding for, in
+// the order given: the ones it does not hold, and the ones it holds but the
+// runtime cannot yet serve.
+//
+// The second half is why this is not simply "what is absent". Weights can be
+// here without this agent having fetched them — an operator copied them in, or
+// the store is a share the server already writes to — and the import is the
+// step that makes them servable. Selecting on absence alone left those files
+// assigned, present and never imported: Ollama never saw them, llama-swap was
+// never told about them, and the deploy screen showed a transfer that could not
+// finish because there was nothing left to transfer.
+//
+// A store with no ingester imports nothing and claims nothing is servable, so
+// for that one holding the file is the whole of the work.
+func (s *Store) Pending(assignments []node.Assignment) []node.Assignment {
 	out := []node.Assignment{}
+
+	// Asked once for the whole batch rather than per file: on Ollama it is an
+	// HTTP call. A runtime that cannot be reached is treated as having nothing
+	// outstanding rather than as serving nothing — an unreachable runtime is
+	// exactly when an import cannot succeed, and Ollama's takes the digest of
+	// every byte before it discovers that. The files are still reported present
+	// and not ingested; when the runtime answers again, so does this.
+	var servable map[string]bool
+	if s.ingester != nil {
+		names, err := s.ingester.ServableNames()
+		if err != nil {
+			servable = nil
+		} else {
+			servable = names
+		}
+	}
+
 	for _, a := range assignments {
-		if !s.Has(a.RelPath) {
+		switch {
+		case !s.Has(a.RelPath):
+			out = append(out, a)
+		case s.ingester != nil && servable != nil && !servable[ModelName(a.RelPath)]:
 			out = append(out, a)
 		}
 	}
