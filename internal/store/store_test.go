@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -16,14 +17,59 @@ import (
 	"wintermute/internal/tool"
 )
 
+// newTestStore is store/storetest.New, reimplemented here because these tests
+// live inside the package storetest imports and so cannot import it back.
+// Migrating an empty database is twenty-two commits and as many fsyncs; the
+// schema is the same every time, so it is built once per test binary and each
+// test is handed a copy of the file. Open still runs, and finds nothing to do.
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	st, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	path := filepath.Join(t.TempDir(), "test.db")
+	if err := os.WriteFile(path, seedDatabase(t), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := OpenUnsynced(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
 	return st
+}
+
+var (
+	seedOnce  sync.Once
+	seedBytes []byte
+	seedErr   error
+)
+
+// seedDatabase returns the bytes of an empty, fully migrated database file.
+func seedDatabase(t *testing.T) []byte {
+	t.Helper()
+	seedOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "wintermute-store-seed")
+		if err != nil {
+			seedErr = err
+			return
+		}
+		defer os.RemoveAll(dir)
+		path := filepath.Join(dir, "seed.db")
+		st, err := OpenUnsynced(path)
+		if err != nil {
+			seedErr = err
+			return
+		}
+		// Closing the last handle checkpoints the WAL into the main file and
+		// removes the sidecars, so one file is the whole database.
+		if err := st.Close(); err != nil {
+			seedErr = err
+			return
+		}
+		seedBytes, seedErr = os.ReadFile(path)
+	})
+	if seedErr != nil {
+		t.Fatalf("build seed database: %v", seedErr)
+	}
+	return seedBytes
 }
 
 // Migrations must be idempotent: the server applies them on every start.
@@ -340,8 +386,12 @@ func TestMuninnRenamePreservesAuditTrail(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "test.db")
 
-	// Build the database as it stood before this migration existed.
-	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(ON)")
+	// Build the database as it stood before this migration existed. Every
+	// statement below is its own autocommit, so with the default durability
+	// this fixture costs a fsync a piece — around six seconds to construct a
+	// file that is deleted when the test ends. Nothing here is asserted after
+	// a crash, so it does not need to survive one.
+	raw, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(ON)&_pragma=synchronous(OFF)")
 	if err != nil {
 		t.Fatal(err)
 	}

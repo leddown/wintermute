@@ -2,24 +2,19 @@ package app
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"wintermute/internal/grc"
 	"wintermute/internal/knowledge"
-	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 	"wintermute/internal/tool"
 	"wintermute/internal/websearch"
 )
 
 func newScope(t *testing.T, withGRC, withWeb bool) (*agentScope, *knowledge.Service) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	st := storetest.New(t)
 
 	svc := knowledge.NewService(knowledge.NewStore(st.DB()))
 	scope := &agentScope{knowledge: svc}

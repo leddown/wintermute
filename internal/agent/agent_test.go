@@ -6,13 +6,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"wintermute/internal/llm"
 	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 	"wintermute/internal/tool"
 )
 
@@ -53,11 +53,7 @@ func toolCall(name, input string) llm.Response {
 func newTestAgent(t *testing.T, p llm.Provider, reg *tool.Registry) (*Agent, *store.Store, *store.Session) {
 	t.Helper()
 
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	client, _, err := st.CreateClient(context.Background(), "test-harness", store.KindHarness)
 	if err != nil {

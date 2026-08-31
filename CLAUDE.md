@@ -76,6 +76,16 @@ GOOS=windows GOARCH=amd64 go build -o wintermute.exe ./cmd/wintermute
 Run `gofmt -l .` and `go vet ./...` before considering any change complete.
 Never leave the tree in a state that fails `go build ./...`.
 
+A test that needs a database calls `storetest.New(t)` (or `NewAt` when it also
+needs the file's path), never `store.Open`. `store.Open` migrates an empty
+database in twenty-two commits and fsyncs every one of them, which is about
+three hundred milliseconds a test on a fast disk and much worse on the host
+that runs the deploy gate. `storetest` builds the schema once per test binary,
+hands out copies of the file, and opens them with fsync off — the databases
+live in a temp directory and are deleted when the test ends, so there is
+nothing for them to be durable for. Tests that are *about* migrating, like
+`TestMigrationsAreIdempotent`, still call `store.Open` and should.
+
 Server configuration is environment-based (`ANTHROPIC_API_KEY`, `WINTERMUTE_*`),
 loaded from `.env` if present. `ANTHROPIC_API_KEY` is required;
 `WINTERMUTE_LLM_MODEL` defaults to `claude-opus-5`. Client configuration

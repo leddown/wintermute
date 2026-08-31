@@ -19,16 +19,13 @@ import (
 	"time"
 
 	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 )
 
 func newTestRepo(t *testing.T) (*Repo, string) {
 	t.Helper()
 	root := t.TempDir()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 	return New(root, "", st, slog.New(slog.DiscardHandler)), root
 }
 
@@ -60,11 +57,7 @@ func TestReadyRequiresMarker(t *testing.T) {
 }
 
 func TestUnconfiguredAndMissingRoot(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	none := New("", "", st, slog.New(slog.DiscardHandler))
 	if none.Configured() {

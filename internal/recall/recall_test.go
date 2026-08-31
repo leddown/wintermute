@@ -6,13 +6,13 @@ import (
 	"io"
 	"log/slog"
 	"math"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"wintermute/internal/llm"
 	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 )
 
 // fakeEmbedder produces deterministic vectors from a bag of words, so tests
@@ -81,11 +81,7 @@ type fixture struct {
 
 func newFixture(t *testing.T) *fixture {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "recall.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	client, _, err := st.CreateClient(context.Background(), "owner", store.KindBrowser)
 	if err != nil {

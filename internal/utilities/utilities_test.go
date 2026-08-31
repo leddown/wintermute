@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 )
 
 // The prune tests are the point of this file.
@@ -26,16 +27,19 @@ func newTestDB(t *testing.T) (*store.Store, *Service) {
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "utilities-test.db")
-	st, err := store.Open(path)
-	if err != nil {
-		t.Fatalf("store.Open error: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.NewAt(t, path)
 	return st, NewService(st.DB(), path)
 }
 
+// execer is satisfied by both *sql.DB and *sql.Tx. The fixture helpers take it
+// so a test seeding hundreds of rows can do it in one transaction rather than
+// one fsync per row.
+type execer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
 // seedClient inserts the client every session must reference.
-func seedClient(t *testing.T, db *sql.DB) int64 {
+func seedClient(t *testing.T, db execer) int64 {
 	t.Helper()
 	res, err := db.Exec(
 		`INSERT INTO clients (name, token_hash, kind, created_at) VALUES ('t', 'h', 'browser', ?)`,
@@ -54,7 +58,7 @@ func seedClient(t *testing.T, db *sql.DB) int64 {
 // time.Time so the driver renders it exactly as the real code path does. That
 // is the whole point: the test must not spell the timestamp itself, or it would
 // be asserting against its own assumption rather than the driver's behaviour.
-func insertSession(t *testing.T, db *sql.DB, clientID int64, id string, updatedAt time.Time) {
+func insertSession(t *testing.T, db execer, clientID int64, id string, updatedAt time.Time) {
 	t.Helper()
 	_, err := db.Exec(
 		`INSERT INTO sessions (id, client_id, title, created_at, updated_at) VALUES (?, ?, '', ?, ?)`,
@@ -346,14 +350,21 @@ func TestVacuumReportsSizes(t *testing.T) {
 	// Enough rows that deleting them frees whole pages, so the reclaim figure
 	// has something to report.
 	now := time.Now().UTC()
+	tx, err := st.DB().Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
 	for i := 0; i < 200; i++ {
 		id := "s" + string(rune('A'+i%26)) + string(rune('a'+i/26))
-		insertSession(t, st.DB(), clientID, id, now)
-		if _, err := st.DB().Exec(
+		insertSession(t, tx, clientID, id, now)
+		if _, err := tx.Exec(
 			`INSERT INTO messages (session_id, seq, role, content, created_at) VALUES (?, 1, 'user', ?, ?)`,
 			id, string(make([]byte, 2000)), now); err != nil {
 			t.Fatalf("insert message: %v", err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
 	}
 	if _, err := st.DB().Exec(`DELETE FROM sessions`); err != nil {
 		t.Fatalf("delete sessions: %v", err)

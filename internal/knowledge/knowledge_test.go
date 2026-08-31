@@ -2,21 +2,16 @@ package knowledge
 
 import (
 	"context"
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 	"wintermute/internal/tool"
 )
 
 func newTestService(t *testing.T) *Service {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	st := storetest.New(t)
 	return NewService(NewStore(st.DB()))
 }
 

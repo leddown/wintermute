@@ -2,21 +2,16 @@ package scratch
 
 import (
 	"errors"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 )
 
 func newTestService(t *testing.T) *Service {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = st.Close() })
+	st := storetest.New(t)
 	return NewService(st.DB())
 }
 

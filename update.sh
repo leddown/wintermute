@@ -23,8 +23,9 @@ for arg in "$@"; do
       echo
       echo "  Rebuilds and reinstalls wintermute, then restarts the service."
       echo "  First it checks the tree: gofmt, go vet, the test suite, the race"
-      echo "  detector over the concurrent packages, the Windows client build"
-      echo "  and the app.js parse. Around two and a half minutes."
+      echo "  detector over the whole tree, the Windows client build and the"
+      echo "  app.js parse. Around forty seconds on a development box, and a"
+      echo "  couple of times that on a slow one."
       echo
       echo "  --skip-tests omits all of that. It is for restoring a server that"
       echo "  is already down, not for saving time."
@@ -110,19 +111,16 @@ if [ "$RUN_TESTS" -eq 1 ]; then
   (cd "$REPO_ROOT" && go test ./...)
   echo "    tests pass"
 
-  # The race detector, on the packages that actually run things concurrently.
+  # The race detector, over everything.
   #
-  # Not on everything, and the reason is the clock rather than principle: the
-  # whole tree under -race takes about five minutes against thirty-five seconds
-  # plain, and a gate slow enough to be resented is a gate that gets skipped.
-  # These five cost about a hundred seconds and are where concurrency lives —
-  # the store is written from every goroutine at once, the agent runs the turn
-  # loop, the api serves them in parallel, the node package ingests reports
-  # while the rollup ticker folds them, and recall indexes in the background.
-  # A race in any of those corrupts a transcript rather than failing a test.
-  (cd "$REPO_ROOT" && go test -race \
-    ./internal/store/ ./internal/agent/ ./internal/api/ ./internal/node/ ./internal/recall/)
-  echo "    no data races in the concurrent packages"
+  # This used to run on five hand-picked packages because the whole tree under
+  # -race took about five minutes, and a gate slow enough to be resented is a
+  # gate that gets skipped. Almost all of that was tests migrating throwaway
+  # databases and waiting on the disk to flush them; now that they do not (see
+  # internal/store/storetest), the whole tree costs a few seconds more than
+  # those five packages did. There is no longer a reason to choose.
+  (cd "$REPO_ROOT" && go test -race ./...)
+  echo "    no data races"
 
   # The client is cross-compiled for machines this one is not. A deploy that
   # breaks that build is only discovered when somebody tries to build it.

@@ -1,11 +1,10 @@
 package accounting
 
 import (
-	"path/filepath"
 	"strings"
 	"testing"
 
-	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 )
 
 // newTestService gives a service over a real migrated SQLite database. The
@@ -14,11 +13,7 @@ import (
 // in a way an in-memory fake would hide.
 func newTestService(t *testing.T) (*Service, *SQLiteRepository) {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	repo := NewSQLiteRepository(st.DB())
 	return NewService(repo), repo

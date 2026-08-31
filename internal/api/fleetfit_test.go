@@ -17,6 +17,7 @@ import (
 	"wintermute/internal/models"
 	"wintermute/internal/node"
 	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 	"wintermute/internal/tool"
 )
 
@@ -29,11 +30,7 @@ import (
 // load a model — so a verdict computed from it is not merely unhelpful, it is
 // confidently about the wrong hardware.
 func TestFitIsGradedAgainstTheDeclaredNode(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router, err := llm.NewRouter([]*llm.Backend{{Name: "local", Provider: stubProvider{}}}, "local", "", log)
@@ -145,11 +142,7 @@ func TestFitIsGradedAgainstTheDeclaredNode(t *testing.T) {
 // produces names the machine it is about and so cannot be mistaken for a
 // statement about another.
 func TestUndeclaredNodeWithACardIsGradedByName(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router, err := llm.NewRouter([]*llm.Backend{{Name: "local", Provider: stubProvider{}}}, "local", "", log)
@@ -230,11 +223,7 @@ func TestUndeclaredNodeWithACardIsGradedByName(t *testing.T) {
 // partial, which is true of every machine ever made and decides nothing — and
 // on a fleet of Raspberry Pis it would bury the one answer worth reading.
 func TestNodeWithNoGPUIsNotGraded(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router, err := llm.NewRouter([]*llm.Backend{{Name: "local", Provider: stubProvider{}}}, "local", "", log)

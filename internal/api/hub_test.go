@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +13,7 @@ import (
 	"wintermute/internal/llm"
 	"wintermute/internal/models"
 	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 	"wintermute/internal/tool"
 )
 
@@ -30,11 +30,7 @@ func hubServer(t *testing.T, token string, upstream http.HandlerFunc) (func(path
 	}))
 	t.Cleanup(hub.Close)
 
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router, err := llm.NewRouter([]*llm.Backend{{Name: "local", Provider: stubProvider{}}}, "local", "", log)

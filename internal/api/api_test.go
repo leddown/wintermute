@@ -20,6 +20,7 @@ import (
 	"wintermute/internal/node"
 	"wintermute/internal/recall"
 	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 	"wintermute/internal/tool"
 )
 
@@ -37,11 +38,7 @@ func (stubProvider) Complete(context.Context, llm.Request) (*llm.Response, error
 func newTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	router, err := llm.NewRouter([]*llm.Backend{{Name: "local", Provider: stubProvider{}}}, "local", "", log)

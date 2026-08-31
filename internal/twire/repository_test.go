@@ -6,12 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
-	"wintermute/internal/store"
+	"wintermute/internal/store/storetest"
 )
 
 // These exercise the SQLite rewrite of a repository that was written for
@@ -33,11 +32,7 @@ import (
 // on a missing table.
 func newTestRepository(t *testing.T) *Repository {
 	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "twire-test.db"))
-	if err != nil {
-		t.Fatalf("store.Open error: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
+	st := storetest.New(t)
 	return NewRepository(st.DB())
 }
 

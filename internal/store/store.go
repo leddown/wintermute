@@ -30,8 +30,20 @@ type Store struct {
 }
 
 // Open opens (creating if needed) the SQLite database at path and applies any
-// pending migrations. Use ":memory:" in tests.
-func Open(path string) (*Store, error) {
+// pending migrations. Tests should use store/storetest, which hands out
+// databases that are already migrated.
+func Open(path string) (*Store, error) { return open(path, true) }
+
+// OpenUnsynced is Open with SQLite's per-commit fsync turned off. It is for
+// tests, and nothing else should call it: every commit becomes a write the
+// operating system may still be holding when the power goes, so a crash can
+// roll the database back to an older state. Tests build their databases in a
+// temp directory and throw them away, and the fsync is most of what they spend
+// — the suite runs several times faster without it, which matters because it
+// gates every deploy on a host that is not fast.
+func OpenUnsynced(path string) (*Store, error) { return open(path, false) }
+
+func open(path string, durable bool) (*Store, error) {
 	// WAL keeps the browser UI's reads from blocking the harness's writes;
 	// busy_timeout avoids spurious SQLITE_BUSY under concurrent turns.
 	//
@@ -59,6 +71,9 @@ func Open(path string) (*Store, error) {
 	// a single-operator server.
 	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)" +
 		"&_pragma=foreign_keys(ON)&_pragma=secure_delete(ON)&_txlock=immediate"
+	if !durable {
+		dsn += "&_pragma=synchronous(OFF)"
+	}
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open database: %w", err)
