@@ -202,11 +202,20 @@ fi
 # ProtectSystem=strict, and the symptom is permission denied on a directory that
 # is plainly writable from a shell. A drop-in grants exactly that path, which
 # beats asking an operator to edit a unit they did not write.
+#
+# RequiresMountsFor goes in the same file, because a store on its own disk is
+# the reason it is outside StateDirectory in the first place. An unmounted drive
+# is otherwise not an error: the agent creates the bare mountpoint on the root
+# filesystem, reports a store holding nothing, and the server re-sends every
+# assignment -- downloading the whole library onto the system disk it was moved
+# off. It costs nothing when the path is on the root filesystem anyway.
 if [ -n "$STORE" ] && [ "${STORE#"$STATE_DIR"}" = "$STORE" ]; then
   mkdir -p "$DROPIN_DIR"
   {
     echo "# Written by the Wintermute node installer: the model store lives"
     echo "# outside StateDirectory, and ProtectSystem=strict hides it otherwise."
+    echo "[Unit]"
+    echo "RequiresMountsFor=$STORE"
     echo "[Service]"
     echo "ReadWritePaths=$STORE"
   } > "$DROPIN_DIR/store.conf"

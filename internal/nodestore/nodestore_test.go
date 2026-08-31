@@ -375,6 +375,155 @@ func TestFetchRefusesTraversalAssignment(t *testing.T) {
 	}
 }
 
+// ---- the repository mount --------------------------------------------------
+
+// mountWith writes one file into a stand-in for a mounted repository share.
+func mountWith(t *testing.T, relPath string, body []byte) string {
+	t.Helper()
+	root := t.TempDir()
+	full := filepath.Join(root, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+// The point of the mount: the bytes come off the share and the server is never
+// asked for them.
+func TestFetchPrefersTheRepositoryMount(t *testing.T) {
+	s, root := newStore(t, RuntimeNone, nil)
+	body := []byte(strings.Repeat("m", 9000))
+	sum := sha256.Sum256(body)
+
+	reached := false
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		reached = true
+	}))
+	defer srv.Close()
+
+	f := NewFetcher(s, srv.URL, "t")
+	f.RepoMount = mountWith(t, "Qwen/Q.gguf", body)
+
+	a := node.Assignment{
+		RelPath: "Qwen/Q.gguf", SizeBytes: int64(len(body)), SHA256: hex.EncodeToString(sum[:]),
+	}
+	if err := f.Fetch(context.Background(), a); err != nil {
+		t.Fatalf("copy from the mount failed: %v", err)
+	}
+	if reached {
+		t.Error("a file available on the mount must not be downloaded")
+	}
+	got, err := os.ReadFile(filepath.Join(root, "Qwen", "Q.gguf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Error("the copied file does not match what the mount held")
+	}
+	if _, err := os.Stat(filepath.Join(root, "Qwen", "Q.gguf"+partSuffix)); !os.IsNotExist(err) {
+		t.Error("the partial should be gone once the copy is complete")
+	}
+}
+
+// A node with no share, a share that is not mounted, and a share that simply
+// does not hold this model are all the same thing: ask the server.
+func TestFetchFallsBackToHTTPWithoutTheMount(t *testing.T) {
+	body := []byte(strings.Repeat("h", 4096))
+	sum := hex.EncodeToString(func() []byte { d := sha256.Sum256(body); return d[:] }())
+
+	cases := map[string]func(t *testing.T) string{
+		"unset":       func(*testing.T) string { return "" },
+		"not mounted": func(*testing.T) string { return "/nonexistent/wintermute-repo" },
+		"missing file": func(t *testing.T) string {
+			return mountWith(t, "other/Other.gguf", []byte("something else"))
+		},
+	}
+
+	for name, mount := range cases {
+		t.Run(name, func(t *testing.T) {
+			s, _ := newStore(t, RuntimeNone, nil)
+			stub := &repoStub{body: body}
+			srv := httptest.NewServer(stub)
+			defer srv.Close()
+
+			f := NewFetcher(s, srv.URL, "t")
+			f.RepoMount = mount(t)
+
+			a := node.Assignment{RelPath: "Qwen/Q.gguf", SizeBytes: int64(len(body)), SHA256: sum}
+			if src := f.MountSource(a); src != "" {
+				t.Fatalf("MountSource should be empty, got %q", src)
+			}
+			if err := f.Fetch(context.Background(), a); err != nil {
+				t.Fatalf("fetch should have fallen back to the server: %v", err)
+			}
+			if !s.Has(a.RelPath) {
+				t.Error("the model should be held after the fallback")
+			}
+			if stub.gotAuth == "" {
+				t.Error("the fallback must have gone to the server")
+			}
+		})
+	}
+}
+
+// A share is a directory something else writes. A copy that does not match what
+// the server published is discarded and the server is asked, rather than
+// installing weights the server never named — and the discard matters, because
+// a partial left behind would be resumed onto by the download that follows.
+func TestFetchFallsBackWhenTheMountCopyIsWrong(t *testing.T) {
+	s, root := newStore(t, RuntimeNone, nil)
+	body := []byte(strings.Repeat("g", 4096))
+	sum := sha256.Sum256(body)
+
+	stub := &repoStub{body: body}
+	srv := httptest.NewServer(stub)
+	defer srv.Close()
+
+	f := NewFetcher(s, srv.URL, "t")
+	f.RepoMount = mountWith(t, "Q.gguf", []byte(strings.Repeat("x", 4096)))
+	var notices []string
+	f.Notice = func(_, msg string) { notices = append(notices, msg) }
+
+	a := node.Assignment{
+		RelPath: "Q.gguf", SizeBytes: int64(len(body)), SHA256: hex.EncodeToString(sum[:]),
+	}
+	if err := f.Fetch(context.Background(), a); err != nil {
+		t.Fatalf("a bad copy should fall back, not fail: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "Q.gguf"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Error("the installed file must be the server's, not the mount's")
+	}
+	if len(notices) == 0 {
+		t.Error("a mount that could not be used must be reported")
+	}
+}
+
+// The mount is a second directory an assignment can name, so it is confined
+// exactly as the store is.
+func TestMountSourceRefusesTraversal(t *testing.T) {
+	s, _ := newStore(t, RuntimeNone, nil)
+	mount := t.TempDir()
+	outside := filepath.Join(filepath.Dir(mount), "outside.gguf")
+	if err := os.WriteFile(outside, []byte("not yours"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := NewFetcher(s, "http://127.0.0.1:1", "t")
+	f.RepoMount = mount
+	for _, rel := range []string{"../outside.gguf", "/etc/passwd", "a/../../outside.gguf"} {
+		if src := f.MountSource(node.Assignment{RelPath: rel}); src != "" {
+			t.Errorf("%q resolved to %q, want no source", rel, src)
+		}
+	}
+}
+
 // ---- llama.cpp ingestion ---------------------------------------------------
 
 func TestLlamaCPPWritesConfig(t *testing.T) {

@@ -77,6 +77,8 @@ func run() error {
 
 		storeDir = flag.String("store", envOr("WINTERMUTE_NODE_STORE", ""),
 			"directory holding this host's model weights; empty means this node only reports metrics")
+		repoMount = flag.String("repo-mount", envOr("WINTERMUTE_NODE_REPO_MOUNT", ""),
+			"local mount of the server's model repository, copied from in preference to downloading")
 		runtimeName = flag.String("runtime", envOr("WINTERMUTE_NODE_RUNTIME", ""),
 			"what serves models here: llamacpp, ollama, or empty to keep the files and wire them up by hand")
 		ollamaURL = flag.String("ollama-url", envOr("WINTERMUTE_NODE_OLLAMA_URL", "http://127.0.0.1:11434"),
@@ -127,6 +129,24 @@ func run() error {
 		}
 		agent.store = st
 		agent.fetcher = nodestore.NewFetcher(st, agent.server, agent.token)
+		agent.fetcher.RepoMount = strings.TrimSpace(*repoMount)
+		// Said at startup rather than left to be inferred from transfer speeds:
+		// a mount that is not there is not an error — every fetch simply goes
+		// to the server — but it is almost always a typo or a mount that failed
+		// at boot, and it is worth one line to say so.
+		if agent.fetcher.RepoMount != "" {
+			if _, err := os.Stat(agent.fetcher.RepoMount); err != nil {
+				fmt.Fprintf(os.Stderr,
+					"repository mount %s is not readable (%v); fetches will use the server\n",
+					agent.fetcher.RepoMount, err)
+			} else {
+				fmt.Printf("repository mount %s, preferred over downloading\n",
+					agent.fetcher.RepoMount)
+			}
+		}
+		agent.fetcher.Notice = func(rel, msg string) {
+			fmt.Fprintf(os.Stderr, "%s: %s\n", rel, msg)
+		}
 		agent.fetcher.Progress = func(rel string, done, total int64) {
 			if total > 0 {
 				fmt.Printf("fetching %s: %d%%\n", rel, done*100/total)
@@ -387,13 +407,17 @@ func (a *agent) reconcile(ctx context.Context, assignments []node.Assignment) {
 			if ctx.Err() != nil {
 				return
 			}
-			// Said apart because they are the two things an operator watching
+			// Said apart because they are the three things an operator watching
 			// this is waiting on, and they take wildly different times. A
-			// transfer is the network; an import of a file already here is the
+			// download is the network; a copy is the share, which on a LAN is
+			// several times quicker; an import of a file already here is the
 			// local disk, and on Ollama it is a second copy of it.
-			if a.store.Has(want.RelPath) {
+			switch src := a.fetcher.MountSource(want); {
+			case a.store.Has(want.RelPath):
 				fmt.Printf("importing %s, already in the store\n", want.RelPath)
-			} else {
+			case src != "":
+				fmt.Printf("copying %s from %s\n", want.RelPath, src)
+			default:
 				fmt.Printf("fetching %s from %s\n", want.RelPath, a.server)
 			}
 			if err := a.fetcher.Fetch(ctx, want); err != nil {

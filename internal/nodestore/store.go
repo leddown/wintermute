@@ -16,7 +16,9 @@
 //
 //   - Scan reports what is on the disk, and is the only thing the server ever
 //     learns about this store.
-//   - Fetch brings a missing file over, resumably, and verifies it.
+//   - Fetch brings a missing file over and verifies it — copied from a mounted
+//     share of the server's repository when this node has one, downloaded
+//     resumably over HTTP otherwise.
 //   - Ingest makes the runtime able to serve it, which differs completely
 //     between llama.cpp and Ollama.
 package nodestore
@@ -134,6 +136,20 @@ func (s *Store) Runtime() Runtime { return s.runtime }
 // treated exactly as internal/modelrepo treats a filename from Hugging Face:
 // cleaned, checked for traversal, and confined after resolution.
 func (s *Store) Path(relPath string) (string, error) {
+	abs, err := resolveUnder(s.root, relPath)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+// resolveUnder turns an assignment's name into a path inside root, or refuses.
+//
+// Shared by the store and by the repository mount a node may read instead of
+// downloading, because both take the same server-supplied text and both must
+// confine it the same way. One implementation, so a fix to either is a fix to
+// both.
+func resolveUnder(root, relPath string) (string, error) {
 	rel := strings.Trim(strings.ReplaceAll(strings.TrimSpace(relPath), "\\", "/"), "/")
 	if rel == "" {
 		return "", errors.New("an assignment with no name")
@@ -146,12 +162,12 @@ func (s *Store) Path(relPath string) (string, error) {
 			return "", fmt.Errorf("%q: an assignment may not contain a path traversal", relPath)
 		}
 	}
-	abs := filepath.Clean(filepath.Join(s.root, filepath.FromSlash(rel)))
-	if !within(abs, s.root) {
-		return "", fmt.Errorf("%q resolves outside the model store", relPath)
+	abs := filepath.Clean(filepath.Join(root, filepath.FromSlash(rel)))
+	if !within(abs, root) {
+		return "", fmt.Errorf("%q resolves outside %s", relPath, root)
 	}
-	if real, err := filepath.EvalSymlinks(abs); err == nil && !within(real, s.root) {
-		return "", fmt.Errorf("%q is a link out of the model store", relPath)
+	if real, err := filepath.EvalSymlinks(abs); err == nil && !within(real, root) {
+		return "", fmt.Errorf("%q is a link out of %s", relPath, root)
 	}
 	return abs, nil
 }

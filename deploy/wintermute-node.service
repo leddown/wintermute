@@ -3,10 +3,13 @@ Description=Wintermute fleet agent (reports host state, keeps this host's model 
 Documentation=https://github.com/leddown/wintermute
 After=network-online.target
 Wants=network-online.target
-# Start after whatever serves models here, so the first scan finds the runtime
-# up rather than reporting every model as present-but-not-importable.
+
 # After=ollama.service
 # After=llama-swap.service
+
+# Uncomment whichever serves models here, so the first scan finds the runtime
+# up rather than reporting every model as present-but-not-importable.
+
 
 [Service]
 Type=simple
@@ -17,23 +20,46 @@ ExecStart=/usr/local/bin/wintermute-node
 Restart=on-failure
 RestartSec=10
 
-# The spool of undelivered readings lives here, and so does the model store
-# unless WINTERMUTE_NODE_STORE points elsewhere. StateDirectory creates it
-# owned by the service user on start.
+
 StateDirectory=wintermute-node
 WorkingDirectory=/var/lib/wintermute-node
 
+# The spool of undelivered readings lives here, and so does the model store
+# unless WINTERMUTE_NODE_STORE points elsewhere. StateDirectory creates it
+# owned by the service user on start.
+#
 # If the model store is on another filesystem — a second disk with room for
-# weights is the usual reason — name it here, or ProtectSystem=strict makes
+# weights is the usual reason — name it here too, or ProtectSystem=strict makes
 # every fetch fail with permission denied on a directory that is plainly
 # writable from a shell:
 #
 #   ReadWritePaths=/srv/models
 #
+# A store on a removable or late-mounting disk wants one more line, in [Unit]:
+#
+#   RequiresMountsFor=/srv/models
+#
+# Without it an unmounted drive is not an error. The agent creates the bare
+# mountpoint on the root filesystem, scans it, reports a store holding nothing,
+# and the server re-sends every assignment — so the whole library downloads onto
+# the system disk it was moved off. RequiresMountsFor holds the service until
+# that mount unit is up (from fstab, so it works on a cold boot, not only on a
+# drive that happens to be mounted right now).
+#
+# The installer writes both lines into
+# /etc/systemd/system/wintermute-node.service.d/store.conf when it is given
+# --store, so a node installed that way needs neither by hand.
+#
+# A repository mount read through WINTERMUTE_NODE_REPO_MOUNT needs neither: the
+# agent only reads there, and ProtectSystem=strict does not block reads. It is
+# still worth a RequiresMountsFor= line, since a share that appears late means
+# the first assignments are downloaded instead of copied.
+#
 # With -runtime llamacpp the agent also rewrites one llama-swap config, which
 # is a second path outside StateDirectory:
 #
 #   ReadWritePaths=/etc/llama-swap
+
 
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -54,9 +80,11 @@ CapabilityBoundingSet=
 # GPU telemetry shells out to nvidia-smi, which needs /dev/nvidia*. With
 # PrivateDevices=true the fleet view shows this host with no cards and no VRAM
 # figures, which reads as a driver problem rather than a sandbox setting.
+#
+# RestrictAddressFamilies is as narrow as it is because the agent listens on
+# nothing and opens no ports. It dials out to the server and to the local
+# runtime, and that is the whole of its network use.
 
-# The agent listens on nothing and opens no ports. It dials out to the server
-# and to the local runtime, and that is the whole of its network use.
 
 [Install]
 WantedBy=multi-user.target

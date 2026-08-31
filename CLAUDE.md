@@ -267,6 +267,31 @@ a migration that has already been committed — add a new numbered file.
 - Prefer editing existing files over creating new ones.
 - Only create documentation files when explicitly asked.
 
+### Commented configuration files
+
+The files that are mostly prose — `deploy/*.env.example`, the systemd units,
+anything whose job is to explain a setting rather than to hold one — follow a
+fixed shape, so a long file stays scannable:
+
+- **The setting comes first, its explanation below it**, separated by one
+  blank line. The name is what an operator is looking for; the paragraph is
+  what they read once they have found it.
+- **Two blank lines between the end of a comment block and the next setting.**
+  One blank line is what separates a setting from its own comment, so the
+  wider gap is what makes the boundary between entries visible.
+
+```
+WINTERMUTE_NODE_STORE=
+
+# Where this host keeps its own copy of the weights it has been assigned, so
+# switching a model is a local file read rather than a download.
+
+
+WINTERMUTE_NODE_RUNTIME=
+
+# What actually serves models on this host: ollama, llamacpp, or empty.
+```
+
 ## Task Planning & Progress Tracking
 
 For any task with more than one step, build a task list before writing code

@@ -3,11 +3,14 @@ Description=Wintermute server (assistant API and browser UI)
 Documentation=https://github.com/leddown/wintermute
 After=network-online.target
 Wants=network-online.target
-# If a model backend runs on this same host under systemd, start after it, so
-# the first probe at startup finds it up rather than recording it unreachable
-# and waiting for a refresh.
+
 # After=ollama.service
 # After=llama-swap.service
+
+# Uncomment whichever model backend runs on this same host under systemd, so
+# the first probe at startup finds it up rather than recording it unreachable
+# and waiting for a refresh.
+
 
 [Service]
 Type=simple
@@ -18,15 +21,16 @@ ExecStart=/usr/local/bin/wintermuted
 Restart=on-failure
 RestartSec=5
 
-# The SQLite database lives here: StateDirectory creates /var/lib/wintermute
-# owned by the service user on start, and it is the only writable path the
-# service has under ProtectSystem=strict. WINTERMUTE_DB must point inside it.
+
 StateDirectory=wintermute
 WorkingDirectory=/var/lib/wintermute
 
-# The model repository, when WINTERMUTE_MODEL_REPO points outside
-# /var/lib/wintermute — an external drive is the usual case.
+# The SQLite database lives here: StateDirectory creates /var/lib/wintermute
+# owned by the service user on start, and it is the only writable path the
+# service has under ProtectSystem=strict. WINTERMUTE_DB must point inside it.
 #
+# The model repository is the other writable path, when WINTERMUTE_MODEL_REPO
+# points outside /var/lib/wintermute — an external drive is the usual case.
 # ProtectSystem=strict makes everything except StateDirectory read-only, so
 # without a line like this the repository is readable and every download fails
 # with permission denied on a directory that works perfectly from a shell.
@@ -39,11 +43,9 @@ WorkingDirectory=/var/lib/wintermute
 #
 #   RequiresMountsFor=/mnt/usb-drive
 
+
 NoNewPrivileges=true
 ProtectSystem=strict
-# The server never touches a user's files — that is the whole point of the
-# split, and the client harness is what reaches a NAS share. So it has no
-# business in /home, and this makes that structural rather than a promise.
 ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true
@@ -55,24 +57,30 @@ RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 
-# Deliberately NOT set: PrivateDevices=true.
+# ProtectHome is why the server never touches a user's files — that is the
+# whole point of the split, and the client harness is what reaches a NAS share.
+# So it has no business in /home, and this makes that structural rather than a
+# promise.
 #
-# The hardware report shells out to nvidia-smi, which needs /dev/nvidia*.
-# With PrivateDevices=true the GPU section of GET /api/v1/system comes back
-# empty and every VRAM fit estimate silently falls back to "unknown" — which
-# looks like a missing driver rather than a sandbox setting, and is a
-# genuinely annoying afternoon to debug.
+# Deliberately NOT set: PrivateDevices=true. The hardware report shells out to
+# nvidia-smi, which needs /dev/nvidia*. With PrivateDevices=true the GPU section
+# of GET /api/v1/system comes back empty and every VRAM fit estimate silently
+# falls back to "unknown" — which looks like a missing driver rather than a
+# sandbox setting, and is a genuinely annoying afternoon to debug.
+
+
+CapabilityBoundingSet=
 
 # Nothing here binds a privileged port under the shipped configuration
 # (WINTERMUTE_ADDR defaults to :8088 in the env file), so the service needs no
 # capabilities at all. If you move it to port 80 or 443, add BOTH of these —
 # an ambient capability must also be in the bounding set, so granting it while
-# the set below stays empty leaves the service unable to bind and looks like
+# the set above stays empty leaves the service unable to bind and looks like
 # the capability was ignored:
 #
 #   AmbientCapabilities=CAP_NET_BIND_SERVICE
 #   CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=
+
 
 [Install]
 WantedBy=multi-user.target
