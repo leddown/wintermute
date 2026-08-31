@@ -87,8 +87,11 @@ nothing for them to be durable for. Tests that are *about* migrating, like
 `TestMigrationsAreIdempotent`, still call `store.Open` and should.
 
 Server configuration is environment-based (`ANTHROPIC_API_KEY`, `WINTERMUTE_*`),
-loaded from `.env` if present. `ANTHROPIC_API_KEY` is required;
-`WINTERMUTE_LLM_MODEL` defaults to `claude-opus-5`. Client configuration
+loaded from `.env` if present. At least one backend must be configured or the
+server refuses to start, and there are three ways to satisfy that: a
+`backends.json` named by `WINTERMUTE_BACKENDS` (what `scripts/setup.sh` writes),
+`WINTERMUTE_LLM_BASE_URL` for a local server, or `ANTHROPIC_API_KEY` for Claude.
+No single one of them is required on its own. Client configuration
 is a JSON file (`~/.config/wintermute/config.json`, `%AppData%` on Windows);
 `wintermute -init` writes a starter.
 

@@ -63,6 +63,15 @@ if ! command -v jq >/dev/null 2>&1; then
   echo "          sudo apt install jq"
 fi
 
+# Converting a safetensors release to GGUF is Python with torch, not Go, and it
+# is the one feature this script cannot install for you. Said here rather than
+# discovered at the Convert button.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "    note: python3 not found — the Repository screen cannot convert a"
+  echo "          safetensors release to GGUF. Downloading published GGUFs is"
+  echo "          unaffected. See WINTERMUTE_CONVERT_CMD in the env file."
+fi
+
 # A listener already on the chosen port means the service will fail to start,
 # and the failure lands minutes later in journalctl rather than here.
 PORT="${LISTEN_ADDR##*:}"
@@ -123,32 +132,60 @@ echo "==> Writing environment file at $ENV_FILE"
 sudo mkdir -p "$(dirname "$ENV_FILE")"
 if [ ! -f "$ENV_FILE" ]; then
   sudo tee "$ENV_FILE" >/dev/null <<EOF_ENV
-# Written by scripts/setup.sh. See deploy/wintermute.env.example for what each
-# of these does and why. This is a systemd EnvironmentFile, not a shell script:
-# values are taken literally, so do not quote them.
+# Written by scripts/setup.sh. See deploy/wintermute.env.example for every
+# setting this server reads and why each one exists. This is a systemd
+# EnvironmentFile, not a shell script: values are taken literally, so do not
+# quote them and do not use \$VAR expansion.
+#
+# Each setting comes first and the paragraph explaining it sits underneath.
+
+WINTERMUTE_BACKENDS=$BACKENDS_FILE
 
 # Without this the server looks for ./backends.json relative to its working
 # directory, does not find one, and falls back to a single backend built from
-# the environment — so the file below would be silently ignored.
-WINTERMUTE_BACKENDS=$BACKENDS_FILE
+# the environment — so the file it should have read is silently ignored.
+
 
 WINTERMUTE_ADDR=$LISTEN_ADDR
 WINTERMUTE_DB=$DB_PATH
+
+# What it listens on, and the SQLite file. The database has to stay inside
+# $STATE_DIR: ProtectSystem=strict in the unit makes everything else read-only,
+# and StateDirectory= is what creates that one owned by the service user.
+
 
 WINTERMUTE_LLM_TIMEOUT=10m
 WINTERMUTE_LLM_MAX_TOKENS=16000
 WINTERMUTE_MAX_TOOL_ITERATIONS=12
 
-# Referenced by name from backends.json. Fill in whichever your backends use.
+# A bound on one completion, a cap on one response, and how many tool
+# round-trips a single turn may take before the loop gives up.
+
+
 LLAMA_API_KEY=
 ANTHROPIC_API_KEY=
 
+# Referenced by name from backends.json rather than written into it, so that
+# file can be shared and this one is the only secret. Fill in whichever your
+# backends actually use: neither is needed to start, and a backend declared as
+# Anthropic without its key is refused at startup rather than mid-conversation.
+
+
 HUGGINGFACE_TOKEN=
+
+# Only needed for gated repositories. Public model search and downloads work
+# without it.
+
+
+WINTERMUTE_METRICS_DB=$STATE_DIR/metrics.db
 
 # Fleet telemetry, in its own database file. Remote hosts report here, and it is
 # what lets a model be judged against the machine that would actually run it
-# rather than against this one.
-WINTERMUTE_METRICS_DB=$STATE_DIR/metrics.db
+# rather than against this one. Without it the report endpoint answers 503 and
+# no node ever learns what it has been assigned.
+
+
+WINTERMUTE_NODE_AGENT_DIR=$AGENT_DIR
 
 # The built agent a new host installs from, over HTTP with its own token:
 #
@@ -156,7 +193,49 @@ WINTERMUTE_METRICS_DB=$STATE_DIR/metrics.db
 #
 # Filled by this script and by update.sh. Unset it to turn the install endpoints
 # off entirely.
-WINTERMUTE_NODE_AGENT_DIR=$AGENT_DIR
+
+
+# WINTERMUTE_MODEL_REPO=/mnt/models
+
+# Where downloaded weights are kept, and what the fleet is assigned from. An
+# absolute path, in practice the mount point of a drive with room for tens of
+# gigabytes. Two things it needs beyond this line: a matching ReadWritePaths= in
+# the unit if it is outside $STATE_DIR, or every download fails with permission
+# denied on a directory that is plainly writable from a shell; and one press of
+# Initialise in Admin -> Repository, which writes the marker that tells a
+# mounted drive from a bare mount point.
+
+
+# WINTERMUTE_CONVERT_CMD=/opt/llama.cpp/.venv/bin/python /opt/llama.cpp/convert_hf_to_gguf.py
+
+# Turns a safetensors release into a GGUF, for a model published before anyone
+# has converted it — the Convert button on the Repository screen. Unset, that
+# button reports that no converter is configured and nothing else changes.
+#
+# Not vendored, because it is Python with torch and numpy:
+#
+#   git clone --depth 1 https://github.com/ggml-org/llama.cpp /opt/llama.cpp
+#   python3 -m venv /opt/llama.cpp/.venv
+#   /opt/llama.cpp/.venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch
+#   /opt/llama.cpp/.venv/bin/pip install -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
+#
+# The converter runs as a child of this service, so it inherits the unit's
+# sandbox. The service user has no home directory and ProtectHome=true hides it
+# anyway, so give Python somewhere to cache with a drop-in:
+#
+#   [Service]
+#   Environment=HOME=$STATE_DIR
+#   Environment=XDG_CACHE_HOME=$STATE_DIR/.cache
+
+
+# WINTERMUTE_EMBED_URL=
+# WINTERMUTE_EMBED_MODEL=
+
+# The embedder that indexes conversations so past ones can be retrieved as
+# context. Set both or neither — the server refuses to start with one. With
+# neither, conversations are still recorded and searchable by hand; they are
+# just never recalled into a later turn. The model is pinned once and compared
+# at every startup, so changing it later is a deliberate -reindex-memory.
 EOF_ENV
   echo "    wrote $ENV_FILE"
 else
@@ -186,7 +265,16 @@ EOF_BACKENDS
   sudo chmod 644 "$BACKENDS_FILE"
   echo "    wrote $BACKENDS_FILE (kind: $DETECTED_KIND)"
   echo
-  echo "    Leave \"model\" empty only if the backend serves exactly one model."
+  if [ "$DETECTED_KIND" = "ollama" ]; then
+    # Ollama serves many models and picks by name, so an empty model means an
+    # empty "model" field in every request, which it answers with a 400. The
+    # backend probes healthy either way, which is what makes this worth saying
+    # here rather than leaving to be discovered on the first turn.
+    echo "    Set \"model\" to one Ollama holds — ollama list — or every turn fails"
+    echo "    with a 400. Only a single-model server may leave it empty."
+  else
+    echo "    Leave \"model\" empty only if the backend serves exactly one model."
+  fi
   echo "    To add Claude as a per-conversation alternative, see docs/backends.md."
 else
   echo "    $BACKENDS_FILE already exists, leaving it alone"
@@ -249,7 +337,19 @@ sudo sed -i \
   -e "s|^EnvironmentFile=.*|EnvironmentFile=$ENV_FILE|" \
   -e "s|^ExecStart=.*|ExecStart=$SERVER_BIN|" \
   -e "s|^WorkingDirectory=.*|WorkingDirectory=$STATE_DIR|" \
+  -e "s|^StateDirectory=.*|StateDirectory=$(basename "$STATE_DIR")|" \
   "/etc/systemd/system/$SERVICE_NAME.service"
+# StateDirectory= is a name under /var/lib, not a path, so it can only follow a
+# custom WINTERMUTE_STATE_DIR that lives there. Anywhere else and systemd would
+# create /var/lib/<name> beside the directory actually in use, leaving the
+# service with no writable path at all under ProtectSystem=strict.
+case "$STATE_DIR" in
+  /var/lib/*) ;;
+  *)
+    echo "    warning: $STATE_DIR is outside /var/lib, so StateDirectory= cannot"
+    echo "             name it. Add ReadWritePaths=$STATE_DIR to the unit, or the"
+    echo "             service will not be able to write its own database." ;;
+esac
 sudo systemctl daemon-reload
 sudo systemctl enable "$SERVICE_NAME"
 echo "    installed and enabled $SERVICE_NAME.service"
