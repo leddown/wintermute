@@ -196,16 +196,31 @@ type backendView struct {
 	// Node is the fleet host this backend was declared to run on, so the
 	// Backends screen can say which machine each one is actually on.
 	Node string `json:"node,omitempty"`
+	// APIKeyEnv is the *name* of the variable holding this backend's key, and
+	// never the key. It travels so the browser can change one field of a
+	// backend — its default model, say — and send the rest back unchanged;
+	// without it, editing a backend through the UI would quietly blank the
+	// variable it authenticates with. The name is not a secret: it is written
+	// in backends.json, which is deliberately readable.
+	APIKeyEnv string `json:"api_key_env,omitempty"`
 }
 
 // withDeclared attaches what the configuration says about each backend to its
 // health row: the declared size, and the fleet node it runs on. A backend the
 // configuration does not mention has neither, which readers must treat as
 // unknown rather than as zero and as "runs here".
-func withDeclared(rows []store.BackendRow, configured []models.Backend) []backendView {
+func withDeclared(rows []store.BackendRow, configured []models.Backend,
+	stored []store.BackendConfig) []backendView {
+
 	declared := make(map[string]models.Backend, len(configured))
 	for _, b := range configured {
 		declared[b.Name] = b
+	}
+	// The key variable's name lives only in the database row: models.Backend
+	// carries the resolved key and deliberately not the name it came from.
+	keyEnv := make(map[string]string, len(stored))
+	for _, b := range stored {
+		keyEnv[b.Name] = b.APIKeyEnv
 	}
 	out := make([]backendView, 0, len(rows))
 	for _, row := range rows {
@@ -214,6 +229,7 @@ func withDeclared(rows []store.BackendRow, configured []models.Backend) []backen
 			view.Memory, view.MemoryBytes = b.Memory, b.MemoryBytes
 			view.Node = b.Node
 		}
+		view.APIKeyEnv = keyEnv[row.Name]
 		out = append(out, view)
 	}
 	return out
@@ -238,7 +254,7 @@ func (s *Server) handleBackends(w http.ResponseWriter, r *http.Request) {
 		names = append(names, d.Name)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"backends": withDeclared(health, s.catalog.Backends()),
+		"backends": withDeclared(health, s.catalog.Backends(), declared),
 		"default":  s.agent.Router().Default(),
 		"fallback": s.agent.Router().Fallback(),
 		"declared": names,

@@ -332,13 +332,16 @@
         <aside class="sidebar">
           <div class="sidebar-head"><span class="muted">Huginn</span></div>
           <ul id="huginn-nav">
-            <li data-tab="backends" class="active">Backends</li>
+            <!-- Fleet first, and it now carries the backends: a backend is a
+                 thing running on a machine, and splitting them across two tabs
+                 meant reading one to find out what the other was talking
+                 about. One card per host answers both questions at once. -->
+            <li data-tab="fleet" class="active">Fleet</li>
             <li data-tab="repo">Repository</li>
             <li data-tab="models">Models</li>
-            <li data-tab="fleet">Fleet</li>
           </ul>
-          <p id="huginn-hint" class="hint muted">Where models run, what is on the
-            drive and what the Hub has, and which hosts are carrying it.</p>
+          <p id="huginn-hint" class="hint muted">The machines, what each one is
+            serving, what is on the drive, and what the Hub has.</p>
         </aside>
         <main class="pane">
           <div class="pane-head">

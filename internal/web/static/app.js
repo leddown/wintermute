@@ -189,7 +189,7 @@ function switchView(name) {
   if (name !== 'huginn') stopRepoPolling();
   // Same reasoning for the fleet cards: leaving the view must drop the
   // subscription, or it keeps redrawing a body nobody is looking at.
-  if (name !== 'huginn') { stopFleetWatch(); stopDeployWatch(); }
+  if (name !== 'huginn') stopFleetWatch();
   // The pad saves on a timer, and switching view is quicker than the timer.
   // Leaving it holding unwritten keystrokes is how a scratch pad loses work.
   if (name !== 'workspace') flushPad();
@@ -3682,7 +3682,15 @@ async function renderAdmin() {
    action inside one of these panes redraws its own view, and calling
    renderAdmin() from here would paint a Huginn pane into the Admin body. */
 
-const huginn = { tab: 'backends' };
+const huginn = { tab: 'fleet' };
+
+// Keeps the nav highlight with huginn.tab, for the paths that change tabs
+// without a click on the nav itself.
+function syncHuginnNav() {
+  for (const li of document.querySelectorAll('#huginn-nav li')) {
+    li.classList.toggle('active', li.dataset.tab === huginn.tab);
+  }
+}
 
 for (const li of document.querySelectorAll('#huginn-nav li')) {
   li.addEventListener('click', () => {
@@ -3698,18 +3706,14 @@ $('huginn-refresh').addEventListener('click', () => renderHuginn().catch(showErr
 
 async function renderHuginn() {
   const body = $('huginn-body');
-  const titles = {
-    backends: 'Backends', repo: 'Repository', models: 'Models', fleet: 'Fleet',
-  };
+  const titles = { repo: 'Repository', models: 'Models', fleet: 'Fleet' };
   $('huginn-title').textContent = titles[huginn.tab];
   stopFleetWatch();
-  stopDeployWatch();
   body.innerHTML = '';
 
   if (huginn.tab === 'repo') return renderAdminRepo(body);
   if (huginn.tab === 'models') return renderAdminModels(body);
-  if (huginn.tab === 'fleet') return renderAdminFleet(body);
-  return renderAdminBackends(body);
+  return renderAdminFleet(body);
 }
 
 // The fleet: remote hosts reporting what they are doing.
@@ -3719,10 +3723,11 @@ async function renderHuginn() {
 // timestamp. Anything quiet for more than three report intervals is treated as
 // out of contact.
 async function renderAdminFleet(body) {
-  // The fleet and the backends are shown together because they answer one
-  // question between them: this host is busy — is it busy *serving a model*?
-  // Neither list can say that alone.
-  const [data, models, assigned, repo] = await Promise.all([
+  // The fleet and the backends are one page because they answer one question
+  // between them: this host is busy — is it busy *serving a model*? Neither
+  // list can say that alone, and reading them in two tabs meant holding one in
+  // your head while looking at the other.
+  const [data, models, assigned, repo, deploy, backends] = await Promise.all([
     api('/api/v1/nodes'),
     api('/api/v1/models').catch(() => ({ models: [] })),
     // Which models each node should be holding, and what there is to choose
@@ -3730,7 +3735,18 @@ async function renderAdminFleet(body) {
     // every card is drawn from one round trip rather than one per node.
     api('/api/v1/nodes/assignments').catch(() => ({ assignments: {} })),
     api('/api/v1/repo').catch(() => ({ files: [] })),
+    // What each node could serve from, and what is declared to serve it. The
+    // deploy view knows a node's runtime and suggested address; the backend
+    // list knows what has actually been declared. A card needs both.
+    api('/api/v1/nodes/deploy-targets').catch(() => ({ configured: false, targets: [] })),
+    api('/api/v1/backends').catch(() => ({ backends: [] })),
   ]);
+  const targets = new Map((deploy.targets || []).map((t) => [t.node, t]));
+  const backendsByNode = new Map();
+  for (const b of backends.backends || []) {
+    const key = b.node || '';
+    backendsByNode.set(key, [...(backendsByNode.get(key) || []), b]);
+  }
 
   // Resident models, grouped by the backend serving them. A node and a backend
   // are matched by name, which is the convention worth stating rather than
@@ -3784,7 +3800,8 @@ async function renderAdminFleet(body) {
 
   for (const n of data.nodes) {
     body.append(nodeCard(n, residentByBackend.get(n.name) || [],
-      (assigned.assignments || {})[n.name] || [], repo.files || [], data.agent_build));
+      (assigned.assignments || {})[n.name] || [], repo.files || [], data.agent_build,
+      backendsByNode.get(n.name) || [], targets.get(n.name), backends));
   }
   // The cards keep up on their own from here. What the poll returns is the
   // nodes alone; the three lists a card is drawn against — resident models,
@@ -3795,12 +3812,68 @@ async function renderAdminFleet(body) {
     resident: residentByBackend,
     assigned: assigned.assignments || {},
     repoFiles: repo.files || [],
+    backends: backendsByNode,
+    targets,
+    all: backends,
   });
+  // Everything that is not a fleet node: this server's own backends and the
+  // cloud ones, which run on nobody's hardware. They belong on this page
+  // because they are the rest of the answer to "where can a turn go", and
+  // nowhere else because they have no machine to sit under.
+  body.append(serverBackendsSection(backends));
+
   // The instructions above only appear while the fleet is empty, which is the
   // one time nobody needs to look them up. Adding the second machine is when
   // the question comes back, and by then the page is a list of cards with no
   // way in.
   body.append(fleetGuideLink());
+}
+
+// The backends that are not on a fleet node, and the controls that belong to
+// the whole set rather than to one machine.
+function serverBackendsSection(d) {
+  const here = (d.backends || []).filter((b) => !b.node);
+  const declared = new Set(d.declared || []);
+
+  const rows = here.map((b) => [
+    b.name, b.kind, b.model || '—', b.status, probedAge(b.probed_at),
+    b.cloud ? 'cloud' : 'this server',
+    b.status_note || '',
+    b.name === d.default ? 'default' : (b.name === d.fallback ? 'fallback' : ''),
+    declared.has(b.name) ? 'UI' : 'backends.json',
+    d.editable && declared.has(b.name) ? removeBackendButton(b.name) : '',
+  ]);
+
+  const section = el('div', { class: 'fleet-section' }, [
+    el('h3', { class: 'repo-h', text: 'This server and the cloud' }),
+    here.length
+      ? table(['Name', 'Kind', 'Model', 'Status', 'Probed', 'Runs on', 'Note', 'Role',
+        'Source', ''], rows)
+      : el('p', { class: 'muted', text:
+        'Nothing is declared here — every backend runs on a fleet node above.' }),
+  ]);
+
+  if (d.editable) section.append(addBackendForm(d));
+
+  const refresh = el('button', { class: 'ghost-btn', text: 'Re-probe backends' });
+  refresh.addEventListener('click', async () => {
+    refresh.disabled = true;
+    try {
+      await api('/api/v1/backends/refresh', { method: 'POST' });
+      toast('Backends re-probed');
+      await renderHuginn();
+    } catch (err) {
+      showError(err);
+    } finally {
+      refresh.disabled = false;
+    }
+  });
+  section.append(refresh);
+  section.append(el('div', { class: 'muted', text:
+    'A backend that is down is recorded as unreachable and retried; it never stops '
+    + 'the server starting.' }));
+  section.append(backendTestBench(d));
+  return section;
 }
 
 /* ---- keeping the cards current ----
@@ -3840,7 +3913,13 @@ function watchFleet(body, drawn, held) {
       const card = cards[i];
       if (!card || card.contains(document.activeElement)) return;
       card.replaceWith(nodeCard(n, held.resident.get(n.name) || [],
-        held.assigned[n.name] || [], held.repoFiles, data.agent_build));
+        held.assigned[n.name] || [], held.repoFiles, data.agent_build,
+        // Held rather than re-fetched, for the same reason as the three lists
+        // above: a backend and a deploy target change when somebody changes
+        // them, and each of those redraws the page anyway. A repaint that
+        // dropped them would quietly strip the backends off every card a
+        // minute after it was drawn.
+        held.backends.get(n.name) || [], held.targets.get(n.name), held.all));
     });
   });
 }
@@ -3872,7 +3951,7 @@ function fleetGuideLink() {
     document.createTextNode('.'));
 }
 
-function nodeCard(n, resident, assignments, repoFiles, serverBuild) {
+function nodeCard(n, resident, assignments, repoFiles, serverBuild, backends, target, all) {
   const s = n.latest;
   const seen = n.last_seen_at ? new Date(n.last_seen_at) : null;
   const ageMs = seen ? Date.now() - seen.getTime() : Infinity;
@@ -3946,8 +4025,105 @@ function nodeCard(n, resident, assignments, repoFiles, serverBuild) {
     cards,
     gauges,
     models,
-    nodeStorePanel(n, assignments || [], repoFiles || []),
+    nodeBackends(n, backends || [], target, all || {}),
+    nodeStorePanel(n, assignments || [], repoFiles || [], target, repoFiles || []),
   ]);
+}
+
+// What is declared to serve models on this host, and the one setting anybody
+// changes about it: which model a turn gets when the conversation names none.
+//
+// A backend on a node used to be readable only on another tab, as a row whose
+// "Runs on" column named a machine described somewhere else. Here it sits
+// under the machine's own gauges, which is where the question is asked.
+function nodeBackends(n, backends, target, all) {
+  const declared = new Set(all.declared || []);
+
+  if (!backends.length) {
+    // Nothing declared. The node may still have said where its runtime
+    // answers, in which case declaring it is one click on a model below.
+    return el('div', { class: 'node-backends' }, [
+      el('span', { class: 'muted', text: 'no backend declared' }),
+      target && target.suggested
+        ? el('span', { class: 'muted', text:
+          `— its ${target.suggested.kind} would serve at ${target.suggested.base_url}` })
+        : null,
+    ]);
+  }
+
+  return el('div', { class: 'node-backends' }, backends.map((b) => {
+    const editable = all.editable && declared.has(b.name);
+    return el('div', { class: 'node-backend' }, [
+      el('span', { class: `backend-dot ${b.status}`, title: b.status_note || b.status }),
+      el('span', { class: 'node-backend-name', text: b.name }),
+      el('span', { class: 'muted', text: b.kind }),
+      b.name === all.default ? el('span', { class: 'repo-badge held', text: 'default' }) : null,
+      b.name === all.fallback ? el('span', { class: 'repo-badge', text: 'fallback' }) : null,
+      el('span', { class: 'node-backend-serves' }, [
+        el('span', { class: 'muted', text: 'serves' }),
+        defaultModelControl(b, target, editable),
+      ]),
+      editable ? el('button', {
+        class: 'link-btn', type: 'button', text: 'Remove',
+        onclick: () => confirmDelete(
+          `the "${b.name}" backend (conversations that used it are kept)`,
+          async () => {
+            await api(`/api/v1/backends/${encodeURIComponent(b.name)}`, { method: 'DELETE' });
+            await renderHuginn();
+          }),
+      }) : el('span', { class: 'muted', text: 'backends.json' }),
+    ]);
+  }));
+}
+
+// The model a backend serves when a conversation names none.
+//
+// Offered as the models this node actually holds and can serve, because that
+// is the set that can work: typing a name Ollama has never imported gets a 400
+// on the first turn and nothing before it. Blank is offered too and means
+// "whatever the backend is set to", which is right for a single-model server
+// and wrong for Ollama — so the empty option says which.
+function defaultModelControl(b, target, editable) {
+  const servable = ((target && target.models) || [])
+    .filter((m) => m.ingested && m.serve_name)
+    .map((m) => m.serve_name);
+  // What it is set to now counts as an option even if the node is not holding
+  // it: the backend may serve models this fleet never put there.
+  const options = [...new Set([b.model, ...servable].filter(Boolean))];
+
+  if (!editable) {
+    return el('span', { class: 'muted', title: 'Declared in backends.json — edit that file to change it.',
+      text: b.model ? `serving ${b.model}` : 'no default model' });
+  }
+
+  const select = el('select', { class: 'node-model-select', title:
+    'The model this backend serves when a conversation does not name one.' }, [
+    el('option', { value: '', text: options.length ? 'no default' : 'no default (backend decides)' }),
+    ...options.map((m) => el('option', { value: m, text: m, selected: m === b.model })),
+  ]);
+  select.value = b.model || '';
+  select.addEventListener('change', async () => {
+    select.disabled = true;
+    try {
+      await api('/api/v1/backends', {
+        method: 'POST',
+        // Re-declared in full: the endpoint is an upsert, and sending only the
+        // model would blank the address it is reached at.
+        body: JSON.stringify({
+          name: b.name, kind: b.kind, base_url: b.base_url || '',
+          model: select.value, api_key_env: b.api_key_env || '', node: b.node || '',
+        }),
+      });
+      toast(select.value
+        ? `${b.name} now serves ${select.value} by default.`
+        : `${b.name} has no default model; conversations must name one.`);
+      await renderHuginn();
+    } catch (err) {
+      select.disabled = false;
+      showError(err);
+    }
+  });
+  return select;
 }
 
 // What agent a host is running, and whether it is the one this server is
@@ -3991,7 +4167,7 @@ function agentBuildChip(build, serverBuild) {
 // will fetch it on its next report. A file with no assignment is a model this
 // host keeps that nothing asked it to; dropping an assignment never deletes
 // anything, so that is the normal state after un-assigning something.
-function nodeStorePanel(n, assignments, repoFiles) {
+function nodeStorePanel(n, assignments, repoFiles, target) {
   const store = n.store;
   if (!store) {
     // Absent rather than empty: a node with no -store is a node that only
@@ -4015,12 +4191,14 @@ function nodeStorePanel(n, assignments, repoFiles) {
   const rows = [];
   for (const rel of assignments) {
     const f = held.get(rel);
-    rows.push(nodeStoreRow(n, rel, f, true));
+    rows.push(nodeStoreRow(n, rel, f, true, target, repoFiles));
   }
   // Anything held but not assigned, so the disk cost is visible even when
   // nothing currently asks for it.
   for (const f of store.files || []) {
-    if (!assignments.includes(f.rel_path)) rows.push(nodeStoreRow(n, f.rel_path, f, false));
+    if (!assignments.includes(f.rel_path)) {
+      rows.push(nodeStoreRow(n, f.rel_path, f, false, target, repoFiles));
+    }
   }
 
   const facts = [
@@ -4040,7 +4218,14 @@ function nodeStorePanel(n, assignments, repoFiles) {
   ]);
 }
 
-function nodeStoreRow(n, rel, file, isAssigned) {
+// storeFileAsModel adapts a store listing entry to the shape deployAction
+// reads. The two views describe the same file and were built a fortnight
+// apart; this is the seam rather than a second set of rules.
+function storeFileAsModel(rel, file) {
+  return { rel_path: rel, ingested: file.ingested, serve_name: file.serve_name };
+}
+
+function nodeStoreRow(n, rel, file, isAssigned, target, repoFiles) {
   // Three states worth telling apart, and the middle one is the one people
   // otherwise mistake for a failure.
   let state = 'held';
@@ -4061,6 +4246,12 @@ function nodeStoreRow(n, rel, file, isAssigned) {
     el('span', { class: 'node-store-name', text: rel }),
     el('span', { class: `repo-badge ${state}`, title, text: state }),
     file && file.size_bytes ? el('span', { class: 'muted', text: bytes(file.size_bytes) }) : null,
+    // Serving it is the next thing anybody wants after a model has arrived, so
+    // it is offered on the row rather than on another tab. deployAction is the
+    // same control the deploy panel used, taking its state from the same
+    // deploy target — one implementation, one set of rules about when a node
+    // can be told to load something.
+    file && target ? deployAction(null, target, storeFileAsModel(rel, file), repoFiles, true) : null,
     isAssigned
       ? el('button', {
           class: 'link-btn', type: 'button', text: 'Unassign',
@@ -4098,11 +4289,17 @@ function nodeAssignControl(n, assignments, repoFiles) {
 // should have; the agent notices on its next report and fetches for itself,
 // which is why the toast talks about minutes rather than showing a progress bar.
 async function assignModel(node, relPath) {
-  await api(`/api/v1/nodes/${encodeURIComponent(node)}/models`, {
+  const res = await api(`/api/v1/nodes/${encodeURIComponent(node)}/models`, {
     method: 'POST',
     body: JSON.stringify({ rel_path: relPath }),
   });
-  toast(`${relPath} assigned to ${node}. It will fetch it on its next report.`);
+  // The fit verdict comes back from the assignment itself — this is the one
+  // call that knows both which weights and which machine. Said only when it is
+  // not a plain "fits", because that is the case worth interrupting for.
+  const fit = res.fit && res.fit.verdict && res.fit.verdict !== 'fits'
+    ? ` Fit on ${node}: ${res.fit.verdict}.`
+    : '';
+  toast(`${relPath} assigned to ${node}. It fetches on its next report.${fit}`);
   await renderHuginn();
 }
 
@@ -4169,10 +4366,19 @@ async function renderAdminModels(body) {
     api('/api/v1/repo').catch(() => ({ files: [] })),
   ]);
 
-  // Deploying comes first on the page because it is what you do when the list
-  // below is short — and when it is empty, it is the only thing to do here.
-  const panel = deployPanel(deploy, repo.files || []);
-  if (panel) body.append(panel);
+  // Assigning a model to a machine happens on the Fleet tab, on the card for
+  // the machine it happens to, where the store and the backend that will serve
+  // it are already in front of you. This page is the catalogue: what exists,
+  // how fast it is, and which one is the champion for a job.
+  if ((deploy.targets || []).length) {
+    body.append(el('p', { class: 'hint muted' },
+      document.createTextNode('To put one of these on a machine, use '),
+      el('button', {
+        class: 'link-btn', type: 'button', text: 'Fleet',
+        onclick: () => { huginn.tab = 'fleet'; syncHuginnNav(); renderHuginn().catch(showError); },
+      }),
+      document.createTextNode(' — each card carries that host\u2019s store and backend.')));
+  }
 
   // Measured speed, keyed the same way the cards are folded. A model on two
   // hosts has two sets of numbers; the card shows the best observed rate,
@@ -4415,215 +4621,7 @@ async function setChampion(task, modelID) {
    it is probed before anything is stored — a fleet host that says "reach me
    here" is a host making a claim, and this server confirms claims. */
 
-const DEPLOY_POLL_MS = 5000;
 
-let deployWatch = null;
-
-function stopDeployWatch() {
-  if (deployWatch) clearInterval(deployWatch);
-  deployWatch = null;
-}
-
-// A deployment is in flight while the node has been asked for something it
-// cannot yet serve. That is the only condition worth polling for, so the panel
-// stops asking the moment every row has settled.
-function deployInFlight(deploy) {
-  return (deploy.targets || []).some((t) =>
-    (t.models || []).some((m) => m.assigned && !m.ingested));
-}
-
-function deployPanel(deploy, repoFiles) {
-  if (!deploy.configured) return null;
-  const host = el('div', { class: 'deploy-panel' });
-  paintDeploy(host, deploy, repoFiles);
-  return host;
-}
-
-function paintDeploy(host, deploy, repoFiles) {
-  host.innerHTML = '';
-  const targets = deploy.targets || [];
-
-  host.append(el('div', { class: 'deploy-head' }, [
-    el('h3', { text: 'Run a model on a fleet node' }),
-    el('button', {
-      class: 'ghost-btn', type: 'button', text: 'Refresh',
-      onclick: () => refreshDeploy(host, repoFiles).catch(showError),
-    }),
-  ]));
-
-  if (!targets.length) {
-    host.append(el('p', { class: 'muted', text:
-      'No fleet nodes are reporting yet. A node appears here once its agent has '
-      + 'pushed once — see Huginn → Fleet.' }));
-    return;
-  }
-
-  host.append(deployForm(host, targets, repoFiles));
-  if (!deploy.editable) {
-    host.append(el('p', { class: 'hint muted', text:
-      'Backends cannot be declared from the browser on this server, so a node can be '
-      + 'given weights here but the backend that serves them is an edit to backends.json.' }));
-  }
-  for (const t of targets) host.append(deployTargetCard(host, t, repoFiles, deploy.editable));
-
-  if (deployInFlight(deploy) && !deployWatch) watchDeploy(host, repoFiles);
-}
-
-async function refreshDeploy(host, repoFiles) {
-  const data = await api('/api/v1/nodes/deploy-targets');
-  if (!host.isConnected) return;
-  paintDeploy(host, data, repoFiles);
-}
-
-// The panel keeps itself current while a transfer is running, and stops when
-// nothing is moving. A form being typed into is never redrawn out from under
-// the person typing — the same rule the fleet cards follow.
-function watchDeploy(host, repoFiles) {
-  stopDeployWatch();
-  deployWatch = setInterval(async () => {
-    if (huginn.tab !== 'models' || state.view !== 'huginn' || !host.isConnected) {
-      return stopDeployWatch();
-    }
-    if (document.hidden || host.contains(document.activeElement)) return;
-    let data;
-    try {
-      data = await api('/api/v1/nodes/deploy-targets');
-    } catch {
-      // Leave what is on screen. A failed poll is not news about the fleet.
-      return;
-    }
-    if (!host.isConnected) return stopDeployWatch();
-    paintDeploy(host, data, repoFiles);
-    // Everything has arrived: stop asking. paintDeploy starts a fresh watch
-    // if a later deployment puts something back in flight.
-    if (!deployInFlight(data)) stopDeployWatch();
-  }, DEPLOY_POLL_MS);
-}
-
-// The control the whole panel exists for: this file, that machine.
-function deployForm(host, targets, repoFiles) {
-  const available = (repoFiles || []).filter((f) => !f.missing);
-  if (!available.length) {
-    return el('p', { class: 'muted', text:
-      'Nothing in the model repository to send yet. Download one first in '
-      + 'Huginn → Repository.' });
-  }
-
-  const fileSelect = el('select', { class: 'deploy-select' }, [
-    el('option', { value: '', text: 'Choose a model…' }),
-    ...available.map((f) => el('option', {
-      value: f.rel_path,
-      text: `${f.rel_path} · ${bytes(f.size_bytes)}`,
-    })),
-  ]);
-  const nodeSelect = el('select', { class: 'deploy-select' }, [
-    el('option', { value: '', text: 'Choose a node…' }),
-    ...targets.map((t) => el('option', {
-      value: t.node,
-      text: t.runtime ? `${t.node} (${t.runtime})` : `${t.node} — no runtime`,
-    })),
-  ]);
-
-  const go = el('button', { class: 'ghost-btn', type: 'button', text: 'Deploy' });
-  go.addEventListener('click', () => {
-    const rel = fileSelect.value;
-    const nodeName = nodeSelect.value;
-    if (!rel || !nodeName) {
-      toast('Pick a model and a node first.', true);
-      return;
-    }
-    const target = targets.find((t) => t.node === nodeName);
-    // A node with no runtime will hold the file and never serve it. That is a
-    // legitimate thing to want and a common thing to do by accident, so it is
-    // said before the gigabytes move rather than after.
-    if (target && !target.runtime && !window.confirm(
-      `${nodeName} reports no model runtime, so it will store ${rel} but cannot serve it.\n\n`
-      + 'Send it anyway?')) return;
-    deployToNode(host, nodeName, rel, repoFiles).catch(showError);
-  });
-
-  return el('div', { class: 'deploy-form' }, [fileSelect, nodeSelect, go]);
-}
-
-async function deployToNode(host, nodeName, relPath, repoFiles) {
-  const res = await api(`/api/v1/nodes/${encodeURIComponent(nodeName)}/models`, {
-    method: 'POST',
-    body: JSON.stringify({ rel_path: relPath }),
-  });
-  // The fit verdict is advisory and comes back from the assignment itself —
-  // this is the one place that knows both which weights and which machine.
-  const fit = res.fit && res.fit.verdict && res.fit.verdict !== 'fits'
-    ? ` Fit on ${nodeName}: ${res.fit.verdict}.`
-    : '';
-  toast(`${relPath} assigned to ${nodeName}. It fetches on its next report.${fit}`);
-  await refreshDeploy(host, repoFiles);
-  watchDeploy(host, repoFiles);
-}
-
-function deployTargetCard(host, t, repoFiles, editable) {
-  const rows = (t.models || []).map((m) => deployModelRow(host, t, m, repoFiles, editable));
-
-  const facts = [
-    t.runtime || 'no runtime',
-    t.backend ? `backend ${t.backend}` : 'no backend declared',
-    t.store_free_bytes ? `${bytes(t.store_free_bytes)} free` : null,
-  ].filter(Boolean).join(' · ');
-
-  return el('div', { class: `deploy-target ${t.stale ? 'stale' : ''}` }, [
-    el('div', { class: 'deploy-target-head' }, [
-      el('span', { class: 'deploy-node', text: t.node }),
-      el('span', { class: 'muted', text: facts }),
-      t.stale
-        ? el('span', {
-            class: 'repo-badge missing',
-            title: `Last heard from ${relativeTime(t.last_seen_at ? new Date(t.last_seen_at) : null)}. `
-              + 'What follows is the last thing it said, not what is true now.',
-            text: 'out of contact',
-          })
-        : null,
-    ]),
-    t.store_error
-      ? el('div', { class: 'repo-job-error', text: t.store_error })
-      : null,
-    rows.length
-      ? el('div', { class: 'deploy-rows' }, rows)
-      : el('p', { class: 'muted', text: 'No models here yet.' }),
-  ]);
-}
-
-// One file on one node, and the single next thing that could be done to it.
-function deployModelRow(host, t, m, repoFiles, editable) {
-  let state = 'held';
-  let title = 'On this host and ready.';
-  if (!m.present && !m.partial) {
-    state = 'pending';
-    title = 'Assigned but not fetched yet. The agent collects it on its next report.';
-  } else if (m.partial) {
-    state = 'fetching';
-    title = 'A transfer is part-way through. An interruption resumes rather than restarting.';
-  } else if (!m.ingested) {
-    state = 'unimported';
-    title = t.runtime
-      ? 'The file is here; the runtime has not imported it yet. On Ollama this is a '
-        + 'multi-gigabyte copy and takes minutes.'
-      : 'The file is here, but this node has no runtime configured to serve it.';
-  }
-
-  return el('div', { class: `node-store-row ${state}` }, [
-    el('span', { class: `node-store-dot ${state}`, title }),
-    el('span', { class: 'node-store-name', text: m.rel_path }),
-    el('span', { class: `repo-badge ${state}`, title, text: state }),
-    m.size_bytes ? el('span', { class: 'muted', text: bytes(m.size_bytes) }) : null,
-    deployAction(host, t, m, repoFiles, editable),
-    m.assigned
-      ? el('button', {
-          class: 'link-btn', type: 'button', text: 'Unassign',
-          title: 'Stops this node being expected to hold it. Nothing is deleted from the host.',
-          onclick: () => unassignModel(t.node, m.rel_path).catch(showError),
-        })
-      : null,
-  ]);
-}
 
 // What is offered depends on how far the model has got, and each answer is a
 // different act rather than a different label for one.
@@ -4642,7 +4640,7 @@ function deployAction(host, t, m, repoFiles, editable) {
     return el('button', {
       class: 'link-btn', type: 'button', text: 'Load',
       title: `Load ${m.serve_name} into memory on ${t.backend} and keep it there.`,
-      onclick: () => loadOnNode(host, t.backend, m.serve_name, repoFiles).catch(showError),
+      onclick: () => loadOnNode(t.backend, m.serve_name).catch(showError),
     });
   }
 
@@ -4760,14 +4758,14 @@ async function serveOnNode(t, m, backend) {
   await renderHuginn();
 }
 
-async function loadOnNode(host, backendName, modelID, repoFiles) {
+async function loadOnNode(backendName, modelID) {
   toast(`Loading ${modelID} on ${backendName}…`);
   await api('/api/v1/models/load', {
     method: 'POST',
     body: JSON.stringify({ backend: backendName, model_id: modelID }),
   });
   toast(`${modelID} loaded on ${backendName}.`);
-  await refreshDeploy(host, repoFiles);
+  await renderHuginn();
 }
 
 /* ---------- the model repository ----------

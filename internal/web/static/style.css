@@ -784,6 +784,32 @@ button:disabled { opacity: .5; cursor: default; }
 .composer button { width: 42px; height: 42px; padding: 0; border-radius: 50%; }
 .hint { padding: 0 20px 12px; font-size: 11.5px; text-align: center; }
 
+/* What a machine is declared to serve, under that machine's own gauges. A row
+   per backend, reading left to right as: is it up, what is it called, what
+   kind, what does it serve by default. */
+.node-backends { display: grid; gap: 6px; margin-top: 10px; }
+.node-backend {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; font-size: 12.5px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.node-backend-name { font-weight: 500; }
+/* The setting reads as a sentence — "rig ollama serves q" — so the label goes
+   with the control rather than above it, and the pair is what gets pushed to
+   the right rather than the select alone. */
+.node-backend-serves { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.node-backend-serves .muted { font-size: 12px; }
+.node-model-select { max-width: 240px; font-size: 12px; }
+/* Status as a dot rather than a word: the name is what is being read, and a
+   backend that is up should not spend a word saying so on every card. */
+.backend-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.backend-dot.ok { background: var(--gain); }
+.backend-dot.unreachable { background: var(--error); }
+
+/* The half of this page that is not a machine. Set apart so the cards above
+   read as a list of hosts rather than as the first section of a table. */
+.fleet-section { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
+
 /* One publisher's newest releases: a row per repository, the facts on the left
    and the single action that applies on the right. Deliberately plainer than a
    Hub search card — this is a list to scan for a name, not a shortlist to
@@ -877,7 +903,13 @@ button:disabled { opacity: .5; cursor: default; }
 .view-btn:hover { color: var(--text); background: var(--surface-2); }
 .view-btn.active { color: var(--text); background: var(--surface-2); border-color: var(--border); }
 
-.view { display: none; flex: 1; min-height: 0; }
+/* min-width: 0 alongside min-height: 0, and for the same reason: a flex item
+   defaults to min-*: auto and refuses to shrink below its content. A wide
+   table inside a pane — the backends list is ten columns — was pushing the
+   view past the window, which widened every card on the page and carried
+   their right-hand controls off the edge. .table-wrap scrolls on its own once
+   the view is allowed to be narrower than what is inside it. */
+.view { display: none; flex: 1; min-height: 0; min-width: 0; }
 .view.active { display: flex; }
 
 .check { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-top: 10px; }
@@ -949,8 +981,11 @@ button:disabled { opacity: .5; cursor: default; }
 }
 .msg:hover .to-pad, .to-pad:focus-visible { opacity: 1; color: var(--accent); }
 
+/* Wraps rather than running off the side. These forms sit on pages that are no
+   longer the only thing in the pane — the add-backend form now lives under a
+   column of fleet cards — and a row of six fields is wider than what is left. */
 .row-form {
-  display: flex; gap: 8px; padding: 12px 20px;
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 20px;
   border-bottom: 1px solid var(--border); background: var(--surface);
 }
 .row-form input[type=text], .row-form input:not([type]), .row-form input[type=date],
