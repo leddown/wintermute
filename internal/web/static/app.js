@@ -3727,7 +3727,7 @@ async function renderAdminFleet(body) {
   // between them: this host is busy — is it busy *serving a model*? Neither
   // list can say that alone, and reading them in two tabs meant holding one in
   // your head while looking at the other.
-  const [data, models, assigned, repo, deploy, backends] = await Promise.all([
+  const [data, models, assigned, repo, deploy, backends, system, live] = await Promise.all([
     api('/api/v1/nodes'),
     api('/api/v1/models').catch(() => ({ models: [] })),
     // Which models each node should be holding, and what there is to choose
@@ -3740,6 +3740,11 @@ async function renderAdminFleet(body) {
     // list knows what has actually been declared. A card needs both.
     api('/api/v1/nodes/deploy-targets').catch(() => ({ configured: false, targets: [] })),
     api('/api/v1/backends').catch(() => ({ backends: [] })),
+    // This server is a machine in the fleet too. Its hardware comes from the
+    // same probe the Utilities page reads, and its live rates from the same
+    // poll that drives the sidebar dials.
+    api('/api/v1/system').catch(() => null),
+    api('/api/v1/utilities/resources').catch(() => null),
   ]);
   const targets = new Map((deploy.targets || []).map((t) => [t.node, t]));
   const backendsByNode = new Map();
@@ -3794,8 +3799,18 @@ async function renderAdminFleet(body) {
         + `  ${location.origin}/api/v1/node-agent/install.sh \\\n`
         + '  | sudo sh -s -- --token "$TOKEN"' }),
     );
+    if (system) {
+      body.append(serverCard(system, live, (backendsByNode.get('') || []).filter((b) => !b.cloud),
+        backends, repo, residentByBackend));
+    }
+    body.append(serverBackendsSection(backends));
     body.append(fleetGuideLink());
     return;
+  }
+
+  if (system) {
+    body.append(serverCard(system, live, (backendsByNode.get('') || []).filter((b) => !b.cloud),
+      backends, repo, residentByBackend));
   }
 
   for (const n of data.nodes) {
@@ -3829,10 +3844,104 @@ async function renderAdminFleet(body) {
   body.append(fleetGuideLink());
 }
 
+// This server, as one of the machines.
+//
+// It was a column of dials in the sidebar and a table on another tab, which
+// made the one host that is definitely running something the only one without
+// a card. The shape is deliberately the node card's: same gauges, same backend
+// rows, so the page reads as a list of machines rather than as an exception
+// followed by a list.
+//
+// What it cannot show is what a node reports and this probe does not: load
+// average, uptime, and a store of assigned weights. The repository is this
+// server's equivalent of a store and lives on its own tab, so the card links
+// there rather than restating it.
+function serverCard(h, live, backends, all, repo, residentByBackend) {
+  const usedMB = h.ram_total_mb && h.ram_available_mb
+    ? h.ram_total_mb - h.ram_available_mb : 0;
+  const gpu = (h.gpus || [])[0];
+
+  const gaugeRow = [
+    gauge('CPU', live && !live.warming ? `${(live.cpu_percent || 0).toFixed(0)}%` : '—',
+      live ? live.cpu_percent || 0 : 0),
+    gauge('Memory', usedMB ? mb(usedMB) : '—',
+      h.ram_total_mb ? (usedMB / h.ram_total_mb) * 100 : 0),
+  ];
+  if (gpu && gpu.total_mb) {
+    const usedVRAM = gpu.total_mb - (gpu.free_mb || 0);
+    gaugeRow.push(gauge('VRAM', mb(usedVRAM), (usedVRAM / gpu.total_mb) * 100));
+  }
+  if (live && !live.warming) {
+    const rx = live.net_rx_bytes_per_sec || 0;
+    const tx = live.net_tx_bytes_per_sec || 0;
+    gaugeRow.push(el('span', { class: 'node-rate', text:
+      `net ${bytes(rx)}/s in · ${bytes(tx)}/s out` }));
+  }
+
+  // Resident models are keyed by backend, and this card owns the backends with
+  // no node — so what is loaded here is what those backends are holding.
+  const names = new Set(backends.map((b) => b.name));
+  const resident = [];
+  for (const [backend, list] of residentByBackend) {
+    if (names.has(backend)) resident.push(...list);
+  }
+
+  const facts = [
+    h.cpu_model || null,
+    h.cpu_cores ? `${h.cpu_cores} cores` : null,
+    h.ram_total_mb ? `${mb(h.ram_total_mb)} RAM` : null,
+    h.nvidia_smi_present ? null : 'no nvidia-smi',
+  ].filter(Boolean).join(' · ');
+
+  return el('div', { class: 'node-card server-card' }, [
+    el('div', { class: 'node-head' }, [
+      // The probe names the host when it can; failing that, the address this
+      // browser reached it on, which is at least true. The chip says which
+      // machine this is either way, so the name never has to.
+      el('span', { class: 'node-name', text: h.host || location.hostname || 'server' }),
+      el('span', { class: 'node-state here', text: 'this server' }),
+      h.runs_inference
+        ? null
+        : el('span', { class: 'muted', title:
+          'No backend declared here runs on this host, so its hardware decides no fit '
+          + 'verdict. The machines below are what the models run on.',
+          text: 'serves no models' }),
+    ]),
+    el('div', { class: 'model-facts', text: facts }),
+    (h.gpus || []).length
+      ? el('div', { class: 'node-cards', text:
+        h.gpus.map((g) => `${g.name} (${mb(g.total_mb)})`).join(' · ') })
+      : null,
+    el('div', { class: 'node-gauges' }, gaugeRow),
+    resident.length
+      ? el('div', { class: 'node-models' }, [
+        el('span', { class: 'muted', text: 'serving' }),
+        ...resident.map((m) => el('span', { class: 'host-chip resident', text: m.id })),
+      ])
+      : null,
+    nodeBackends({ name: '' }, backends, null, all),
+    // The repository is this machine's store: the same relationship a node has
+    // with its own directory of weights, and the reason this server has a disk
+    // worth watching at all.
+    repo && repo.status && repo.status.configured
+      ? el('div', { class: 'muted node-store-facts' }, [
+        document.createTextNode(`model repository ${repo.status.root} · `),
+        document.createTextNode(repo.status.available
+          ? `${bytes(repo.status.free_bytes)} free · ${repo.status.file_count || 0} models · `
+          : 'not available · '),
+        el('button', {
+          class: 'link-btn', type: 'button', text: 'Repository',
+          onclick: () => { huginn.tab = 'repo'; syncHuginnNav(); renderHuginn().catch(showError); },
+        }),
+      ])
+      : null,
+  ]);
+}
+
 // The backends that are not on a fleet node, and the controls that belong to
 // the whole set rather than to one machine.
 function serverBackendsSection(d) {
-  const here = (d.backends || []).filter((b) => !b.node);
+  const here = (d.backends || []).filter((b) => !b.node && b.cloud);
   const declared = new Set(d.declared || []);
 
   const rows = here.map((b) => [
@@ -3845,12 +3954,12 @@ function serverBackendsSection(d) {
   ]);
 
   const section = el('div', { class: 'fleet-section' }, [
-    el('h3', { class: 'repo-h', text: 'This server and the cloud' }),
+    el('h3', { class: 'repo-h', text: 'Cloud backends' }),
     here.length
       ? table(['Name', 'Kind', 'Model', 'Status', 'Probed', 'Runs on', 'Note', 'Role',
         'Source', ''], rows)
       : el('p', { class: 'muted', text:
-        'Nothing is declared here — every backend runs on a fleet node above.' }),
+        'None declared. Every backend runs on a machine above.' }),
   ]);
 
   if (d.editable) section.append(addBackendForm(d));
@@ -3908,7 +4017,10 @@ function watchFleet(body, drawn, held) {
     if (nodes.map((n) => n.name).join('\n') !== drawn) {
       return renderHuginn().catch(showError);
     }
-    const cards = body.querySelectorAll('.node-card');
+    // Not the server's card: it shares the node card's styling and is not in
+    // this feed, so counting it here shifted every replacement by one — the
+    // server card became the first node and the last node was drawn twice.
+    const cards = body.querySelectorAll('.node-card:not(.server-card)');
     nodes.forEach((n, i) => {
       const card = cards[i];
       if (!card || card.contains(document.activeElement)) return;

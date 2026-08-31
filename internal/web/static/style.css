@@ -784,6 +784,14 @@ button:disabled { opacity: .5; cursor: default; }
 .composer button { width: 42px; height: 42px; padding: 0; border-radius: 50%; }
 .hint { padding: 0 20px 12px; font-size: 11.5px; text-align: center; }
 
+/* This server, first in the list of machines. Marked by a left edge rather
+   than a different card: it is one of the hosts, not a header for them. */
+.server-card { border-left: 2px solid var(--accent); }
+.node-state.here {
+  font-size: 11px; padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--muted);
+}
+
 /* What a machine is declared to serve, under that machine's own gauges. A row
    per backend, reading left to right as: is it up, what is it called, what
    kind, what does it serve by default. */
