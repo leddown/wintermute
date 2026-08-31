@@ -4809,8 +4809,20 @@ const repoView = { pane: 'disk', timer: null, busy: false };
    browse rather than a search, so it is a tab rather than a filter. What it
    adds beyond the Hub tab is the conversion: a release with no GGUF is offered
    to the converter instead of being a dead end. */
-const RELEASE_ORGS = [['qwen', 'Qwen', 'Qwen']];
-const releaseView = { results: null, loading: false, error: '', org: '' };
+// [pane id, tab label, Hub author]. The third is what the Hub indexes, which is
+// not what anyone calls them: deepseek-ai and mistralai are organisation
+// accounts, DeepSeek and Mistral are the names on the tabs.
+const RELEASE_ORGS = [
+  ['qwen', 'Qwen', 'Qwen'],
+  ['deepseek', 'DeepSeek', 'deepseek-ai'],
+  ['mistral', 'Mistral', 'mistralai'],
+];
+// sort defaults to downloads rather than lastModified, and that is the whole
+// difference between a useful tab and a confusing one. A publisher's newest
+// repositories are not its most interesting: Qwen's most recent pushes are
+// sixty sparse-autoencoder checkpoints from its interpretability suite, and
+// sorting by date buries the model everybody actually wants under them.
+const releaseView = { results: null, loading: false, error: '', org: '', query: '', sort: '', next: '' };
 
 async function renderAdminRepo(body) {
   stopRepoPolling();
@@ -4912,7 +4924,12 @@ function paintRepoPanes(host, filesEl, hubEl, releaseEls) {
     // and the operator who never opens this tab should not spend one.
     const org = RELEASE_ORGS.find(([id]) => id === repoView.pane);
     if (org && releaseView.org !== org[2]) {
-      loadReleases(releaseEls.get(org[0]), org[2]).catch(showError);
+      // The filter belongs to the publisher it was typed for: carrying "3.5-9B"
+      // across to DeepSeek would show an empty tab and no reason for it. The
+      // sort is a preference rather than a term, so that one stays.
+      releaseView.query = '';
+      releaseView.next = '';
+      loadReleases(releaseEls.get(org[0]), org[2], true).catch(showError);
     }
   };
   host.append(el('div', { class: 'hub-tabs' }, panes.map(([id, label]) => el('button', {
@@ -5235,19 +5252,38 @@ async function startRepoDownload(detail, q, button, revision) {
 
 /* ---- one publisher's newest releases ---- */
 
-async function loadReleases(host, org) {
+// orgLabel turns a Hub author into the name on the tab. Everything the
+// operator reads should say Mistral; only the request says mistralai.
+function orgLabel(author) {
+  const found = RELEASE_ORGS.find(([, , hubAuthor]) => hubAuthor === author);
+  return found ? found[1] : author;
+}
+
+async function loadReleases(host, org, reset) {
   releaseView.org = org;
   releaseView.loading = true;
   releaseView.error = '';
-  host.innerHTML = '';
-  host.append(el('p', { class: 'muted', text: `Asking the Hub what ${org} has published…` }));
+  if (reset) {
+    host.innerHTML = '';
+    host.append(el('p', { class: 'muted',
+      text: `Asking the Hub what ${orgLabel(org)} has published…` }));
+  }
 
-  const params = new URLSearchParams({
-    author: org, sort: 'lastModified', limit: '25', gguf: 'false',
-  });
+  const params = new URLSearchParams({ author: org, limit: '25', gguf: 'false' });
+  // Empty means the Hub's default for an author browse, which is downloads
+  // over the last thirty days: recent and used, which is the pair this tab is
+  // for. The select offers the other orderings by name.
+  if (releaseView.sort) params.set('sort', releaseView.sort);
+  // Narrowing within the publisher, so a model that is a year old and still
+  // the one you want is one word away rather than forty pages down.
+  if (releaseView.query) params.set('q', releaseView.query);
+  if (!reset && releaseView.next) params.set('cursor', releaseView.next);
+
   try {
     const data = await api(`/api/v1/hub/search?${params.toString()}`);
-    releaseView.results = data.results || [];
+    const page = data.results || [];
+    releaseView.results = reset ? page : (releaseView.results || []).concat(page);
+    releaseView.next = data.next || '';
   } catch (err) {
     releaseView.error = err.message;
     // Cleared so the next visit retries rather than showing a stale list under
@@ -5261,22 +5297,63 @@ async function loadReleases(host, org) {
 
 function paintReleases(host, org) {
   host.innerHTML = '';
+  const label = orgLabel(org);
+
+  const filter = el('input', {
+    class: 'repo-query', type: 'search', value: releaseView.query,
+    placeholder: `Narrow to a name — "3.5-9B", "coder", "vl"…`,
+    autocomplete: 'off', spellcheck: 'false',
+  });
+  const rerun = () => {
+    releaseView.query = filter.value.trim();
+    releaseView.sort = sort.value;
+    loadReleases(host, org, true).catch(showError);
+  };
+  filter.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') { ev.preventDefault(); rerun(); }
+  });
+  const sort = el('select', { class: 'hub-input', onchange: rerun }, [
+    ['', 'Most downloaded (30d)'],
+    ['downloadsAllTime', 'Most downloaded ever'],
+    ['lastModified', 'Recently updated'],
+    ['likes', 'Most liked'],
+  ].map(([value, label]) => el('option', {
+    value, text: label, selected: releaseView.sort === value,
+  })));
+
+  host.append(
+    el('div', { class: 'release-controls' }, [filter, sort,
+      el('button', { class: 'ghost-btn', type: 'button', text: 'Search', onclick: rerun })]),
+    el('p', { class: 'hint muted', text:
+      `${label}'s repositories. A release carrying GGUF can be downloaded as it is; one `
+      + 'that has only the original safetensors has to be converted first, which this '
+      + 'server can do. Not everything a publisher puts on the Hub is a model.' }),
+  );
+
   if (releaseView.error) {
     host.append(el('p', { class: 'error', text: releaseView.error }));
     return;
   }
   const found = releaseView.results || [];
   if (!found.length) {
-    host.append(el('p', { class: 'muted', text: `The Hub listed nothing for ${org}.` }));
+    host.append(el('p', { class: 'muted', text:
+      releaseView.query
+        ? `Nothing of ${label}'s matched "${releaseView.query}".`
+        : `The Hub listed nothing for ${label}.` }));
     return;
   }
 
-  host.append(el('p', { class: 'hint muted', text:
-    `${org}'s most recently updated repositories. A release carrying GGUF can be `
-    + 'downloaded as it is; one that has only the original safetensors has to be '
-    + 'converted first, which this server can do.' }));
-
   host.append(el('div', { class: 'release-list' }, found.map((m) => releaseRow(m))));
+
+  if (releaseView.next) {
+    host.append(el('button', {
+      class: 'ghost-btn hub-more', type: 'button', text: 'Load more',
+      onclick: (ev) => {
+        ev.currentTarget.disabled = true;
+        loadReleases(host, org, false).catch(showError);
+      },
+    }));
+  }
 }
 
 function releaseRow(m) {
@@ -5291,10 +5368,26 @@ function releaseRow(m) {
     m.gated ? `gated (${m.gated})` : null,
   ].filter(Boolean).join(' · ');
 
+  // has_weights is the server's reading of the repository's own file list: a
+  // root-level GGUF or safetensors. Qwen's interpretability suite is why the
+  // check is not "does it have a parameter count" — sixty-odd SAE-Res
+  // repositories parse as 8B models from their names alone and hold .pt
+  // autoencoder checkpoints, and the converter would only discover that after
+  // a click and a listing.
+  const usable = hasGGUF || Boolean(m.has_weights);
+
   // One action, and which one is a property of the repository rather than a
   // choice. Offering both would mean offering a conversion of weights that
   // somebody has already converted better.
-  const action = hasGGUF
+  const action = !usable
+    ? el('span', {
+        class: 'muted release-note', title:
+          'No GGUF and no safetensors weights: this repository holds something '
+          + 'other than a language model — a dataset, an adapter, or research '
+          + 'artefacts such as sparse autoencoders.',
+        text: 'not a servable model',
+      })
+    : hasGGUF
     ? el('button', {
         class: 'link-btn', type: 'button', text: 'Open on the Hub tab',
         title: 'This release already carries GGUF files — pick a quantisation there.',
@@ -5317,11 +5410,13 @@ function releaseRow(m) {
       el('span', { class: 'muted', text: facts }),
     ]),
     el('span', {
-      class: `repo-badge ${hasGGUF ? 'held' : 'pending'}`,
+      class: `repo-badge ${hasGGUF ? 'held' : (usable ? 'pending' : 'unimported')}`,
       title: hasGGUF
         ? 'GGUF files are published for this release.'
-        : 'Only the original safetensors are published, so it needs converting.',
-      text: hasGGUF ? 'GGUF' : 'safetensors',
+        : (usable
+          ? 'Only the original safetensors are published, so it needs converting.'
+          : 'Neither GGUF nor safetensors weights.'),
+      text: hasGGUF ? 'GGUF' : (usable ? 'safetensors' : 'no weights'),
     }),
     action,
   ]);

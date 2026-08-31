@@ -301,6 +301,16 @@ type HubModel struct {
 	Capabilities []Capability `json:"capabilities,omitempty"`
 	// Quants lists the quantized files in the repository.
 	Quants []HubQuant `json:"quants,omitempty"`
+	// HasWeights reports whether the repository actually carries weights a
+	// server could load or convert: a root-level GGUF or safetensors file.
+	//
+	// It is not the same question as "does it have a parameter count". A count
+	// is guessed from the name when nothing better is published, and a name is
+	// exactly what a repository of something-else-entirely also has: Qwen's
+	// interpretability suite publishes SAE-Res-Qwen3-8B-Base-…, which parses as
+	// an 8B model and is a directory of .pt autoencoder checkpoints. Offering
+	// to convert one wastes a listing to find out there is nothing to convert.
+	HasWeights bool `json:"has_weights,omitempty"`
 	// Fit is the best verdict across every machine that could run this model,
 	// naming the one that earned it. On a server with no fleet that is this
 	// host and Fit.Host is empty, exactly as before.
@@ -490,6 +500,7 @@ func (r hubRecord) model(hosts []*Hardware, contextTokens int) HubModel {
 	if len(r.BaseModels.Models) > 0 {
 		m.BaseModel = r.BaseModels.Models[0].ID
 	}
+	m.HasWeights = hasLoadableWeights(r.Siblings)
 
 	if r.GGUF != nil {
 		// total is a parameter count, not a byte count, despite the name.
@@ -752,6 +763,26 @@ type hubSibling struct {
 	// Size is only returned when the detail endpoint is asked for blobs, and
 	// is zero on a plain search.
 	Size int64 `json:"size"`
+}
+
+// hasLoadableWeights reports whether a file list contains weights this server
+// could do something with.
+//
+// Root level only, and the same two extensions the rest of the program knows:
+// a GGUF it can serve, or safetensors it can convert. A shard in a
+// subdirectory is a second copy of something, and a .pt, .bin or .onnx is a
+// format nothing here reads.
+func hasLoadableWeights(siblings []hubSibling) bool {
+	for _, s := range siblings {
+		name := strings.ToLower(s.Filename)
+		if strings.Contains(name, "/") {
+			continue
+		}
+		if strings.HasSuffix(name, ".safetensors") || strings.HasSuffix(name, ".gguf") {
+			return true
+		}
+	}
+	return false
 }
 
 // groupQuants turns a repository's file list into one entry per quantization,

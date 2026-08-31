@@ -788,6 +788,9 @@ button:disabled { opacity: .5; cursor: default; }
    and the single action that applies on the right. Deliberately plainer than a
    Hub search card — this is a list to scan for a name, not a shortlist to
    compare quantisations in. */
+.release-controls { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; }
+.release-controls .repo-query { flex: 1; min-width: 0; }
+.release-note { font-size: 12px; white-space: nowrap; }
 .release-list { display: grid; gap: 8px; }
 .release-row {
   display: flex; align-items: center; gap: 10px;
