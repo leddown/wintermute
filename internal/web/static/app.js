@@ -4996,6 +4996,24 @@ function paintRepoJobs(host, jobs) {
   for (const j of jobs) host.append(repoJobCard(j));
 }
 
+// The stages each kind of job passes through, in order. They differ, and
+// showing a conversion a "verify" it will never reach — or a download a
+// "convert" — would be counting down to the wrong finish.
+const REPO_PHASES = {
+  download: [['downloading', 'fetch'], ['verifying', 'verify']],
+  convert: [['listing', 'list'], ['downloading', 'fetch'], ['converting', 'convert'],
+    ['hashing', 'hash'], ['filing', 'file']],
+};
+
+// A duration in the units someone waiting actually thinks in.
+function since(iso) {
+  if (!iso) return '';
+  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (secs < 60) return `${Math.round(secs)}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`;
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+}
+
 function repoJobCard(j) {
   const running = j.state === 'running';
   const pct = j.total_bytes ? Math.min(100, (j.done_bytes / j.total_bytes) * 100) : 0;
@@ -5004,12 +5022,32 @@ function repoJobCard(j) {
   // hashing 12GB back off a USB disk looks exactly like a hang. Both get said
   // out loud rather than left to be inferred from a stalled bar.
   const detail = [];
-  if (running && j.phase === 'verifying') detail.push('checking the digest');
-  else if (running && j.attempt > 1) detail.push(`retry ${j.attempt}`);
-  if (j.total_bytes) detail.push(`${bytes(j.done_bytes)} of ${bytes(j.total_bytes)}`);
-  else if (j.done_bytes) detail.push(bytes(j.done_bytes));
-  if (running && j.bytes_per_second) detail.push(`${bytes(j.bytes_per_second)}/s`);
+  if (running && j.attempt > 1) detail.push(`retry ${j.attempt}`);
+  const overrun = j.phase === 'converting' && j.done_bytes > j.total_bytes;
+  if (j.total_bytes && !overrun) {
+    // Converting has no published size to measure against — the figure is the
+    // weights that went in, and the GGUF lands near it. Marked as an estimate
+    // rather than presented as a fact.
+    const of = j.phase === 'converting' ? `~${bytes(j.total_bytes)}` : bytes(j.total_bytes);
+    detail.push(`${bytes(j.done_bytes)} of ${of} (${Math.round(pct)}%)`);
+  } else if (overrun) {
+    // Past the estimate, so the estimate was wrong and a percentage would be a
+    // lie told with a straight face. What is certain is how much has been
+    // written, and that it is still being written.
+    detail.push(`${bytes(j.done_bytes)} written, past the ~${bytes(j.total_bytes)} estimate`);
+  } else if (j.done_bytes) detail.push(bytes(j.done_bytes));
+  if (running && j.phase !== 'converting' && j.bytes_per_second) {
+    detail.push(`${bytes(j.bytes_per_second)}/s`);
+  }
   if (j.resumed_bytes) detail.push(`resumed from ${bytes(j.resumed_bytes)}`);
+  if (running) {
+    // Elapsed answers "should this be done by now"; the gap since the last
+    // change answers "is it still alive", and only the second one distinguishes
+    // a slow step from a dead process.
+    detail.push(`${since(j.started_at)} elapsed`);
+    const idle = (Date.now() - new Date(j.updated_at).getTime()) / 1000;
+    if (idle > 90) detail.push(`nothing has moved for ${since(j.updated_at)}`);
+  }
 
   return el('div', { class: `repo-job ${j.state}` }, [
     el('div', { class: 'repo-job-head' }, [
@@ -5033,14 +5071,33 @@ function repoJobCard(j) {
       el('div', {
         // With no total the server has not said how big the file is yet, so
         // the bar admits it rather than sitting at a fictitious 0%.
-        class: `repo-bar-fill ${running && !j.total_bytes ? 'indeterminate' : ''} ${j.state}`,
-        style: `width:${j.total_bytes ? pct : 100}%`,
+        class: `repo-bar-fill ${running && (!j.total_bytes || overrun) ? 'indeterminate' : ''} ${j.state}`,
+        style: `width:${j.total_bytes && !overrun ? pct : 100}%`,
       }),
     ]),
     el('div', { class: 'repo-job-facts muted', text: detail.join(' · ') }),
+    running ? phaseStrip(j) : null,
+    // What the work itself last said. For a conversion that is the converter's
+    // own log line, which moves every few seconds and names the tensor it is
+    // on — the most direct evidence there is that something is happening.
+    running && j.note ? el('div', { class: 'repo-job-note', text: j.note }) : null,
     j.error ? el('div', { class: 'repo-job-error', text: j.error }) : null,
     el('div', { class: 'muted repo-job-src', text: j.hub_id }),
   ]);
+}
+
+// phaseStrip marks where the job has got to. Stages a job never visits are
+// dropped rather than shown as skipped: a plain download does not convert, and
+// a greyed-out "convert" would invite the question of why it did not.
+function phaseStrip(j) {
+  const phases = REPO_PHASES[j.kind || 'download'];
+  if (!phases) return null;
+  const at = phases.findIndex(([name]) => name === j.phase);
+  if (at < 0) return null;
+  return el('div', { class: 'phase-strip' }, phases.map(([, label], i) => {
+    const state = i < at ? 'past' : (i === at ? 'now' : 'ahead');
+    return el('span', { class: `phase-step ${state}`, text: label });
+  }));
 }
 
 async function forgetRepoJob(id) {

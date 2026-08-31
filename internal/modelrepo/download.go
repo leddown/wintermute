@@ -311,7 +311,9 @@ func (d *Downloader) fetchInto(ctx context.Context, jobID, url, dest string, sp 
 // Read back in a second pass rather than accumulated during the transfer,
 // because a transfer can resume — across retries and across restarts — and a
 // hash taken over one attempt's bytes would be a hash of part of the file.
-func fileSHA256(ctx context.Context, path string) (string, error) {
+// onRead, when given, is called with the running total so a long hash of a
+// large file is visible rather than a silent phase.
+func fileSHA256(ctx context.Context, path string, onRead func(int64)) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -320,6 +322,8 @@ func fileSHA256(ctx context.Context, path string) (string, error) {
 
 	h := sha256.New()
 	buf := make([]byte, copyBuffer)
+	var read int64
+	last := time.Now()
 	for {
 		if err := ctx.Err(); err != nil {
 			return "", err
@@ -327,9 +331,17 @@ func fileSHA256(ctx context.Context, path string) (string, error) {
 		n, readErr := f.Read(buf)
 		if n > 0 {
 			h.Write(buf[:n])
+			read += int64(n)
+			if onRead != nil && time.Since(last) >= progressInterval {
+				last = time.Now()
+				onRead(read)
+			}
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
+				if onRead != nil {
+					onRead(read)
+				}
 				return hex.EncodeToString(h.Sum(nil)), nil
 			}
 			return "", readErr
@@ -492,7 +504,7 @@ func (d *Downloader) verify(ctx context.Context, jobID, part, published string) 
 	}
 	d.repo.jobs.Update(jobID, func(j *Job) { j.Phase = "verifying" })
 
-	sum, err := fileSHA256(ctx, part)
+	sum, err := fileSHA256(ctx, part, nil)
 	if err != nil {
 		return "", fmt.Errorf("verify: %w", err)
 	}

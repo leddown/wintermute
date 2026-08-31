@@ -43,6 +43,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"wintermute/internal/models"
 	"wintermute/internal/store"
@@ -129,6 +131,7 @@ func (d *Downloader) StartConvert(ctx context.Context, hub Lister, req ConvertRe
 	if err != nil {
 		return nil, err
 	}
+	d.repo.jobs.Update(job.ID, func(j *Job) { j.Kind = "convert" })
 	go d.runConvert(jobCtx, job.ID, root, relPath, hub, req, hubID)
 	return job, nil
 }
@@ -193,11 +196,26 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 	// the same reason a download lands in a .part file: a converter killed
 	// half way through leaves a GGUF that is a plausible file and not a model.
 	out := filepath.Join(stage, path.Base(relPath))
+	// The bar now measures the conversion rather than the fetch. F16 out of
+	// BF16 is a cast, so the GGUF lands within a few percent of the weights
+	// that went in — near enough to be worth showing, and shown as an estimate
+	// rather than a promise.
+	var weights int64
+	for _, f := range files {
+		if strings.HasSuffix(strings.ToLower(f.Path), ".safetensors") {
+			weights += f.Size
+		}
+	}
 	jobs.Update(jobID, func(j *Job) {
 		j.Phase = "converting"
-		j.DoneBytes = grand
+		j.DoneBytes = 0
+		j.TotalBytes = weights
+		// Both belong to the transfer that just ended. Left set, "resumed from
+		// 6.2 MB" sits under a bar that is measuring something else entirely.
+		j.ResumedBytes = 0
+		j.Attempt = 0
 	})
-	if err := d.convert(ctx, stage, out); err != nil {
+	if err := d.convert(ctx, jobID, stage, out); err != nil {
 		_ = os.Remove(out)
 		if ctx.Err() != nil {
 			jobs.Finish(jobID, JobCancelled, nil)
@@ -210,8 +228,19 @@ func (d *Downloader) runConvert(ctx context.Context, jobID, root, relPath string
 	// Hashed because nothing upstream published a digest for a file this
 	// server invented. A fleet node verifies what it fetches against this, so
 	// the alternative is a model that can only ever be checked by its length.
-	jobs.Update(jobID, func(j *Job) { j.Phase = "hashing" })
-	sum, err := fileSHA256(ctx, out)
+	outSize := int64(0)
+	if info, err := os.Stat(out); err == nil {
+		outSize = info.Size()
+	}
+	jobs.Update(jobID, func(j *Job) {
+		j.Phase = "hashing"
+		j.DoneBytes = 0
+		j.TotalBytes = outSize
+		j.Note = ""
+	})
+	sum, err := fileSHA256(ctx, out, func(read int64) {
+		jobs.Update(jobID, func(j *Job) { j.DoneBytes = read })
+	})
 	if err != nil {
 		jobs.Finish(jobID, JobFailed, err)
 		return
@@ -286,7 +315,7 @@ func pruneStaging(stagingRoot, from string) {
 // operator configuration and never model output or anything off the Hub — no
 // part of an assignment, a filename or a repository id reaches it as anything
 // but the two path arguments below.
-func (d *Downloader) convert(ctx context.Context, srcDir, outPath string) error {
+func (d *Downloader) convert(ctx context.Context, jobID, srcDir, outPath string) error {
 	fields := strings.Fields(d.ConvertCommand)
 	if len(fields) == 0 {
 		return ErrNoConverter
@@ -303,11 +332,42 @@ func (d *Downloader) convert(ctx context.Context, srcDir, outPath string) error 
 	stderr := &tailWriter{limit: 8 << 10}
 	cmd.Stderr = stderr
 
-	if err := cmd.Run(); err != nil {
+	// Watched while it runs, because this is the step with nothing else to
+	// look at: an hour in which one file grows and one process talks. Both are
+	// reported, so a conversion that is working looks different from one that
+	// has stopped — which is the whole question anyone has about it.
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("converter failed to start: %w", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		tick := time.NewTicker(time.Second)
+		defer tick.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-tick.C:
+				written := int64(0)
+				if info, err := os.Stat(outPath); err == nil {
+					written = info.Size()
+				}
+				line := stderr.LastLine()
+				d.repo.jobs.Update(jobID, func(j *Job) {
+					j.DoneBytes = written
+					j.Note = line
+				})
+			}
+		}
+	}()
+
+	err := cmd.Wait()
+	close(done)
+	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		detail := strings.TrimSpace(stderr.String())
+		detail := stderr.String()
 		if detail == "" {
 			return fmt.Errorf("converter failed: %w", err)
 		}
@@ -387,11 +447,14 @@ func hasSafetensors(files []models.HubFile) bool {
 // A ring would be tidier and is not worth it: this holds kilobytes, the trim
 // runs once per write, and a write here is one log line from a subprocess.
 type tailWriter struct {
+	mu    sync.Mutex
 	buf   []byte
 	limit int
 }
 
 func (t *tailWriter) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	t.buf = append(t.buf, p...)
 	if over := len(t.buf) - t.limit; over > 0 {
 		t.buf = t.buf[over:]
@@ -399,9 +462,21 @@ func (t *tailWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// LastLine is the most recent complete line written, for reporting progress
+// while the process is still running. Read from another goroutine than the one
+// the subprocess writes on, hence the lock.
+func (t *tailWriter) LastLine() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	lines := strings.Split(strings.TrimSpace(string(t.buf)), "\n")
+	return strings.TrimSpace(lines[len(lines)-1])
+}
+
 // String returns what was kept, marked when it is only the tail so nobody
 // reads a truncated first line as the start of the story.
 func (t *tailWriter) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
 	out := strings.TrimSpace(string(t.buf))
 	if len(t.buf) >= t.limit {
 		return "…" + out

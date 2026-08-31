@@ -66,6 +66,17 @@ type Job struct {
 	// Error is set for a failed job and is the operator's only explanation, so
 	// it carries the underlying message rather than a generic one.
 	Error string `json:"error,omitempty"`
+	// Kind is what this job is: "download" for a file fetched as published,
+	// "convert" for a safetensors release turned into a GGUF here. The two pass
+	// through different stages, and a progress display that promised stages a
+	// job will never reach would be counting down to the wrong finish.
+	Kind string `json:"kind,omitempty"`
+	// Note is the last thing the work itself said — for a conversion, the
+	// converter's most recent log line. A phase name tells you which stage is
+	// running; this tells you it is still running, and on what. It is the
+	// difference between a bar that has not moved because the step is long and
+	// one that has not moved because the process died.
+	Note string `json:"note,omitempty"`
 
 	StartedAt  time.Time `json:"started_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -122,6 +133,7 @@ func (r *Jobs) Start(parent context.Context, hubID, filename, relPath string) (*
 	now := time.Now().UTC()
 	job := &Job{
 		ID:        fmt.Sprintf("dl-%d-%d", now.Unix(), r.seq),
+		Kind:      "download",
 		HubID:     hubID,
 		Filename:  filename,
 		RelPath:   relPath,
