@@ -409,10 +409,17 @@ type deployTarget struct {
 	// Runtime is what serves models there, as the agent reports it. Empty
 	// means the node keeps weights and nothing runs them, which is a node that
 	// can be given a model but never asked to serve it.
-	Runtime   string `json:"runtime,omitempty"`
-	StorePath string `json:"store_path,omitempty"`
-	StoreFree int64  `json:"store_free_bytes,omitempty"`
-	StoreErr  string `json:"store_error,omitempty"`
+	Runtime string `json:"runtime,omitempty"`
+	// RuntimeURL is where that runtime answers *as the agent addresses it*,
+	// which is very often loopback. Reported alongside the declared backend
+	// rather than only inside Suggested, because the two disagreeing is the
+	// diagnosis for the commonest failure on this page: a runtime listening on
+	// 127.0.0.1 that the node can reach and this server cannot. It is a report
+	// about the host, not a route anything takes on trust.
+	RuntimeURL string `json:"runtime_url,omitempty"`
+	StorePath  string `json:"store_path,omitempty"`
+	StoreFree  int64  `json:"store_free_bytes,omitempty"`
+	StoreErr   string `json:"store_error,omitempty"`
 	// Controllable reports whether the runtime can be told to load a model.
 	// llama.cpp behind llama-swap loads on its first request instead, so a
 	// false here is not a failure — it is a load step that is somebody else's.
@@ -499,6 +506,7 @@ func (s *Server) handleDeployTargets(w http.ResponseWriter, r *http.Request) {
 		}
 		if n.Store != nil {
 			t.Runtime = n.Store.Runtime
+			t.RuntimeURL = n.Store.RuntimeURL
 			t.StorePath = n.Store.Path
 			t.StoreFree = n.Store.FreeBytes
 			t.StoreErr = n.Store.Error

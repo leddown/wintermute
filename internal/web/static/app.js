@@ -4184,8 +4184,85 @@ function nodeBackends(n, backends, target, all) {
             await renderHuginn();
           }),
       }) : el('span', { class: 'muted', text: 'backends.json' }),
+      backendWhy(b, target),
     ]);
   }));
+}
+
+// Why a dot is not green, in words, on the card itself.
+//
+// The probe already records the reason it could not reach a backend, but it
+// was only ever written into the dot's `title`. A tooltip on an eight-pixel
+// circle is not somewhere anybody looks, and on a touchscreen it cannot be
+// reached at all — so a red dot was the whole of the diagnosis: something is
+// wrong with this backend, and no way to find out what.
+//
+// The three facts that answer it are the note the probe returned, the address
+// it was trying, and when it last tried: an error from ten minutes ago and one
+// from ten seconds ago call for different next moves.
+function backendWhy(b, target) {
+  if (!b.status || b.status === 'ok') return null;
+
+  const line = el('div', { class: `node-backend-why ${b.status}` }, [
+    el('span', { class: 'why-label', text:
+      b.status === 'unreachable' ? 'did not answer' : 'not probed recently' }),
+    b.base_url ? el('span', { class: 'muted', text: `at ${b.base_url}` }) : null,
+    el('span', { class: 'muted', text: `\u00b7 probed ${probedAge(b.probed_at)}` }),
+  ]);
+  // A stale verdict is not a failing one, and re-probing is the whole of the
+  // fix. The sweep covers every backend, which is what the page below the
+  // cards already offers; here it is within reach of the card that raised the
+  // question.
+  const again = el('button', { class: 'link-btn', type: 'button', text: 'Re-probe' });
+  again.addEventListener('click', async () => {
+    again.disabled = true;
+    try {
+      await api('/api/v1/backends/refresh', { method: 'POST' });
+      await renderHuginn();
+    } catch (err) {
+      again.disabled = false;
+      showError(err);
+    }
+  });
+  line.append(again);
+  // The note is the probe's own error text — a dial failure, a 404, a refused
+  // connection. It is the sentence worth reading, so it gets its own line
+  // rather than being run together with the facts above it.
+  if (b.status_note) {
+    line.append(el('div', { class: 'why-note', text: b.status_note }));
+  }
+  const hint = unreachableHint(b, target);
+  if (hint) line.append(el('div', { class: 'why-hint', text: hint }));
+  return line;
+}
+
+// The one comparison that turns "no route to host" into an instruction.
+//
+// The agent on the node says where it reaches its own runtime, and that
+// address is nearly always loopback — the agent and the runtime share a host.
+// So when this server cannot reach the backend and the node reaches it on
+// 127.0.0.1, nothing about the model, the weights or the backend record is
+// wrong: the runtime is bound to loopback. That is the failure this page
+// produces most often and the one the probe's error text names least clearly,
+// so it is spelled out rather than left to be inferred from two URLs sitting
+// near each other.
+function unreachableHint(b, target) {
+  if (b.status !== 'unreachable') return null;
+  const local = target && target.runtime_url;
+  if (!local) return null;
+  let host = '';
+  try { host = new URL(local).hostname; } catch { return null; }
+  if (!/^(127\.|::1$|localhost$)/.test(host)) return null;
+  // The same address on both sides is a runtime that is genuinely down: this
+  // server is dialling the very thing the agent uses, so there is nothing to
+  // say about where it listens.
+  if (b.base_url === local) return null;
+  return `The agent on ${target.node} reaches this runtime at ${local}, so it is `
+    + 'listening on loopback and no other machine can reach it. Bind it to the '
+    + 'network instead \u2014 OLLAMA_HOST=0.0.0.0 for Ollama, --host 0.0.0.0 for '
+    + 'llama.cpp \u2014 and for a runtime inside WSL, forward the port from the '
+    + 'Windows host too: WSL has its own network, and binding inside it is not '
+    + 'enough on its own.';
 }
 
 // The model a backend serves when a conversation names none.

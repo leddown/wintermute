@@ -814,6 +814,30 @@ button:disabled { opacity: .5; cursor: default; }
 .backend-dot.ok { background: var(--gain); }
 .backend-dot.unreachable { background: var(--error); }
 
+/* The reason behind a dot that is not green. It lived in the dot's tooltip,
+   which is unreachable on a touchscreen and unfindable everywhere else, so it
+   is a line of the row now: what happened, where, when, and a way to ask
+   again. Full-width inside the row's own flex box, so it reads as part of that
+   backend rather than as a paragraph between two of them. */
+.node-backend-why {
+  flex-basis: 100%; display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px;
+  font-size: 12px; color: var(--muted);
+}
+.node-backend-why .why-label { color: var(--error); }
+.node-backend-why.unknown .why-label { color: var(--muted); }
+/* The probe's own words: a whole line, and allowed to break, because a dial
+   error carries an address long enough to push a button off the card. */
+.node-backend-why .why-note {
+  flex-basis: 100%; color: var(--text); overflow-wrap: anywhere;
+}
+/* What to do about it, when the two addresses on the card say between them
+   what the error text does not. Set apart from the probe's own words, which
+   are a report; this is advice. */
+.node-backend-why .why-hint {
+  flex-basis: 100%; color: var(--muted); border-left: 2px solid var(--border);
+  padding-left: 8px; line-height: 1.45;
+}
+
 /* The half of this page that is not a machine. Set apart so the cards above
    read as a list of hosts rather than as the first section of a table. */
 .fleet-section { margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--border); }
