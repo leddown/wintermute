@@ -151,9 +151,7 @@ function start(me) {
   // failure this exists to get out of is a backend that is down, and a menu
   // that will not say which ones those are just moves the guess.
   api('/api/v1/backends').then((data) => {
-    state.backends = data.backends || [];
-    renderChatControls();
-    renderCorePicker();
+    setBackends(data.backends);
   }).catch(() => { /* the chat still works on the server default */ });
 }
 
@@ -362,6 +360,25 @@ function isCoreSession(s) {
    one. Switching a model mid-transcript is deliberate and supported — it is
    the whole point of a screen for comparing models, where the interesting
    question is what a different one makes of the same exchange. */
+
+// The one way to replace the backend list.
+//
+// Two pickers read this array — the Core sidebar's and the Assistant's composer
+// strip — and they are painted at different moments. The Assistant's is painted
+// when the surface changes or a session opens, and returning to a surface you
+// were already on does neither: leave the Workspace for Huginn, declare a
+// backend on a node there, come back, and its strip is still showing the list
+// from boot while Core's picker, which has repaint paths of its own, shows the
+// new one. Two dropdowns over one array disagreeing is a bug that reads as the
+// server having two answers.
+//
+// So the assignment and the repaint travel together. Every replacement of
+// state.backends goes through here.
+function setBackends(list) {
+  state.backends = list || [];
+  renderChatControls();
+  renderCorePicker();
+}
 
 function renderCorePicker() {
   const host = $('core-picker');
@@ -4891,7 +4908,7 @@ async function controlModel(backend, modelID, load) {
   // health it shows elsewhere; refresh it so a backend that went away during
   // the operation is not still offered as controllable.
   await api('/api/v1/backends')
-    .then((data) => { state.backends = data.backends || []; })
+    .then((data) => { setBackends(data.backends); })
     .catch(() => { /* the models list is still worth rendering */ });
   await renderHuginn();
   const held = (res.resident || []).length;
@@ -5069,7 +5086,7 @@ async function serveOnNode(t, m, backend) {
   // The backend list this screen filters on is cached; a new one has to reach
   // it before the model cards below can draw its chips.
   await api('/api/v1/backends')
-    .then((data) => { state.backends = data.backends || []; })
+    .then((data) => { setBackends(data.backends); })
     .catch(() => { /* the panel is still worth redrawing */ });
 
   if (reachable) {
