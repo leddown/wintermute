@@ -34,14 +34,42 @@ WorkingDirectory=/var/lib/wintermute
 # ProtectSystem=strict makes everything except StateDirectory read-only, so
 # without a line like this the repository is readable and every download fails
 # with permission denied on a directory that works perfectly from a shell.
-# Uncomment and match it to WINTERMUTE_MODEL_REPO:
+# Uncomment and match it to WINTERMUTE_MODEL_REPO. Note the leading '-':
 #
-#   ReadWritePaths=/mnt/usb-drive/wintermute
+#   ReadWritePaths=-/mnt/usb-drive/wintermute
+#
+# The '-' makes a missing path a warning instead of a fatal error, and it is
+# not optional here. Without it, a directory that is not there fails namespace
+# setup before the binary is executed at all — status=226/NAMESPACE, no log of
+# its own, and nothing about the message says which of the paths in this unit
+# it meant. A repository that has gone missing is a server that cannot
+# download; it should not be a server that cannot start, because that is also
+# the server whose UI initialises the repository.
 #
 # If the drive is mounted by systemd, require it too, so the service does not
-# start against a bare mount point and find the repository uninitialised:
+# start against a bare mount point and find the repository uninitialised. Note
+# the section: RequiresMountsFor= is a [Unit] setting, and systemd answers it
+# in the wrong section with "Unknown key name ... ignoring" in the journal and
+# nothing at all in the unit's status — a dependency that reads as present in
+# the file and does not exist:
 #
+#   [Unit]
 #   RequiresMountsFor=/mnt/usb-drive
+#
+# In a drop-in that means both sections, since ReadWritePaths= above is
+# [Service]. A drop-in also *adds* to ReadWritePaths= rather than replacing it,
+# so clear the list with a bare assignment first if this unit already sets it:
+#
+#   [Unit]
+#   RequiresMountsFor=/mnt/usb-drive
+#
+#   [Service]
+#   ReadWritePaths=
+#   ReadWritePaths=-/mnt/usb-drive/wintermute
+#
+# The directory itself is made and blessed by `wintermuted -init-repo`, run as
+# the service user. Deleting the drive's contents is what makes this necessary
+# again, and it does not need the server running.
 
 
 NoNewPrivileges=true

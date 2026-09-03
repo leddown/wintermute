@@ -37,6 +37,7 @@ WorkingDirectory=/var/lib/wintermute-node
 #
 # A store on a removable or late-mounting disk wants one more line, in [Unit]:
 #
+#   [Unit]
 #   RequiresMountsFor=/srv/models
 #
 # Without it an unmounted drive is not an error. The agent creates the bare

@@ -54,6 +54,9 @@ func run() error {
 			"index any conversation history that is not in the retrieval index yet, and exit")
 		reindex = flag.Bool("reindex-memory", false,
 			"erase the retrieval index and rebuild it with the configured embedder, and exit")
+
+		initRepoFlag = flag.Bool("init-repo", false,
+			"create and bless WINTERMUTE_MODEL_REPO as the model repository, and exit")
 	)
 	flag.Parse()
 
@@ -75,6 +78,13 @@ func run() error {
 	// broken or absent.
 	if *backupTo != "" || *exportMemory != "" || *importMemory != "" {
 		return archive(*backupTo, *exportMemory, *importMemory)
+	}
+
+	// Blessing the repository directory touches neither the database nor a
+	// model, and it is reached for when the server will not start — a
+	// reformatted drive, a fresh install — so it must not require either.
+	if *initRepoFlag {
+		return initRepo(log)
 	}
 
 	// Index maintenance needs the embedder but nothing about chat models, so

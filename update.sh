@@ -119,13 +119,30 @@ else
     case "$MODEL_REPO/" in "${required%/}"/*) REPO_MOUNT="${required%/}" ;; esac
   done
 
+  # Mounted and initialised are two different questions, and only the first
+  # one is fatal. The hang this gate exists to prevent belongs entirely to the
+  # mount: a unit held by RequiresMountsFor= waits on a passphrase nobody can
+  # answer. An uninitialised repository does nothing of the kind — the server
+  # starts and refuses downloads — so refusing to deploy over it closed a
+  # circle instead of a trap, since the marker was created from the UI of the
+  # server the deploy was meant to restore.
+  #
+  # findmnt answers the mount question directly. The marker cannot: it is
+  # absent both when the drive is missing and when a present drive has never
+  # been blessed, which is how a mounted drive came to be reported as unmounted.
+  REPO_MOUNTED=0
+  if [ -n "$REPO_MOUNT" ] && findmnt --mountpoint "$REPO_MOUNT" >/dev/null 2>&1; then
+    REPO_MOUNTED=1
+  fi
+
   if sudo test -e "$MODEL_REPO/.wintermute-repo"; then
     echo "    ✓ $MODEL_REPO is mounted and initialised"
-  elif [ -n "$REPO_MOUNT" ]; then
+  elif [ -n "$REPO_MOUNT" ] && [ "$REPO_MOUNTED" -eq 0 ]; then
     {
-      echo "error: the repository drive is not mounted — $MODEL_REPO carries no"
-      echo "       .wintermute-repo marker, which is how the server itself tells an"
-      echo "       absent drive from its empty mount point."
+      echo "error: the repository drive is not mounted — findmnt reports nothing at"
+      echo "       $REPO_MOUNT, and $MODEL_REPO carries no .wintermute-repo"
+      echo "       marker either, which is how the server itself tells an absent"
+      echo "       drive from its empty mount point."
       echo
       echo "       $SERVICE_NAME.service has RequiresMountsFor=$REPO_MOUNT, so the"
       echo "       restart this script ends with would try to mount it. On an"
@@ -142,11 +159,84 @@ else
     } >&2
     exit 1
   else
-    echo "    ✗ $MODEL_REPO carries no .wintermute-repo marker, so it is either an"
-    echo "      unmounted drive or a directory that has never been initialised from"
-    echo "      Admin → Repository. The server will still start; every download and"
-    echo "      conversion will refuse."
+    if [ "$REPO_MOUNTED" -eq 1 ]; then
+      echo "    ✗ $REPO_MOUNT is mounted, but $MODEL_REPO carries no"
+      echo "      .wintermute-repo marker — a drive that has been reformatted or never"
+      echo "      initialised. The server will still start; every download and conversion"
+      echo "      will refuse until it is blessed. Deploying anyway."
+    else
+      echo "    ✗ $MODEL_REPO carries no .wintermute-repo marker, so it is either an"
+      echo "      unmounted drive or a directory that has never been initialised."
+      echo "      The server will still start; every download and conversion will refuse."
+    fi
+    echo "      To fix it, without needing the server up:"
+    echo "        sudo -u $SERVICE_USER $SERVER_BIN -init-repo"
   fi
+fi
+
+# ProtectSystem=strict turns every ReadWritePaths= entry into a mount the
+# namespace has to build before the binary runs, and a missing directory fails
+# that with status=226/NAMESPACE: no log from the server, because the server
+# never started, and no indication of which path was meant. It is the same
+# class of failure as the one above — a directory that went away takes the
+# whole service with it — so it is caught in the same place, before anything is
+# built, with the fix named.
+#
+# The fix is a '-' rather than the directory, because a repository that has
+# gone missing should cost downloads, not the server.
+echo "==> Writable paths the unit demands"
+MISSING_RW=""
+for rw in $(systemctl show "$SERVICE_NAME" -p ReadWritePaths --value 2>/dev/null || true); do
+  case "$rw" in
+    -*) continue ;;  # already tolerant of an absent path
+  esac
+  if ! sudo test -d "$rw"; then
+    MISSING_RW="$MISSING_RW $rw"
+  fi
+done
+if [ -n "$MISSING_RW" ]; then
+  {
+    echo "error: $SERVICE_NAME.service has ReadWritePaths= naming a directory that is"
+    echo "       not there:$MISSING_RW"
+    echo
+    echo "       Under ProtectSystem=strict that is not a warning — the namespace"
+    echo "       cannot be set up, the service exits 226/NAMESPACE before it runs a"
+    echo "       line of its own code, and the restart this script ends with would"
+    echo "       leave the server down. Refusing before anything is built."
+    echo
+    echo "       Either create the directory:"
+    for rw in $MISSING_RW; do
+      echo "         sudo install -d -o $SERVICE_USER -g $SERVICE_USER -m 0755 $rw"
+    done
+    echo "       or make the unit tolerate its absence, which is what a removable"
+    echo "       drive wants — put a '-' in front of the path in the unit or its"
+    echo "       drop-in, then: sudo systemctl daemon-reload"
+  } >&2
+  exit 1
+fi
+echo "    ✓ every ReadWritePaths= entry exists or tolerates being absent"
+
+# The other half of the same question: a setting systemd never read at all.
+#
+# A key in the wrong section, or misspelled, is not an error — the journal says
+# "Unknown key name ... ignoring" once at load and nothing afterwards, and
+# `systemctl show` reports the property as empty exactly as it would for a unit
+# that never mentioned it. RequiresMountsFor= is the one that matters here,
+# because it is a [Unit] setting sitting next to [Service] ones and an ignored
+# copy is a mount dependency that reads as present in the file and does not
+# exist. Only the ignored-key lines are surfaced: systemd-analyze has opinions
+# about plenty of other things, and a gate that cries wolf gets skipped.
+IGNORED_KEYS=""
+if command -v systemd-analyze >/dev/null 2>&1; then
+  IGNORED_KEYS="$(systemd-analyze verify "$SERVICE_NAME.service" 2>&1 | grep -i "unknown key name" || true)"
+fi
+if [ -n "$IGNORED_KEYS" ]; then
+  echo "    ✗ systemd is ignoring settings in this unit:"
+  printf '%s\n' "$IGNORED_KEYS" | sed 's/^/      /'
+  echo "      Each of these is in the file and not in effect. RequiresMountsFor="
+  echo "      belongs in [Unit]; ReadWritePaths= belongs in [Service]."
+else
+  echo "    ✓ systemd reads every setting in the unit"
 fi
 
 echo "==> Pulling latest changes"

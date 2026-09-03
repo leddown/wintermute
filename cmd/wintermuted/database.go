@@ -37,14 +37,22 @@ var serviceEnvFile = "/etc/wintermute/wintermute.env"
 // WINTERMUTE_DB still wins over both — someone naming a file has said which one
 // they mean.
 func resolveDatabase() (path, source string) {
-	if p := strings.TrimSpace(os.Getenv("WINTERMUTE_DB")); p != "" {
-		return p, "WINTERMUTE_DB in the environment"
+	return resolveSetting("WINTERMUTE_DB", "wintermute.db")
+}
+
+// resolveSetting reports one setting's value and where it came from, by the
+// rule above: the environment first, then the files the service reads, in the
+// order the service reads them. An empty fallback means "nothing configured",
+// and the caller says what that costs.
+func resolveSetting(key, fallback string) (value, source string) {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v, key + " in the environment"
 	}
 	// Set but empty counts as set to LookupEnv, which is what LoadEnvFile
 	// checks before it will write a value. Leaving it in place would let an
-	// exported WINTERMUTE_DB= defeat every file below while looking like
-	// nothing had been set at all.
-	os.Unsetenv("WINTERMUTE_DB")
+	// exported KEY= defeat every file below while looking like nothing had
+	// been set at all.
+	os.Unsetenv(key)
 
 	for _, f := range []string{serviceEnvFile, ".env"} {
 		// A file that cannot be read is not an error here: on a developer's
@@ -53,11 +61,11 @@ func resolveDatabase() (path, source string) {
 		if err := config.LoadEnvFile(f); err != nil {
 			continue
 		}
-		if p := strings.TrimSpace(os.Getenv("WINTERMUTE_DB")); p != "" {
-			return p, f
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v, f
 		}
 	}
-	return "wintermute.db", "the built-in default"
+	return fallback, "the built-in default"
 }
 
 // openManaged opens the database for a command that only touches storage.
