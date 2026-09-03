@@ -51,6 +51,17 @@ type Session struct {
 	// that quietly lost its tools would look like a model that had stopped
 	// being able to do anything, which is a long way to debug from.
 	Tools bool `json:"tools"`
+	// Web decides whether this conversation may look things up on the web. It
+	// is independent of Tools on purpose: a Core chat is toolless so that what
+	// answers is the model rather than the harness, and that is a statement
+	// about apparatus, not about whether the model may check a fact it cannot
+	// know. With this set and Tools false, the session is offered web_search
+	// and fetch_url and nothing else.
+	//
+	// Off by default, and not omitempty for the same reason as the others.
+	// Reaching the network is a capability a session is given, never one it
+	// turns out to have had.
+	Web bool `json:"web"`
 
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -58,12 +69,12 @@ type Session struct {
 
 // sessionColumns is the shared SELECT list, so the scan order below cannot
 // drift from the query.
-const sessionColumns = `id, client_id, title, backend, model, agent_id, record, recall, tools, created_at, updated_at`
+const sessionColumns = `id, client_id, title, backend, model, agent_id, record, recall, tools, web, created_at, updated_at`
 
 func scanSession(row interface{ Scan(...any) error }) (*Session, error) {
 	var sess Session
 	err := row.Scan(&sess.ID, &sess.ClientID, &sess.Title, &sess.Backend, &sess.Model,
-		&sess.AgentID, &sess.Record, &sess.Recall, &sess.Tools, &sess.CreatedAt, &sess.UpdatedAt)
+		&sess.AgentID, &sess.Record, &sess.Recall, &sess.Tools, &sess.Web, &sess.CreatedAt, &sess.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -91,7 +102,7 @@ func (s *Store) CreateSession(ctx context.Context, clientID int64, title, backen
 	return &Session{
 		ID: id, ClientID: clientID, Title: title,
 		Backend: backend, Model: model, AgentID: agentID,
-		Record: true, Recall: true, Tools: tools, CreatedAt: now, UpdatedAt: now,
+		Record: true, Recall: true, Tools: tools, Web: false, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 
@@ -175,6 +186,31 @@ func (s *Store) SetSessionMemory(ctx context.Context, id string, clientID int64,
 		}
 	}
 	return tx.Commit()
+}
+
+// SetSessionWeb grants or withdraws this conversation's access to the web.
+//
+// Unlike the memory switches it destroys nothing and needs no transaction: it
+// changes what the next turn is offered, and turns already taken keep whatever
+// they were answered with. What the model fetched while it had access stays in
+// the transcript, because that is a record of what was actually said.
+//
+// Scoped to the owning client, like every other session lookup here.
+func (s *Store) SetSessionWeb(ctx context.Context, id string, clientID int64, web bool) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE sessions SET web = ?, updated_at = ? WHERE id = ? AND client_id = ?`,
+		web, time.Now().UTC(), id, clientID)
+	if err != nil {
+		return fmt.Errorf("set session web: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("set session web: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // DeleteMessage removes one message from a conversation, scoped to the owning

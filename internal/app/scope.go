@@ -78,6 +78,27 @@ func (s *agentScope) Scope(ctx context.Context, clientID int64, agentID string, 
 	return agentPrompt(agent, s.available(agent)), nil
 }
 
+// ScopeWeb registers web_search and fetch_url alone.
+//
+// This is the Core chat's exception, and the whole of it: a conversation with
+// no agent, no documents and no client actions, which the operator has decided
+// may look something up. Nothing else is registered here — not the knowledge
+// tools, not episodic memory — because the value of that mode is that what
+// answers is the model, and every tool added is another thing answering for it.
+//
+// It reports false rather than an error when no web client is configured. A
+// server with no SEARXNG_URL is not misconfigured, it is a server without web
+// search, and the turn should proceed as the toolless conversation it is.
+func (s *agentScope) ScopeWeb(registry *tool.Registry) (bool, string, error) {
+	if s == nil || s.web == nil {
+		return false, "", nil
+	}
+	if err := websearch.Register(registry, s.web); err != nil {
+		return false, "", fmt.Errorf("web tools: %w", err)
+	}
+	return true, "", nil
+}
+
 // available lists the sources this agent declares that the server can actually
 // serve. An agent asking for the web on a server with no search instance is a
 // configuration mistake, and the model should be told rather than left to

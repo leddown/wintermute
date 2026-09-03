@@ -169,6 +169,7 @@ func (s *Server) Handler() http.Handler {
 	authed("DELETE /api/v1/sessions/{id}", s.handleDeleteSession)
 	authed("PATCH /api/v1/sessions/{id}/model", s.handleSetSessionModel)
 	authed("PATCH /api/v1/sessions/{id}/memory", s.handleSetSessionMemory)
+	authed("PATCH /api/v1/sessions/{id}/web", s.handleSetSessionWeb)
 	authed("DELETE /api/v1/sessions/{id}/messages/{messageID}", s.handleDeleteMessage)
 
 	// Model awareness: hardware, backends, catalog, discovery and planning.
@@ -374,6 +375,49 @@ func (s *Server) handleSetSessionMemory(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	sess.Record, sess.Recall = *req.Record, *req.Recall
+	writeJSON(w, http.StatusOK, sess)
+}
+
+// setSessionWebRequest carries the one switch, as a pointer for the same reason
+// the memory switches are: an omitted field would leave the operator's grant of
+// network access to be inferred from a body that never mentioned it.
+type setSessionWebRequest struct {
+	Web *bool `json:"web"`
+}
+
+// handleSetSessionWeb grants or withdraws one conversation's access to the web.
+//
+// It refuses to grant what the server cannot serve. A session flagged for the
+// web on an installation with no SEARXNG_URL would show a ticked box and offer
+// no tool, and the operator would reasonably conclude the model had chosen not
+// to search — which is a long way from the truth and a long way to debug.
+// Withdrawing is always allowed, so a session cannot be left holding a grant
+// that outlived the configuration.
+func (s *Server) handleSetSessionWeb(w http.ResponseWriter, r *http.Request) {
+	sess, ok := s.session(w, r)
+	if !ok {
+		return
+	}
+	var req setSessionWebRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.Web == nil {
+		writeError(w, http.StatusBadRequest,
+			"web is required, so the resulting state is never inferred")
+		return
+	}
+	if *req.Web && !s.webConfigured {
+		writeError(w, http.StatusBadRequest,
+			"this server has no web search configured (SEARXNG_URL), so there is nothing to grant")
+		return
+	}
+
+	if err := s.store.SetSessionWeb(r.Context(), sess.ID, sess.ClientID, *req.Web); err != nil {
+		s.fail(w, "set session web", err)
+		return
+	}
+	sess.Web = *req.Web
 	writeJSON(w, http.StatusOK, sess)
 }
 

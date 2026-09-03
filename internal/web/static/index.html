@@ -59,32 +59,57 @@
 
     <div class="body">
       <!-- Core: a plain conversation with a model of your choosing.
-           Deliberately not the assistant. It has no tools, no agent library and
-           nothing acting on the network or the filesystem, so what it shows is
-           the model rather than the harness around it — which is what makes it
-           worth anything when deciding whether a model is any good. The server
-           enforces that; see the tools column on sessions.
+           Deliberately not the assistant. It has no agent library and nothing
+           acting on the filesystem, so what it shows is the model rather than
+           the harness around it — which is what makes it worth anything when
+           deciding whether a model is any good. The server enforces that; see
+           the tools column on sessions.
+
+           The one exception is the web, which the composer strip can switch on
+           per conversation: being unable to look something up is a limit of
+           training data, not the point of this mode. It grants web_search and
+           fetch_url and nothing else; see the web column on sessions.
 
            Its conversations are its own, kept apart from the Assistant's by
            that same flag, and created off the record so trying a model out does
            not become the memory the assistant draws on. The recording badge on
-           the composer strip still keeps any one of them. -->
+           the composer strip still keeps any one of them.
+
+           The Agents tab shares this view because it answers the neighbouring
+           question — not which model, but which material — even though what
+           gets scoped by an agent is an Assistant conversation. -->
       <section class="view active" data-view="core">
         <aside class="sidebar">
           <div class="sidebar-head"><span class="muted">Core</span></div>
+          <ul id="core-nav" class="pane-tabs">
+            <li data-pane="chat" class="active">Chat</li>
+            <li data-pane="agents">Agents</li>
+          </ul>
 
-          <div class="sidebar-head" style="margin-top:16px;">
-            <span class="muted">Model</span>
-          </div>
-          <div id="core-picker" class="core-picker"></div>
+          <div class="core-pane" data-pane="chat">
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Model</span>
+            </div>
+            <div id="core-picker" class="core-picker"></div>
 
-          <div class="sidebar-head" style="margin-top:16px;">
-            <span class="muted">Chats</span>
-            <button id="core-new" class="link-btn">New</button>
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Chats</span>
+              <button id="core-new" class="link-btn">New</button>
+            </div>
+            <ul id="core-sessions"></ul>
+            <p class="hint muted">No tools, no documents, no memory of these
+              conversations unless you switch recording on. Just the model.</p>
           </div>
-          <ul id="core-sessions"></ul>
-          <p class="hint muted">No tools, no documents, no memory of these
-            conversations unless you switch recording on. Just the model.</p>
+
+          <div class="core-pane" data-pane="agents" hidden>
+            <div class="sidebar-head" style="margin-top:16px;">
+              <span class="muted">Agents</span>
+              <button id="new-agent" class="link-btn">New</button>
+            </div>
+            <ul id="agent-list"></ul>
+            <p class="hint muted">An agent is a named set of documents and sources.
+              A conversation started against one can read those and nothing else.</p>
+          </div>
         </aside>
 
         <!-- #chat is moved into whichever slot is asking for it — this one,
@@ -95,7 +120,7 @@
              keeps one composer, one handler and one scroll position; see
              placeChat() in app.js. It starts here because this is where the
              app lands. -->
-        <div id="core-chat-slot" class="chat-slot">
+        <div id="core-chat-slot" class="chat-slot core-pane" data-pane="chat">
           <div class="chat-away pane" hidden>
             <div class="pane-body">
               <div class="empty muted">
@@ -127,6 +152,26 @@
             </form>
           </main>
         </div>
+
+        <!-- Agents: a named set of documents and sources that a conversation
+             can be scoped to. It sits beside the Core chat because both are
+             about what is answering — one picks the model, the other picks the
+             material it may read — and neither is a thing being worked on the
+             way a task list or a pad is.
+
+             It is curated here and talked to on the Assistant, which is where
+             "Start a chat" goes: an agent scopes an Assistant conversation, and
+             the server refuses the combination of an agent and a Core chat. -->
+        <main class="pane core-pane" data-pane="agents" hidden>
+          <div class="pane-head">
+            <h2 id="agent-title">Agents</h2>
+            <div class="row-actions">
+              <button id="agent-chat" class="ghost-btn" hidden>Start a chat</button>
+              <button id="agent-delete" class="ghost-btn danger" hidden>Delete</button>
+            </div>
+          </div>
+          <div id="agent-body" class="pane-body"></div>
+        </main>
       </section>
 
       <!-- Workspace: everything that is worked on, and the assistant it is
@@ -136,7 +181,8 @@
 
            The assistant is first because it is the one you talk to; the Core
            chat next door is for judging a model, this one for working with
-           the material below it. -->
+           the material below it. The agents that scope these conversations are
+           curated in Core, beside the model picker. -->
       <section class="view" data-view="workspace">
         <aside class="sidebar">
           <div class="sidebar-head"><span class="muted">Workspace</span></div>
@@ -144,7 +190,6 @@
             <li data-pane="assistant" class="active">Assistant</li>
             <li data-pane="tasks">Tasks</li>
             <li data-pane="scratch">Scratch</li>
-            <li data-pane="agents">Agents</li>
           </ul>
 
           <div class="ws-pane" data-pane="assistant">
@@ -181,16 +226,6 @@
               <button id="new-pad" class="link-btn">New</button>
             </div>
             <ul id="pads"></ul>
-          </div>
-
-          <div class="ws-pane" data-pane="agents" hidden>
-            <div class="sidebar-head" style="margin-top:16px;">
-              <span class="muted">Agents</span>
-              <button id="new-agent" class="link-btn">New</button>
-            </div>
-            <ul id="agent-list"></ul>
-            <p class="hint muted">An agent is a named set of documents and sources.
-              A conversation started against one can read those and nothing else.</p>
           </div>
         </aside>
 
@@ -254,21 +289,6 @@
           </div>
         </main>
 
-        <!-- Agents: a named set of documents and sources that a conversation
-             can be scoped to. It sits here rather than beside the chat because
-             it is a thing that gets curated — like a task list or a pad — and
-             not a thing you talk to. Talking to it happens on the Assistant
-             pane, which is where "Start a chat" goes. -->
-        <main class="pane ws-pane" data-pane="agents" hidden>
-          <div class="pane-head">
-            <h2 id="agent-title">Agents</h2>
-            <div class="row-actions">
-              <button id="agent-chat" class="ghost-btn" hidden>Start a chat</button>
-              <button id="agent-delete" class="ghost-btn danger" hidden>Delete</button>
-            </div>
-          </div>
-          <div id="agent-body" class="pane-body"></div>
-        </main>
       </section>
 
       <!-- Portfolio: the investment ledger moved across from morpheus. -->

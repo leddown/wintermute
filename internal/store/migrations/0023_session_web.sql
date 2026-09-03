@@ -1,0 +1,18 @@
+--- Whether a conversation may reach the web.
+---
+--- A Core chat has no tools at all, which is what makes it a way to judge a
+--- model rather than the harness around it. But "no tools" and "no idea what
+--- happened since training" are different limits, and only the first one is
+--- the point of that mode. This column is the narrow exception: with it set, a
+--- session is offered web_search and fetch_url and nothing else, whatever its
+--- tools column says.
+---
+--- It is a separate column rather than a value of `tools` because the two
+--- answer different questions — what apparatus is in the room, and whether the
+--- model may look something up — and a session can want the second without the
+--- first.
+---
+--- The default is 0, unlike `tools`. Every row that existed before this column
+--- did was a conversation nobody granted internet access to, and reaching the
+--- network is not a capability to hand out by migration.
+ALTER TABLE sessions ADD COLUMN web INTEGER NOT NULL DEFAULT 0;

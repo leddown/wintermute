@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"wintermute/internal/agent"
+	"wintermute/internal/knowledge"
 	"wintermute/internal/llm"
 	"wintermute/internal/models"
 	"wintermute/internal/node"
@@ -641,5 +642,98 @@ func TestCreateSessionRefusesAgentWithoutTools(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// Granting a session the web on a server that has none must fail loudly.
+//
+// The silent version of this is the expensive one: a ticked box, a session flag
+// set, and a model that never searches because nothing was ever registered —
+// which reads as a model declining rather than a server without SEARXNG_URL.
+func TestSessionWebRefusedWhenNoSearchIsConfigured(t *testing.T) {
+	srv, st := newTestServer(t)
+	client, token, err := st.CreateClient(t.Context(), "browser", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(t.Context(), client.ID, "core", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := srv.Handler()
+
+	send := func(body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPatch,
+			"/api/v1/sessions/"+sess.ID+"/web", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		return rec
+	}
+
+	if rec := send(`{"web": true}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("granting the web with no search configured = %d, want 400 (body: %s)",
+			rec.Code, rec.Body.String())
+	}
+	got, err := st.Session(t.Context(), sess.ID, client.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Web {
+		t.Error("a rejected request granted web access anyway")
+	}
+
+	// An omitted switch is refused for the same reason both memory switches
+	// are required: the resulting state must never be inferred.
+	if rec := send(`{}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("empty body = %d, want 400 (body: %s)", rec.Code, rec.Body.String())
+	}
+
+	// Withdrawing is always allowed, even here. A session must never be stuck
+	// holding a grant the server can no longer honour.
+	if rec := send(`{"web": false}`); rec.Code != http.StatusOK {
+		t.Errorf("withdrawing on an unconfigured server = %d, want 200 (body: %s)",
+			rec.Code, rec.Body.String())
+	}
+}
+
+// With search configured, the switch takes effect and the answer says so. The
+// JSON is checked for the field explicitly: a client that cannot tell "no web"
+// from "the server did not mention it" is the same bug as the memory switches'.
+func TestSessionWebGrantedWhenSearchIsConfigured(t *testing.T) {
+	srv, st := newTestServer(t)
+	srv = srv.WithKnowledge(knowledge.NewService(knowledge.NewStore(st.DB())), false, true)
+	client, token, err := st.CreateClient(t.Context(), "browser", store.KindBrowser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(t.Context(), client.ID, "core", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPatch,
+		"/api/v1/sessions/"+sess.ID+"/web", strings.NewReader(`{"web": true}`))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"web":true`) {
+		t.Errorf("response does not state the web grant: %s", rec.Body.String())
+	}
+	got, err := st.Session(t.Context(), sess.ID, client.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Web {
+		t.Error("the grant did not reach the session row")
+	}
+	if got.Tools {
+		t.Error("granting the web turned the rest of the apparatus on as well")
 	}
 }

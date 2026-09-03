@@ -35,6 +35,11 @@ const state = {
   // useful combination. Both default to on; going off the record is always an
   // explicit act.
   record: true, recall: true,
+  // Whether the open conversation may look things up on the web. Only the Core
+  // chat offers this: an Assistant session gets the web from the agent profile
+  // it is scoped to, which is the auditable path. Off by default — reaching
+  // the network is always something the operator asks for.
+  web: false,
 };
 
 function api(path, options = {}) {
@@ -219,8 +224,8 @@ function closeSidebar() {
 // a view of their own called Core, which was accurate about the architecture
 // and useless as a name: it said where the thing sat in the codebase rather
 // than what it was for. What it is for is asking, beside the things being
-// worked on — the tasks, the pads, the agents — rather than in a separate
-// place you navigate away to.
+// worked on — the tasks and the pads — rather than in a separate place you
+// navigate away to.
 //
 // It is the general question: whatever is asked without first deciding which
 // body of material it is about. The chat is not lazy — it loads at boot,
@@ -268,7 +273,7 @@ function chatSlotFor(surface) {
 // chat in it — in which case #chat is left wherever it is, hidden along with
 // the section it is sitting in.
 function wantedSurface() {
-  if (state.view === 'core') return 'core';
+  if (state.view === 'core' && coreView.pane === 'chat') return 'core';
   if (state.view === 'workspace' && ws.pane === 'assistant') return 'assistant';
   return null;
 }
@@ -334,6 +339,7 @@ async function enterSurface(surface) {
 function applySurfaceDefaults(surface) {
   state.record = surface !== 'core';
   state.recall = surface !== 'core';
+  state.web = false;
   if (surface === 'core') state.chatAgent = null;
 }
 
@@ -462,9 +468,54 @@ $('core-new').addEventListener('click', () => newSession('core').catch(showError
 // The view's own loader. The picker needs the backend catalogue, which is
 // fetched at boot but may not have landed by the time somebody clicks Core;
 // painting again here costs nothing and closes that window.
+// Core has two tabs: the chat, and the agents that scope conversations
+// elsewhere. They sit together because both answer "what is answering this" —
+// one picks the model, the other picks the material — where the Workspace's
+// tabs are all things being worked on.
+//
+// The agents pane is lazy and the chat is not: the chat loads at boot because
+// it is where the app lands, and nobody should pay for a list of agents to see
+// it.
+const coreView = { pane: 'chat', agentsLoaded: false };
+
+// Returns the load, so the caller decides what a failure means — the same
+// contract as showWorkspacePane, which this mirrors deliberately.
+function showCorePane(name) {
+  coreView.pane = name;
+  for (const li of document.querySelectorAll('#core-nav li')) {
+    li.classList.toggle('active', li.dataset.pane === name);
+  }
+  for (const node of document.querySelectorAll('.view[data-view="core"] .core-pane')) {
+    node.hidden = node.dataset.pane !== name;
+  }
+  // Coming back to the chat tab while the dock holds the transcript is a
+  // request to see the conversation where it belongs. Leaving the tab hands
+  // #chat nowhere to be, which placeChat handles by hiding it with its slot —
+  // so this must run on the way out as well as the way in.
+  if (name === 'chat' && dock.open) closeDock();
+  else placeChat();
+  return loadCorePane(name);
+}
+
+function loadCorePane(name) {
+  if (name !== 'agents' || coreView.agentsLoaded) return Promise.resolve();
+  coreView.agentsLoaded = true;
+  return loadAgents().catch((err) => { coreView.agentsLoaded = false; throw err; });
+}
+
 function openCore() {
   renderCorePicker();
-  return Promise.resolve();
+  // Reaching the view's loader means what is behind it may be stale, which for
+  // the agents means a profile added or deleted since the last visit.
+  coreView.agentsLoaded = false;
+  return showCorePane(coreView.pane);
+}
+
+for (const li of document.querySelectorAll('#core-nav li')) {
+  li.addEventListener('click', () => {
+    showCorePane(li.dataset.pane).catch(showError);
+    closeSidebar();
+  });
 }
 
 function openDock() {
@@ -956,6 +1007,12 @@ function deleteSession(s) {
 // with no tools; the server is what actually withholds them, and it refuses an
 // agent in the same breath — see handleCreateSession.
 async function newSession(surface = chatSurface.current) {
+  // Take a ticket, for the same reason openSession does: arriving at a surface
+  // starts a transcript load without waiting for it, and a new conversation
+  // opened while one is in the air would be painted over by it — the fresh
+  // composer replaced by the previous chat's messages. Bumping the counter
+  // makes that load keep its answer to itself.
+  ++transcriptLoad;
   const core = surface === 'core';
   if (core) applySurfaceDefaults('core');
   const sess = await api('/api/v1/sessions', {
@@ -992,6 +1049,18 @@ async function newSession(surface = chatSurface.current) {
     state.record = updated.record !== false;
     state.recall = updated.recall !== false;
   }
+  // Same reasoning for the web switch, which is likewise off on a new row: a
+  // box ticked before the first message has to mean the first message can
+  // search, not the second.
+  const wantWeb = state.web;
+  state.web = sess.web === true;
+  if (wantWeb !== state.web) {
+    const updated = await api(`/api/v1/sessions/${sess.id}/web`, {
+      method: 'PATCH',
+      body: JSON.stringify({ web: wantWeb }),
+    });
+    state.web = updated.web === true;
+  }
   renderChatControls();
   renderCorePicker();
   $('messages').replaceChildren(el('div', { class: 'empty muted', text: emptyChatHint() }));
@@ -1005,6 +1074,11 @@ async function newSession(surface = chatSurface.current) {
 function emptyChatHint() {
   if (chatSurface.current === 'core') {
     const where = state.chatModel || state.chatBackend;
+    if (state.web) {
+      return where
+        ? `Talking to ${where}, with the web to look things up in — no documents, no actions.`
+        : 'Pick a model on the left, then ask it anything. It can search the web, and nothing else.';
+    }
     return where
       ? `Talking to ${where}, and nothing else — no tools, no documents.`
       : 'Pick a model on the left, then ask it anything. No tools, no documents.';
@@ -1043,6 +1117,7 @@ async function openSession(id) {
   state.chatModel = opened ? (opened.model || null) : null;
   state.record = !opened || opened.record !== false;
   state.recall = !opened || opened.recall !== false;
+  state.web = Boolean(opened && opened.web === true);
   renderChatControls();
   renderCorePicker();
   const { messages } = await api(`/api/v1/sessions/${id}/messages`);
@@ -1192,9 +1267,11 @@ function renderChatControls() {
   // control that still means something here: whether this is being kept.
   const core = chatSurface.current === 'core';
   if (core) {
-    parts.push(el('span', { class: 'muted', title:
-      'No tools, no documents, no client actions. What you are talking to is the model.',
+    parts.push(el('span', { class: 'muted', title: state.web
+      ? 'No documents and no client actions. The only tools here are web_search and fetch_url.'
+      : 'No tools, no documents, no client actions. What you are talking to is the model.',
     text: state.chatModel || state.chatBackend || 'server default' }));
+    parts.push(webControl());
   }
   if (!core && state.agents.length) {
     parts.push(el('span', { class: 'muted', text: 'New chat as' }), chatAgentSelect());
@@ -1213,6 +1290,62 @@ function renderChatControls() {
   // The strip and the cloud answer the same question — which model is this
   // going to — so they are rebuilt together whenever the backend changes.
   renderWordCloud();
+}
+
+// The Core chat's one exception: whether the model may look something up.
+//
+// A checkbox rather than a badge, because unlike recording this is a grant and
+// not a condition — the question it answers is "may it search", which is what a
+// tickable box asks. It sits in the Core strip alone: an Assistant chat gets
+// the web from its agent profile, where the grant is declared once and shows up
+// in the agent's own record rather than being toggled per conversation.
+//
+// When the server has no SEARXNG_URL there is nothing to grant, so the box is
+// disabled and says why. Offering a switch that silently registers no tool is
+// how you get an afternoon spent wondering why a model refuses to search.
+function webControl() {
+  const configured = Boolean(state.agentAvailable && state.agentAvailable.web);
+  return el('label', {
+    class: 'chat-web',
+    title: configured
+      ? 'Give this conversation web_search and fetch_url, and nothing else. Pages it '
+        + 'fetches are someone else\'s writing, not instructions to it.'
+      : 'This server has no web search configured (SEARXNG_URL), so there is nothing '
+        + 'to switch on.',
+  }, [
+    el('input', {
+      type: 'checkbox',
+      checked: state.web && configured,
+      disabled: !configured,
+      onchange: (e) => setWeb(e.target.checked),
+    }),
+    el('span', { text: 'Search the web' }),
+  ]);
+}
+
+// The server is the authority on what the session ended up with, so the box is
+// repainted from its answer rather than from the click. A refusal — no search
+// configured, a session that has gone — must put the tick back where it was,
+// or the strip would claim access the conversation does not have.
+async function setWeb(on) {
+  if (!state.sessionId) {
+    // No session yet: remember it for the one the next message opens, the same
+    // way the memory switches do.
+    state.web = on;
+    renderChatControls();
+    return;
+  }
+  try {
+    const sess = await api(`/api/v1/sessions/${state.sessionId}/web`, {
+      method: 'PATCH',
+      body: JSON.stringify({ web: on }),
+    });
+    state.web = sess.web === true;
+  } catch (err) {
+    showError(err);
+  }
+  renderChatControls();
+  await loadSessions();
 }
 
 // The recording state, shown as a word rather than a checkbox.
@@ -1821,42 +1954,51 @@ $('agent-delete').addEventListener('click', async () => {
   await loadAgents();
 });
 
-// The agents are curated on one pane of the Workspace and talked to on
-// another, so this crosses a tab rather than a view. The switch closes the dock
-// on the way, so the new conversation lands full size where it was asked for.
+// The agents are curated in Core and talked to on the Workspace's Assistant,
+// so this crosses a view as well as a tab — an agent scopes an Assistant
+// conversation, and the server refuses an agent on a Core chat outright.
+//
+// switchView first, then the pane: the surface a new session belongs to is
+// decided by what is on screen, and creating it from the Core view would make
+// a Core chat with an agent, which is the combination that gets refused.
 $('agent-chat').addEventListener('click', async () => {
   const agent = selectedAgent();
   if (!agent) return;
+  switchView('workspace');
+  // Then the agent, and only then: crossing to a surface reopens the
+  // conversation it last held, which adopts that conversation's agent. Choosing
+  // first would have the arrival overwrite the choice, and the new chat would
+  // be scoped to whichever agent was last talked to.
+  await showWorkspacePane('assistant');
   state.chatAgent = agent.id;
-  showWorkspacePane('assistant').catch(showError);
-  await newSession();
+  await newSession('assistant');
   toast(`New chat as ${agent.name}`);
 });
 
 /* ================= WORKSPACE ================= */
 //
-// Four groups under one tab in the bar: the assistant, the tasks, the scratch
-// pad and the agents. The sidebar swaps along with the pane, because a list of
-// sessions says nothing beside an agenda, a list of task lists says nothing
-// beside a pad, and none of them say anything beside a list of agents.
+// Three groups under one tab in the bar: the assistant, the tasks and the
+// scratch pad. The sidebar swaps along with the pane, because a list of
+// sessions says nothing beside an agenda and a list of task lists says nothing
+// beside a pad.
 //
-// What decides membership is that all four are things being worked on, or
-// worked with. The agents are here rather than beside the chat because an
-// agent is *curated* — a named set of documents and sources, made, added to
-// and pruned — and the chat is what you do with one afterwards. The chat
-// itself is here because asking is not a separate place you navigate away to.
+// What decides membership is that all three are things being worked on, or
+// worked with. The agents used to be here on the grounds that a library is
+// curated like a task list; they are in Core now, beside the model picker,
+// because the question they answer is the same one it answers — what is on the
+// other end of this conversation. The chat itself is here because asking is
+// not a separate place you navigate away to.
 //
 // Each pane loads on its first open rather than when the view does, so
-// arriving at the tasks does not also fetch every pad and every agent. The
-// assistant is the exception: its sessions are fetched at boot, because it is
-// what the app opens on.
+// arriving at the tasks does not also fetch every pad. The assistant is the
+// exception: its sessions are fetched at boot, because it is what the app
+// opens on.
 
 const ws = {
   pane: 'assistant',
   assistantLoaded: true,
   tasksLoaded: false,
   scratchLoaded: false,
-  agentsLoaded: false,
 };
 
 // Returns the load, so the caller decides what a failure means: a tab click
@@ -1891,7 +2033,6 @@ const wsLoaders = {
   assistant: () => Promise.resolve(),
   tasks: renderTasks,
   scratch: loadPads,
-  agents: loadAgents,
 };
 
 function loadWorkspacePane(name) {
@@ -1907,7 +2048,6 @@ function loadWorkspacePane(name) {
 function openWorkspace() {
   ws.tasksLoaded = false;
   ws.scratchLoaded = false;
-  ws.agentsLoaded = false;
   return showWorkspacePane(ws.pane);
 }
 

@@ -121,6 +121,18 @@ type Scoper interface {
 	// taken from an argument the model fills in — the same rule that keeps a
 	// session's document library decided by the session.
 	Scope(ctx context.Context, clientID int64, agentID string, registry *tool.Registry) (prompt string, err error)
+
+	// ScopeWeb registers the web tools alone, for a session that has no tools
+	// but has been granted the network. It is separate from Scope rather than
+	// a flag on it because the two grant by different authority: Scope grants
+	// what an agent profile declares, and this grants what the operator ticked
+	// on one conversation. Collapsing them would make a session's reach depend
+	// on which of the two was consulted first.
+	//
+	// It reports false when the server has no web source configured, so the
+	// caller can frame the turn as toolless rather than promising a tool that
+	// was never registered.
+	ScopeWeb(registry *tool.Registry) (ok bool, prompt string, err error)
 }
 
 // WithScope attaches the profile scoper.
@@ -195,10 +207,16 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 	defs := registry.Definitions()
 
 	// A toolless conversation is framed as one. See PlainPrompt: handing it the
-	// tool-using prompt makes the model narrate calls it cannot make.
+	// tool-using prompt makes the model narrate calls it cannot make. The same
+	// rule decides between the two plain prompts — what the model is told it
+	// has must be what registryFor actually registered, which is why this asks
+	// the registry rather than the session flag.
 	system := a.system
 	if !sess.Tools {
 		system = PlainPrompt
+		if len(defs) > 0 {
+			system = PlainWebPrompt
+		}
 	}
 	system += "\n\n" + todayLine()
 	if extraPrompt != "" {
@@ -373,8 +391,28 @@ func (a *Agent) registryFor(ctx context.Context, sess *store.Session, clientTool
 	// here rather than at the API because this is the only place that can see
 	// every source at once — the server's own, the agent's, and whatever the
 	// harness on the other end has offered.
+	//
+	// The one exception is the web, which is granted per conversation rather
+	// than by an agent profile: sess.Web means "you may look things up", which
+	// is a narrower thing than the apparatus sess.Tools switches on. It is
+	// consulted only here, for a toolless session — a session that has tools
+	// gets the web the way it gets everything else, from the agent it is
+	// scoped to.
 	if !sess.Tools {
-		return tool.NewRegistry(), "", nil
+		registry := tool.NewRegistry()
+		if !sess.Web || a.scope == nil {
+			return registry, "", nil
+		}
+		ok, prompt, err := a.scope.ScopeWeb(registry)
+		if err != nil {
+			return nil, "", err
+		}
+		if !ok {
+			// Configured away, or never configured. Nothing was registered, so
+			// this is a plain toolless turn and must be framed as one.
+			return tool.NewRegistry(), "", nil
+		}
+		return registry, prompt, nil
 	}
 
 	registry := a.serverTools.Clone()

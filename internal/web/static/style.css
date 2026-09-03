@@ -1334,6 +1334,14 @@ dialog h3 { margin: 0; font-size: 15px; }
 .memory-recall { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; opacity: 0.8; }
 .memory-recall input { margin: 0; }
 
+/* The Core chat's web switch, matched to the recall checkbox beside it: they
+   are the same kind of control — a per-conversation grant — and reading as one
+   row is the point. A server with no search configured shows it disabled
+   rather than hiding it, so the absence is visible and has a tooltip. */
+.chat-web { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; opacity: 0.8; }
+.chat-web input { margin: 0; }
+.chat-web:has(input:disabled) { opacity: 0.45; cursor: not-allowed; }
+
 /* An off-the-record chat is marked along its whole edge. The dashed rule reads
    as "not written down" at a glance, from across the room, without anyone
    having to find and read a badge. */

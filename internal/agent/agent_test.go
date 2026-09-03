@@ -385,3 +385,121 @@ func TestSystemPromptCarriesTodaysDate(t *testing.T) {
 		t.Errorf("toolless session lost its plain framing:\n%s", last)
 	}
 }
+
+// webScope is a Scoper that grants only the web, as internal/app's does for a
+// Core chat. configured=false stands for a server with no SEARXNG_URL.
+type webScope struct {
+	configured bool
+	scoped     bool
+}
+
+func (s *webScope) Scope(context.Context, int64, string, *tool.Registry) (string, error) {
+	s.scoped = true
+	return "", nil
+}
+
+func (s *webScope) ScopeWeb(reg *tool.Registry) (bool, string, error) {
+	if !s.configured {
+		return false, "", nil
+	}
+	err := reg.Register(
+		tool.Definition{Name: "web_search", Description: "search", Risk: tool.RiskRead},
+		func(context.Context, json.RawMessage) (string, error) { return "{}", nil })
+	if err != nil {
+		return false, "", err
+	}
+	return true, "", nil
+}
+
+// A Core chat with the web switched on gets the two web tools and nothing else.
+//
+// The three assertions are one fact between them: it is offered the web, it is
+// not offered the server's own tools, and it is told which of those is true.
+// The prompt matters as much as the registry — PlainPrompt states outright that
+// the model cannot search, and a model handed that sentence alongside a working
+// web_search either refuses or apologises for using it.
+func TestToollessSessionWithWebGetsTheWebAndNothingElse(t *testing.T) {
+	reg := tool.NewRegistry()
+	err := reg.Register(
+		tool.Definition{Name: "probe_thing", Description: "lookup", Risk: tool.RiskRead},
+		func(context.Context, json.RawMessage) (string, error) { return "{}", nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	p := &scriptedProvider{responses: []llm.Response{reply("Looked it up.")}}
+	scope := &webScope{configured: true}
+	a, st, _ := newTestAgent(t, p, reg)
+	a = a.WithScope(scope)
+
+	client, _, err := st.CreateClient(context.Background(), "core-client", store.KindHarness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(context.Background(), client.ID, "core", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sess.Web {
+		t.Fatal("a new session came back with web access nobody granted")
+	}
+	if err := st.SetSessionWeb(context.Background(), sess.ID, client.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	sess.Web = true
+
+	// The client offers one of its own, which a toolless session drops whether
+	// or not it has the web: the grant is the network, not the harness.
+	_, err = a.Advance(context.Background(), sess,
+		[]tool.Definition{clientTool("rename_file", tool.RiskWrite)},
+		llm.UserMessage("what happened today"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var names []string
+	for _, d := range p.requests[0].Tools {
+		names = append(names, d.Name)
+	}
+	if len(names) != 1 || names[0] != "web_search" {
+		t.Errorf("toolless web session was offered %v, want [web_search]", names)
+	}
+	if !strings.HasPrefix(p.requests[0].System, PlainWebPrompt) {
+		t.Errorf("web-enabled Core chat was not framed as one:\n%s", p.requests[0].System)
+	}
+	if scope.scoped {
+		t.Error("a toolless session was given the agent-profile scope as well as the web")
+	}
+}
+
+// A server with no web search must produce a plain toolless turn, not a ticked
+// box and an empty promise. The flag is the operator's intent; whether it can
+// be honoured is the server's answer, and the prompt has to follow the answer.
+func TestToollessWebSessionFallsBackWhenWebIsNotConfigured(t *testing.T) {
+	p := &scriptedProvider{responses: []llm.Response{reply("From memory, then.")}}
+	a, st, _ := newTestAgent(t, p, tool.NewRegistry())
+	a = a.WithScope(&webScope{configured: false})
+
+	client, _, err := st.CreateClient(context.Background(), "core-client", store.KindHarness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := st.CreateSession(context.Background(), client.ID, "core", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetSessionWeb(context.Background(), sess.ID, client.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	sess.Web = true
+
+	if _, err := a.Advance(context.Background(), sess, nil, llm.UserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(p.requests[0].Tools); n != 0 {
+		t.Errorf("unconfigured web session was offered %d tools, want 0", n)
+	}
+	if !strings.HasPrefix(p.requests[0].System, PlainPrompt) {
+		t.Errorf("unconfigured web session was told it could search:\n%s", p.requests[0].System)
+	}
+}
