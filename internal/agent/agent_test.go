@@ -386,6 +386,66 @@ func TestSystemPromptCarriesTodaysDate(t *testing.T) {
 	}
 }
 
+// The prompt must name what is actually serving the turn, and claim nothing
+// else.
+//
+// SystemPrompt used to assert "You are Claude, running on Anthropic's API" for
+// every conversation. A session pinned to the local core backend answered
+// "under the hood I'm Claude, running on Anthropic's API" on a turn whose own
+// result named qwen3.8-27b — the model dutifully repeating the only thing it
+// had been told about itself.
+func TestSystemPromptNamesTheBackendServingIt(t *testing.T) {
+	p := &scriptedProvider{responses: []llm.Response{reply("ok")}}
+	a, st, sess := newTestAgent(t, p, tool.NewRegistry())
+
+	if _, err := a.Advance(context.Background(), sess, nil, llm.UserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	system := p.requests[0].System
+	if !strings.Contains(system, "the test backend") {
+		t.Errorf("system prompt does not name the backend serving the turn:\n%s", system)
+	}
+	// The specific words that were wrong, rather than a general vendor sweep:
+	// this is the sentence that was there and must not come back.
+	for _, claim := range []string{"You are Claude", "Anthropic's API"} {
+		if strings.Contains(system, claim) {
+			t.Errorf("system prompt still asserts %q whatever backend answers:\n%s", claim, system)
+		}
+	}
+
+	// It follows the session rather than being fixed at startup: repointing a
+	// conversation at another backend has to change what it is told it is.
+	if err := st.SetSessionModel(context.Background(), sess.ID, "test", "some-local-model"); err != nil {
+		t.Fatal(err)
+	}
+	sess.Backend, sess.Model = "test", "some-local-model"
+	p.responses = append(p.responses, reply("ok"))
+	if _, err := a.Advance(context.Background(), sess, nil, llm.UserMessage("and now?")); err != nil {
+		t.Fatal(err)
+	}
+	if last := p.requests[len(p.requests)-1].System; !strings.Contains(last, "some-local-model") {
+		t.Errorf("repointed session was not told its new model:\n%s", last)
+	}
+
+	// A Core chat is not given it. Its whole purpose is to show the model
+	// rather than the harness, and it never carried the wrong claim either.
+	client, _, err := st.CreateClient(context.Background(), "core", store.KindHarness)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := st.CreateSession(context.Background(), client.ID, "core", "", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.responses = append(p.responses, reply("ok"))
+	if _, err := a.Advance(context.Background(), plain, nil, llm.UserMessage("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if last := p.requests[len(p.requests)-1].System; strings.Contains(last, "This conversation is being served by") {
+		t.Errorf("toolless session was framed with the model line:\n%s", last)
+	}
+}
+
 // webScope is a Scoper that grants only the web, as internal/app's does for a
 // Core chat. configured=false stands for a server with no SEARXNG_URL.
 type webScope struct {

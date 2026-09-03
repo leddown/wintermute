@@ -14,8 +14,9 @@ const state = {
   // person arriving: a question and a model to put it to, with none of the
   // apparatus that makes the Assistant what it is.
   token: null, sessionId: null, sending: false, view: 'core',
-  // The agent a new chat is opened against, and the one being edited in the
-  // Agents view. Null means the unscoped assistant, which is what every
+  // The agent the open conversation is held with — and, with nothing open
+  // yet, the one the next conversation will be. Also the one being edited in
+  // the Agents view. Null means the unscoped assistant, which is what every
   // session was before agents existed.
   chatAgent: null, agents: [], agentAvailable: {}, selectedAgent: null,
   // The backend a chat runs on. Null means the server default — the same
@@ -1291,7 +1292,7 @@ function renderChatControls() {
     parts.push(webControl());
   }
   if (!core && state.agents.length) {
-    parts.push(el('span', { class: 'muted', text: 'New chat as' }), chatAgentSelect());
+    parts.push(el('span', { class: 'muted', text: 'Agent' }), chatAgentSelect());
   }
   if (!core && state.backends.length) {
     parts.push(el('span', { class: 'muted', text: 'Backend' }), chatBackendSelect());
@@ -1433,14 +1434,27 @@ async function setMemory(record, recall) {
   await loadSessions();
 }
 
-// The agent picker. Changing it affects the *next* session rather than the
-// current one: a transcript belongs to the agent it was held with, and
-// re-pointing it halfway would leave the earlier turns unexplainable.
+// The agent picker. It shows which agent the open conversation is held with,
+// and choosing another starts a chat with that one.
+//
+// It used to only set a variable the *next* session would read, which made it
+// silent: with a conversation already open, choosing GRC changed the label and
+// nothing else, and the assistant went on answering out of a session that had
+// no agent and therefore no document tools. The question that exposes it —
+// "can you see my documents?" — then gets a truthful no that reads as a broken
+// library. A control that names the agent has to leave you talking to it.
+//
+// Starting a new conversation rather than re-pointing the open one is
+// deliberate, and is the same thing Core's "Start a chat" does: a transcript
+// belongs to the agent it was held with, and re-scoping it halfway would leave
+// the earlier turns unexplainable. With nothing open yet there is nothing to
+// start — the choice is remembered, and the first message creates the session
+// with it.
 function chatAgentSelect() {
   return el('select', {
     id: 'chat-agent-select',
-    title: 'Which agent a new chat is opened against',
-    onchange: (e) => { state.chatAgent = e.target.value || null; },
+    title: 'Which agent this chat is held with. Choosing another starts a new chat.',
+    onchange: (e) => { selectChatAgent(e.target.value || null).catch(showError); },
   }, [
     el('option', { value: '', text: 'No agent (general assistant)' }),
     ...state.agents.map((a) => {
@@ -1451,11 +1465,33 @@ function chatAgentSelect() {
   ]);
 }
 
-// The backend picker. Unlike the agent, this *does* re-point the open session,
-// via PATCH .../model — switching mid-conversation is the point, and is how a
-// turn stuck on a local model gets escalated to a stronger one without losing
-// the transcript. With no session open there is nothing to patch yet, so the
-// choice is just remembered for the next one.
+async function selectChatAgent(id) {
+  const previous = state.chatAgent || null;
+  if (id === previous) return;
+  state.chatAgent = id;
+  // Nothing open: the first message creates the session, and newSession()
+  // sends whatever is chosen here with it.
+  if (!state.sessionId) { renderChatControls(); return; }
+  try {
+    await newSession();
+  } catch (err) {
+    // The picker must never show a scope the conversation does not have —
+    // that is the whole failure this replaced. Put it back where it was.
+    state.chatAgent = previous;
+    renderChatControls();
+    throw err;
+  }
+  const agent = (state.agents || []).find((a) => a.id === id);
+  toast(agent ? `New chat as ${agent.name}` : 'New chat with no agent');
+}
+
+// The backend picker. Where the agent starts a fresh conversation, this
+// re-points the open one, via PATCH .../model — switching mid-conversation is
+// the point, and is how a turn stuck on a local model gets escalated to a
+// stronger one without losing the transcript. The transcript survives it
+// because a message records which model wrote it, so a conversation held with
+// two of them still reads. With no session open there is nothing to patch
+// yet, so the choice is just remembered for the next one.
 //
 // Each option carries the backend's health, because a name alone cannot
 // distinguish the backend that is serving from the one refusing connections,

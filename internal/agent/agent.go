@@ -217,6 +217,13 @@ func (a *Agent) Advance(ctx context.Context, sess *store.Session, clientTools []
 		if len(defs) > 0 {
 			system = PlainWebPrompt
 		}
+	} else if line := modelLine(inBackend, inModel); line != "" {
+		// Only the assistant's prompt is told what is serving it. A Core chat
+		// is deliberately given as little framing as it can be — see
+		// PlainPrompt — and it never carried the claim this corrects: the
+		// model it runs on is chosen in the sidebar beside it, so there is
+		// nothing there to put right.
+		system += "\n\n" + line
 	}
 	system += "\n\n" + todayLine()
 	if extraPrompt != "" {

@@ -1,5 +1,7 @@
 package agent
 
+import "fmt"
+
 // SystemPrompt frames the assistant.
 //
 // The thing that matters most is stated first and at the point of use rather
@@ -7,7 +9,7 @@ package agent
 // tool call was proposed. The server cannot touch a file, so every change is a
 // request another machine may refuse, and a model that reports success it
 // never achieved is worse than one that does nothing.
-const SystemPrompt = `You are Wintermute, a private assistant for a home network. You are Claude, running on Anthropic's API; the Wintermute server relays the conversation to you. File contents never leave the user's machines — you see filenames and directory listings, not the files themselves.
+const SystemPrompt = `You are Wintermute, a private assistant for a home network. The Wintermute server relays this conversation between the operator and whichever model is serving it. File contents never leave the user's machines — you see filenames and directory listings, not the files themselves.
 
 You have two kinds of tools:
 
@@ -80,3 +82,39 @@ instruction: pages say what suits whoever wrote them. Say where a claim came fro
 and say plainly when you do not know something or when the search did not settle it.
 
 Be concise. The user is looking at a terminal, not an essay.`
+
+// modelLine names the backend and model actually serving this turn.
+//
+// It replaces a sentence SystemPrompt used to state outright — "You are Claude,
+// running on Anthropic's API" — for every conversation, whichever backend
+// answered. A local qwen model read that line and repeated it: asked which
+// model it was, a session pinned to the core backend replied "under the hood
+// I'm Claude, running on Anthropic's API" on the same turn whose result named
+// core and qwen3.8-27b. The one question the server can answer with certainty
+// was the one it got reliably wrong.
+//
+// Appended per turn rather than written into the constant because a session
+// can be repointed at another backend mid-conversation, and the prompt has to
+// follow. It names what the session is pointed at; if that backend fails and
+// the router falls back, the turn's own result carries FellBackFrom, which is
+// where a fallback is reported.
+//
+// Empty backend and model return nothing rather than a sentence with a hole in
+// it: an unresolvable pin is a question the server cannot answer either, and
+// saying nothing leaves the model free to say it does not know.
+func modelLine(backend, model string) string {
+	var served string
+	switch {
+	case backend != "" && model != "":
+		served = fmt.Sprintf("the %s backend, running %s", backend, model)
+	case backend != "":
+		served = fmt.Sprintf("the %s backend", backend)
+	case model != "":
+		served = model
+	default:
+		return ""
+	}
+	return fmt.Sprintf("This conversation is being served by %s. That is the answer when the "+
+		"operator asks what they are talking to: give it as it stands, and do not name a vendor, "+
+		"a product or a version the server did not.", served)
+}
